@@ -4,3 +4,4 @@
 - Flags computed eagerly (no lazy flags) for simplicity; revisit if slow.
 - Tests: Rust snippet table (testkit) natively; wasm checked via Node selftest.
 - No wasm-pack; plain cargo --target wasm32-unknown-unknown.
+- Thunks are magic eip addresses (0xF0000000+) outside guest RAM; stdcall cleanup done by host. Prebuilt tests/guests/hello.exe is committed so tests need no mingw.

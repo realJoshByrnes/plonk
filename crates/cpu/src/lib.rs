@@ -22,6 +22,8 @@ pub const OF: u32 = 0x800;
 pub enum Exit {
     Halt,
     StepLimit,
+    /// eip entered the thunk range; guest-to-host call. Value is the thunk address.
+    Thunk(u32),
     Unimplemented { eip: u32, opcode: u8 },
     Fault(u32),
 }
@@ -38,6 +40,8 @@ pub struct Cpu {
     pub r: [u32; 8],
     pub eip: u32,
     pub eflags: u32,
+    /// Half-open eip range [lo, hi) that traps out as Exit::Thunk. Empty by default.
+    pub thunk: (u32, u32),
 }
 
 type R<T> = Result<T, Exit>;
@@ -166,6 +170,7 @@ impl Cpu {
 
     pub fn step(&mut self, m: &mut Mem) -> R<()> {
         let start = self.eip;
+        if start >= self.thunk.0 && start < self.thunk.1 { return Err(Exit::Thunk(start)); }
         let op = self.f8(m)?;
         match op {
             // ALU: add/or/adc/sbb/and/sub/xor/cmp, forms 0..5
@@ -253,6 +258,22 @@ impl Cpu {
             0xE8 => { let d = self.f32(m)?; let ret = self.eip; self.push(m, ret)?; self.eip = self.eip.wrapping_add(d); }
             0xE9 => { let d = self.f32(m)?; self.eip = self.eip.wrapping_add(d); }
             0xEB => { let d = self.f8(m)? as i8 as i32 as u32; self.eip = self.eip.wrapping_add(d); }
+            0xFF => {
+                let (sub, rm) = self.modrm(m)?;
+                match sub {
+                    0 | 1 => {
+                        let cf = self.eflags & CF;
+                        let a = self.rd(m, rm, 32)?;
+                        let r = self.alu(if sub == 0 { 0 } else { 5 }, a, 1, 32);
+                        self.wr(m, rm, 32, r)?;
+                        self.eflags = (self.eflags & !CF) | cf;
+                    }
+                    2 => { let t = self.rd(m, rm, 32)?; let ret = self.eip; self.push(m, ret)?; self.eip = t; }
+                    4 => self.eip = self.rd(m, rm, 32)?,
+                    6 => { let v = self.rd(m, rm, 32)?; self.push(m, v)?; }
+                    _ => return Err(Exit::Unimplemented { eip: start, opcode: op }),
+                }
+            }
             0xF4 => return Err(Exit::Halt),
             0xF8 => self.setf(CF, false),
             0xF9 => self.setf(CF, true),
@@ -263,6 +284,23 @@ impl Cpu {
                 if (0x80..=0x8F).contains(&op2) {
                     let d = self.f32(m)?;
                     if self.cond(op2 & 0xF) { self.eip = self.eip.wrapping_add(d); }
+                } else if (0x90..=0x9F).contains(&op2) {
+                    let (_, rm) = self.modrm(m)?;
+                    let v = self.cond(op2 & 0xF) as u32;
+                    self.wr(m, rm, 8, v)?;
+                } else if matches!(op2, 0xB6 | 0xB7 | 0xBE | 0xBF) {
+                    let (reg, rm) = self.modrm(m)?;
+                    let word = op2 & 1 != 0;
+                    let v = match (rm, word) {
+                        (Op::M(a), true) => m.r16(a)? as u32,
+                        (Op::R(i), true) => self.r[i] & 0xffff,
+                        _ => self.rd(m, rm, 8)?,
+                    };
+                    self.r[reg] = match (op2 >= 0xBE, word) {
+                        (false, _) => v,
+                        (true, false) => v as u8 as i8 as i32 as u32,
+                        (true, true) => v as u16 as i16 as i32 as u32,
+                    };
                 } else {
                     return Err(Exit::Unimplemented { eip: start, opcode: op2 });
                 }

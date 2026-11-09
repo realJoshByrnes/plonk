@@ -1,0 +1,7 @@
+[package]
+name = "plonk-pe"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+plonk-mem = { path = "../mem" }

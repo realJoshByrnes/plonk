@@ -15,11 +15,19 @@ version = "0.1.0"
 dependencies = [
  "plonk-cpu",
  "plonk-mem",
+ "plonk-pe",
 ]
 
 [[package]]
 name = "plonk-mem"
 version = "0.1.0"
+
+[[package]]
+name = "plonk-pe"
+version = "0.1.0"
+dependencies = [
+ "plonk-mem",
+]
 
 [[package]]
 name = "plonk-testkit"

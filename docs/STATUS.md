@@ -1,15 +1,17 @@
 # Plonk status
-**Milestone:** M0 done (workspace + toolchain skeleton). Next: M1.
+**Milestone:** M1 done (PE loader + thunks + kernel32 stubs). Next: M2 (Wine feasibility spike, then STOP and report).
 
 ## Works
-- Crates: mem (guest memory, base+addr), cpu (i386 interpreter subset), testkit (snippet harness), host (wasm cdylib).
-- cpu: ALU (8/32-bit), inc/dec, push/pop, mov/lea, modrm+SIB, jcc/jmp/call/ret, flags.
-- `bash scripts/test.sh`: 20 snippet tests + wasm build + Node selftest, quiet output.
+- Crates: mem, cpu, pe (sections/relocs/imports), host (Process, thunk dispatch, wasm exports), testkit.
+- hello.exe (mingw i686, -nostdlib) runs natively and in wasm under Node: GetStdHandle, WriteFile, ExitProcess stubs.
+- Thunks: IAT -> magic addresses 0xF000_0000+; cpu returns Exit::Thunk; host does stdcall return. run() is reentrant (state is in Cpu).
+- cpu adds: FF group, setcc, movzx/movsx. 27 snippet tests.
+- `bash scripts/test.sh` = snippets + wasm build + Node (selftest + hello.exe).
 
 ## Gaps
-- No 16-bit ops/prefixes, shifts, mul/div, string ops, 0xFF group, FPU, segments.
-- No PE loader, no thunks. Host guest region is a static 64KB array (placeholder).
+- Guest memory is an owned 8MB Vec, not yet a fixed linear-memory region shared with Wine.
+- No CRT-based exe tested; no 16-bit ops, shifts, mul/div, string ops, FPU, segments/TEB.
 - clang/wasm-ld not installed (needed for M2/M3).
 
 ## Next
-M1: PE loader + thunk traps + kernel32 stubs to run mingw hello.exe.
+M2: time-boxed Wine-on-wasm32 feasibility; written plan with go/no-go + fallback.
