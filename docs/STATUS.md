@@ -21,5 +21,9 @@
 ## Design
 See docs/DESIGN.md (compatibility strategy, Plonk Flat visual spec, layer ownership, open decisions); preview at /web/design.html.
 
-## Next
-Pens/lines/bitmaps, child windows/controls, keyboard, timers, a shell (move/stack windows), WebGL compositor.
+## Next (priority order, hand-off)
+1. G4 Plonk control theme: author .msstyles (windres + generator), have Wine uxtheme load it; needs comctl32/uxtheme DLLs in wine/build.sh and DrawThemeBackground-related NtGdi calls.
+2. Keyboard input + Edit control (WM_KEYDOWN/CHAR, caret, focus), timers, menus (glass popups).
+3. Compatibility meter: enable Wine tests in wine/build.sh, run user32/gdi32 test exes, publish pass counts.
+4. GPU (WebGL) compositor for blur; resize/min/max; taskbar/shell.
+Workflow tips: `LENIENT=1 N=40 ./target/release/examples/run_wine.exe <exe>` shows last syscalls + unimplemented list; `examples/shot.exe <exe> out.ppm "d,x,y;u,x,y"` renders the desktop (convert with web/ppm2png.mjs).
