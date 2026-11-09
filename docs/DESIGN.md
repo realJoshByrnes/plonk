@@ -137,7 +137,7 @@ Open 140ms (fade + scale from 97%, ease-out), close 90ms, minimize to taskbar: s
 | G0 | Software glass compositor + glass chrome + wallpaper | PNG goldens, 15 ms compose for 2 glass windows at 1024x768 (wasm) | done |
 | G1 | GPU compositor (WebGL blur/shadow); keeps software fallback | 60 fps with 8 glass windows | next |
 | G2 | Bitmap/DIB engine: NtGdi DIB sections, BitBlt/StretchBlt/AlphaBlend, icons, cursors | native test: memory DC, DIB section, BitBlt/StretchBlt/AlphaBlend pixels verified | engine done (icons, cursors, palettes, masks pending) |
-| G3 | Font engine + real metrics (bundled fonts) | text layout tests match drawn text | |
+| G3 | Font engine + real metrics (bundled fonts) | text layout tests match drawn text | engine done (Inter regular/semibold); mono, enumeration, ClearType-style AA pending |
 | G4 | Plonk theme as .msstyles, built by a generator; Wine uxtheme loads it; comctl32 v6 | golden PNG per control state, light + dark | |
 | G5 | Popup menus/tooltips as glass surfaces; client glass (dwmapi shim) | Notepad-class apps look native | |
 | G6 | Resize, min/max, taskbar, shell | shell scenario tests | |

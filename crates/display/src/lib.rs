@@ -16,6 +16,8 @@ pub trait Backend {
     /// Colors are 0xAARRGGBB.
     fn fill_rect(&mut self, id: SurfaceId, x: i32, y: i32, w: i32, h: i32, argb: u32);
     fn draw_text(&mut self, id: SurfaceId, x: i32, y: i32, text: &str, argb: u32);
+    /// Anti-aliased text with the bundled UI font; (x, y) is the top-left of the line box.
+    fn draw_text_px(&mut self, id: SurfaceId, x: i32, y: i32, text: &str, argb: u32, px: f32, bold: bool);
     fn blit(&mut self, id: SurfaceId, x: i32, y: i32, w: u32, h: u32, pixels: &[u32], stride: u32);
     /// Shell-side placement of a surface on the desktop.
     fn place(&mut self, id: SurfaceId, x: i32, y: i32, visible: bool);
@@ -126,6 +128,32 @@ impl Backend for SoftBackend {
         let (x0, y0) = (x.max(0), y.max(0));
         let (x1, y1) = ((x + w).min(s.w as i32), (y + h).min(s.h as i32));
         for yy in y0..y1 { for xx in x0..x1 { s.pix[(yy as u32 * s.w + xx as u32) as usize] = argb; } }
+    }
+    fn draw_text_px(&mut self, id: SurfaceId, x: i32, y: i32, text: &str, argb: u32, px: f32, bold: bool) {
+        let Some(s) = self.get(id) else { return };
+        let ca = (argb >> 24) as f32 / 255.0;
+        plonk_fonts::with(|f| {
+            let base = y as f32 + f.vmetrics(px, bold).ascent;
+            let mut pen = x as f32;
+            for c in text.chars() {
+                let g = f.glyph(c, px, bold);
+                let (gx, gy) = (pen.round() as i32 + g.xmin, base.round() as i32 - g.ymin - g.height as i32);
+                for row in 0..g.height as i32 {
+                    for col in 0..g.width as i32 {
+                        let cov = g.coverage[(row as usize) * g.width + col as usize] as f32 / 255.0 * ca;
+                        let (dx, dy) = (gx + col, gy + row);
+                        if cov <= 0.0 || dx < 0 || dy < 0 || dx >= s.w as i32 || dy >= s.h as i32 { continue; }
+                        let i = (dy as u32 * s.w + dx as u32) as usize;
+                        let old = s.pix[i];
+                        let m = |sh: u32| ((old >> sh & 0xff) as f32 * (1.0 - cov) + (argb >> sh & 0xff) as f32 * cov).round() as u32;
+                        let oa = (old >> 24) as f32;
+                        let na = (oa + (255.0 - oa) * cov).round() as u32;
+                        s.pix[i] = na << 24 | m(16) << 16 | m(8) << 8 | m(0);
+                    }
+                }
+                pen += g.advance;
+            }
+        });
     }
     /// 8x8 bitmap font (font8x8, public domain), 8px advance. Non-ASCII renders as '?'.
     fn draw_text(&mut self, id: SurfaceId, x: i32, y: i32, text: &str, argb: u32) {

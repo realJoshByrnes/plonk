@@ -9,6 +9,9 @@ use std::collections::{BTreeMap, VecDeque};
 mod gdi;
 use gdi::Bitmap;
 
+#[derive(Clone)]
+struct FontSpec { px: f32, bold: bool, face: String, raw: Vec<u8> }
+
 const DESKTOP: u32 = 0x10010;
 const WM_CREATE: u32 = 0x01;
 const WM_DESTROY: u32 = 0x02;
@@ -83,6 +86,7 @@ pub struct Wm {
     drag: Option<(u32, i32, i32)>, // hwnd, grab offset
     capture: u32,
     focus: u32,
+    fonts: BTreeMap<u32, FontSpec>,
     bitmaps: BTreeMap<u32, Bitmap>,
     stock_bitmap: u32,
     client_procs_w: [u32; 14],
@@ -94,7 +98,7 @@ impl Wm {
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
-            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
+            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
         };
         w.classes.push(Class { atom: 0xC000, name: "#32769".into(), wndproc: 0, bg: 0, raw: [0; 12], ansi: false });
         w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None, ex_style: 0, id: 0, inst: 0, userdata: 0, proc_override: 0, extra: Vec::new() });
@@ -216,9 +220,9 @@ impl WineProc {
         b.fill_rect(s, ww - 1, 1, 1, wh - 2, a(0.40, 0xFFFFFF));
         b.fill_rect(s, 0, wh - 1, ww, 1, a(0.28, 0xFFFFFF));
         // title (etched: light shadow under dark text)
-        let (tc, ty) = (if active { 0xFF1A_1A1A } else { 0xFF6B_7078 }, BORDER + (CAPTION - 8) / 2);
-        b.draw_text(s, BORDER + 11, ty + 1, &title, a(0.7, 0xFFFFFF));
-        b.draw_text(s, BORDER + 10, ty, &title, tc);
+        let (tc, ty) = (if active { 0xFF1A_1A1A } else { 0xFF6B_7078 }, BORDER + (CAPTION - 15) / 2);
+        b.draw_text_px(s, BORDER + 11, ty + 1, &title, a(0.7, 0xFFFFFF), 13.0, true);
+        b.draw_text_px(s, BORDER + 10, ty, &title, tc, 13.0, true);
         // caption buttons: minimize, maximize, close (neutral glyphs, close gets a red glass pill)
         let bx = ww - BORDER - 3 * CAPBTN_W;
         let (by, bh) = (BORDER + 3, CAPTION - 6);
@@ -545,7 +549,7 @@ impl WineProc {
             "NtUserGetDCEx" => self.new_dc(a[0], None),
             "NtUserReleaseDC" => { self.wm.dcs.remove(&a[1]); 1 }
             "NtUserFillRect" => {
-                let (hdc, r, brush) = (a[0], self.rect_at(a[1])?, a[2]);
+                let (hdc, r, brush) = (a[0], self.lp_rect(a[0], self.rect_at(a[1])?), a[2]);
                 let c = self.brush_argb(brush);
                 self.dc_fill(hdc, r, c);
                 1
@@ -568,7 +572,7 @@ impl WineProc {
                 6 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0xFFFF_FFFF, false)),
                 7 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0xFF00_0000, false)),
                 8 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0, true)),
-                _ => self.gdi_alloc(0x0a0000 | 0x80_0000, Gdi::Font),
+                _ => { let h = self.gdi_alloc(0x0a0000 | 0x80_0000, Gdi::Font); self.wm.fonts.insert(h, FontSpec { px: 12.0, bold: false, face: "Inter".into(), raw: Vec::new() }); h }
             },
             "NtUserInternalGetWindowText" => {
                 let t = self.wm.windows.get(&a[0]).map(|w| w.text.clone()).unwrap_or_default();
@@ -576,22 +580,6 @@ impl WineProc {
                 for (i, c) in u.iter().enumerate() { self.w16(a[1] + i as u32 * 2, *c)?; }
                 if a[2] > 0 { self.w16(a[1] + u.len() as u32 * 2, 0)?; }
                 u.len() as u32
-            }
-            "NtGdiGetTextMetricsW" => {
-                let tm: [(u32, u32); 11] = [(0, 8), (4, 7), (8, 1), (12, 0), (16, 0), (20, 8), (24, 8), (28, 400), (32, 0), (36, 96), (40, 96)];
-                for (o, v) in tm { self.w32(a[1] + o, v)?; }
-                self.w16(a[1] + 44, 32)?; self.w16(a[1] + 46, 255)?; self.w16(a[1] + 48, b'?' as u16)?; self.w16(a[1] + 50, 32)?;
-                self.w32(a[1] + 52, 0)?; self.w32(a[1] + 56, 0)?;
-                1
-            }
-            "NtGdiGetTextExtentExW" => {
-                // (hdc, str, count, max_extent, *fit, *dx, SIZE*, flags): fixed 8x8 cells
-                let n = a[2];
-                if a[4] != 0 { self.w32(a[4], n)?; }
-                if a[5] != 0 { for i in 0..n { self.w32(a[5] + i * 4, (i + 1) * 8)?; } }
-                self.w32(a[6], n * 8)?;
-                self.w32(a[6] + 4, 8)?;
-                1
             }
             "NtGdiGetAndSetDCDword" => { if a[3] != 0 { self.w32(a[3], 0)?; } 1 }
             "NtGdiComputeXformCoefficients" => 1,
@@ -621,25 +609,21 @@ impl WineProc {
                 }
                 2
             }
-            "NtGdiTransformPoints" => { // identity mapping: copy points
-                let (src, dst, n) = (a[1], a[2], a[3]);
-                for i in 0..n * 2 { let v = self.r32(src + i * 4)?; self.w32(dst + i * 4, v)?; }
-                1
-            }
             "NtGdiMoveTo" => {
-                if let Some(dc) = self.wm.dcs.get_mut(&a[0]) { let old = dc.pos; dc.pos = (a[1] as i32, a[2] as i32); if a[3] != 0 { self.w32(a[3], old.0 as u32)?; self.w32(a[3] + 4, old.1 as u32)?; } }
+                let np = self.lp(a[0], a[1] as i32, a[2] as i32);
+                if let Some(dc) = self.wm.dcs.get_mut(&a[0]) { let old = dc.pos; dc.pos = np; if a[3] != 0 { self.w32(a[3], old.0 as u32)?; self.w32(a[3] + 4, old.1 as u32)?; } }
                 1
             }
             "NtGdiLineTo" => {
                 let Some(dc) = self.wm.dcs.get(&a[0]) else { return Ok(Some(0)) };
                 let (from, pen) = (dc.pos, dc.pen);
-                let to = (a[1] as i32, a[2] as i32);
+                let to = self.lp(a[0], a[1] as i32, a[2] as i32);
                 self.dc_line(a[0], from, to, pen);
                 if let Some(dc) = self.wm.dcs.get_mut(&a[0]) { dc.pos = to; }
                 1
             }
             "NtGdiRectangle" => {
-                let (hdc, r) = (a[0], [a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32]);
+                let (hdc, r) = (a[0], self.lp_rect(a[0], [a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32]));
                 let Some(dc) = self.wm.dcs.get(&hdc) else { return Ok(Some(0)) };
                 let (brush, pen) = (dc.brush, dc.pen);
                 if !matches!(self.wm.gdi.get(&brush), Some(Gdi::NullBrush)) { let c = self.brush_argb(brush); self.dc_fill(hdc, [r[0] + 1, r[1] + 1, r[2] - 1, r[3] - 1], c); }
@@ -647,16 +631,11 @@ impl WineProc {
                 1
             }
             "NtGdiPatBlt" => {
-                let (hdc, x, y, w, h, rop) = (a[0], a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32, a[5]);
+                let (hdc, rop) = (a[0], a[5]);
+                let ((x, y), (w, h)) = (self.lp(hdc, a[1] as i32, a[2] as i32), self.lp_size(hdc, a[3] as i32, a[4] as i32));
                 let Some(dc) = self.wm.dcs.get(&hdc) else { return Ok(Some(0)) };
                 let c = match rop { 0x42 => 0xFF00_0000, 0xFF0062 => 0xFFFF_FFFF, _ => self.brush_argb(dc.brush) };
                 self.dc_fill(hdc, [x, y, x + w, y + h], c);
-                1
-            }
-            "NtGdiExtTextOutW" => {
-                let (hdc, x, y, str_p, count) = (a[0], a[1] as i32, a[2] as i32, a[5], a[6]);
-                let text = self.wstr(str_p, count)?;
-                self.dc_text(hdc, x, y, &text);
                 1
             }
             "NtGdiGetDeviceCaps" => match a[1] { 8 => 1024, 10 => 768, 12 => 32, 14 => 1, 88 | 90 => 96, 24 => 0xFFFF_FFFF, _ => 0 },

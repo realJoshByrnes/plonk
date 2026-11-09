@@ -12,7 +12,7 @@
 - Build Wine DLLs: wine/build.sh in WSL, copy into wine/out (+ nls/ from wine-src/nls). Generators: wine/gen_*.sh.
 
 ## Gaps
-- Text is a fixed 8x8 bitmap font (font8x8; no GDI font engine/metrics); only solid brushes, PatBlt/FillRect; no pens/lines/bitmaps/regions/clipping beyond the paint rect.
+- Text: bundled Inter (fontdue) behind GDI font calls: HfontCreate, text metrics, extents, ExtTextOut with alignment/opaque bg/clipping, GetObject(font); DC window/viewport mapping honoured. One family (+SemiBold for bold); no mono, no hinting, no font enumeration; only solid brushes, PatBlt/FillRect.
 - Shell: drag by title bar, click-to-raise, active/inactive caption, close box (no resize/min/max, no taskbar). Child windows + built-in classes (real Wine BUTTON works: clicks -> WM_COMMAND), window longs, capture/focus, pens/lines/Rectangle, fixed-metrics text, GDI bitmap engine (memory DCs, DDB/DIB sections in guest memory, BitBlt/StretchBlt/AlphaBlend with ROPs, DIB transfer, GetObject). Keyboard, menus, timers, edit controls (untested), multiple threads: not implemented.
 - Registry/VFS minimal; most wineserver requests unimplemented; unimplemented syscalls abort the run (LENIENT=1 in run_wine stubs NtUser/NtGdi).
 - SSE not implemented (build guests with -mno-sse); x87 uses f64 precision. Guest memory capped at 0x7ffe1000 (wasm32 Vec limit).

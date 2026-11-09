@@ -11,3 +11,4 @@ plonk-mem = { path = "../mem" }
 plonk-cpu = { path = "../cpu" }
 plonk-pe = { path = "../pe" }
 plonk-display = { path = "../display" }
+plonk-fonts = { path = "../fonts" }

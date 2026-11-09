@@ -16,6 +16,7 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         PAINTSTRUCT ps;
         char buf[32] = "clicks: ";
         HDC dc = BeginPaint(h, &ps);
+        SetBkMode(dc, TRANSPARENT);
         itoa_(clicks, buf + 8);
         TextOutA(dc, 20, 70, buf, lstrlenA(buf));
         EndPaint(h, &ps);
