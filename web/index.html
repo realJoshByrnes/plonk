@@ -42,11 +42,11 @@ async function boot(app) {
   };
   log("fetching Wine DLLs…");
   await Promise.all([
-    ...manifest.dlls.map((f) => add(`c:\windows\system32\${f}`, `/wine/out/${f}`)),
-    ...manifest.nls.map((f) => add(`nls\${f}`, `/wine/out/nls/${f}`)),
-    add("c:\app.exe", `/tests/guests/${app}`),
+    ...manifest.dlls.map((f) => add(`c:\\windows\\system32\\${f}`, `/wine/out/${f}`)),
+    ...manifest.nls.map((f) => add(`nls\\${f}`, `/wine/out/nls/${f}`)),
+    add("c:\\app.exe", `/tests/guests/${app}`),
   ]);
-  const path = enc.encode("c:\app.exe");
+  const path = enc.encode("c:\\app.exe");
   if (x.plonk_wine_boot(put(path), path.length) !== 0) return log("boot failed: " + msg());
   step();
 }
