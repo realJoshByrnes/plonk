@@ -57,15 +57,17 @@ function step() {
   document.getElementById("out").textContent = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stdout_ptr() >>> 0, x.plonk_wine_stdout_len()));
   const p = x.plonk_wine_compose(W, H) >>> 0;
   ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer.slice(p, p + W * H * 4)), W, H), 0, 0);
-  log(st === 0 ? "running (waiting for input) — click a window's red X to close it" : st === 1 ? "exited with code " + msg() : "error: " + msg());
+  log(st === 0 ? "running (waiting for input) — drag windows by the title bar, click the red X to close" : st === 1 ? "exited with code " + msg() : "error: " + msg());
 }
 
-canvas.addEventListener("pointerdown", (e) => {
-  if (!x) return;
+const pos = (e) => {
   const r = canvas.getBoundingClientRect();
-  x.plonk_wine_click(Math.floor((e.clientX - r.left) * W / r.width), Math.floor((e.clientY - r.top) * H / r.height));
-  step();
-});
+  return [Math.floor((e.clientX - r.left) * W / r.width), Math.floor((e.clientY - r.top) * H / r.height)];
+};
+let down = false;
+canvas.addEventListener("pointerdown", (e) => { if (!x) return; down = true; canvas.setPointerCapture(e.pointerId); x.plonk_wine_mouse(0, ...pos(e)); step(); });
+canvas.addEventListener("pointermove", (e) => { if (!x || !down) return; x.plonk_wine_mouse(1, ...pos(e)); step(); });
+canvas.addEventListener("pointerup", (e) => { if (!x || !down) return; down = false; x.plonk_wine_mouse(2, ...pos(e)); step(); });
 document.getElementById("run").onclick = () => boot();
 boot();
 </script>

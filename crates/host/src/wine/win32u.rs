@@ -67,6 +67,9 @@ pub struct Wm {
     pub backend: SoftBackend,
     time: u32,
     /// Test/debug: when set, EndPaint stores a copy of the painted window surface here.
+    zorder: Vec<u32>, // top-level windows, bottom to top
+    active: u32,
+    drag: Option<(u32, i32, i32)>, // hwnd, grab offset
     pub keep_snapshot: bool,
     pub snapshot: Option<(u32, u32, Vec<u32>)>,
 }
@@ -75,7 +78,7 @@ impl Wm {
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
-            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None,
+            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None,
         };
         w.classes.push(Class { atom: 0xC000, name: "#32769".into(), wndproc: 0, bg: 0, raw: [0; 12], ansi: false });
         w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None });
@@ -91,7 +94,7 @@ impl Wm {
         if style & WS_CAPTION == WS_CAPTION { (BORDER, BORDER + CAPTION) } else { (0, 0) }
     }
     fn client_rect(&self, hwnd: u32) -> Rect {
-        let w = &self.windows[&hwnd];
+        let Some(w) = self.windows.get(&hwnd) else { return [0; 4] };
         let (ox, oy) = Self::client_off(w.style);
         [0, 0, (w.rect[2] - w.rect[0] - 2 * ox).max(0), (w.rect[3] - w.rect[1] - oy - ox).max(0)]
     }
@@ -166,7 +169,9 @@ impl WineProc {
         let title = w.text.clone();
         let b = &mut self.wm.backend;
         b.fill_rect(s, 0, 0, ww, wh, 0xFFD4_D0C8);
-        b.fill_rect(s, BORDER, BORDER, ww - 2 * BORDER, CAPTION - 4, 0xFF0A_246A);
+        let cap = if self.wm.active == hwnd { 0xFF0A_246A } else { 0xFF80_8080 };
+        let b = &mut self.wm.backend;
+        b.fill_rect(s, BORDER, BORDER, ww - 2 * BORDER, CAPTION - 4, cap);
         b.draw_text(s, BORDER + 4, BORDER + 6, &title, 0xFFFF_FFFF);
         b.fill_rect(s, ww - BORDER - 20, BORDER + 2, 18, CAPTION - 8, 0xFFC0_3030); // close box
         b.draw_text(s, ww - BORDER - 15, BORDER + 6, "x", 0xFFFF_FFFF);
@@ -178,6 +183,7 @@ impl WineProc {
         w.visible = show;
         if let Some(s) = w.surface { self.wm.backend.place(s, w.rect[0], w.rect[1], show); }
         if show && !was {
+            if w_is_top(self, hwnd) { let old = std::mem::replace(&mut self.wm.active, hwnd); if old != hwnd { self.repaint_frame(old); } }
             self.paint_frame(hwnd);
             self.invalidate(hwnd, true);
         }
@@ -192,6 +198,8 @@ impl WineProc {
         self.send(hwnd, WM_NCDESTROY, 0, 0)?;
         if let Some(w) = self.wm.windows.remove(&hwnd) { if let Some(s) = w.surface { self.wm.backend.destroy_surface(s); } }
         self.wm.queue.retain(|m| m.hwnd != hwnd);
+        self.wm.zorder.retain(|h| *h != hwnd);
+        if self.wm.active == hwnd { self.wm.active = self.wm.zorder.last().copied().unwrap_or(0); self.repaint_frame(self.wm.active); }
         Ok(true)
     }
 
@@ -294,6 +302,7 @@ impl WineProc {
                 let parent = if a[9] == 0 { DESKTOP } else { a[9] };
                 let toplevel = parent == DESKTOP;
                 let surface = if toplevel { Some(self.wm.backend.create_surface(cx.max(1) as u32, cy.max(1) as u32)) } else { None };
+                if toplevel { self.wm.zorder.push(hwnd); }
                 self.wm.windows.insert(hwnd, Window { class: ci, style: style & !WS_VISIBLE, rect: [x, y, x + cx, y + cy], parent, text: title.clone(), visible: false, invalid: None, needs_erase: false, surface });
                 // CREATESTRUCTW on the guest stack for WM_NCCREATE / WM_CREATE
                 let cs = (self.cpu.r[ESP].wrapping_sub(0x800)) & !15;
@@ -433,19 +442,58 @@ impl WineProc {
     /// Queue a message for a window (input injection from the shell).
     pub fn post_message(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) { self.wm.queue.push_back(Msg { hwnd, msg, wp, lp }); }
 
-    /// Desktop-level mouse click: close box -> WM_CLOSE, client area -> WM_LBUTTONDOWN.
-    pub fn click(&mut self, x: i32, y: i32) {
-        let hit = self.wm.windows.iter().rev().find(|(h, w)| **h != DESKTOP && w.visible && w.surface.is_some()
-            && x >= w.rect[0] && x < w.rect[2] && y >= w.rect[1] && y < w.rect[3]).map(|(h, w)| (*h, w.rect, w.style));
-        let Some((h, r, style)) = hit else { return };
-        let (lx, ly) = (x - r[0], y - r[1]);
-        if style & WS_CAPTION == WS_CAPTION && ly >= BORDER && ly < BORDER + CAPTION - 4 && lx >= r[2] - r[0] - BORDER - 20 {
-            self.post_message(h, WM_CLOSE, 0, 0);
-        } else {
-            let (ox, oy) = Wm::client_off(style);
-            self.post_message(h, 0x201, 1, ((ly - oy) as u32) << 16 | ((lx - ox) as u32 & 0xffff));
+    fn repaint_frame(&mut self, hwnd: u32) {
+        self.paint_frame(hwnd);
+        // the frame repaint wiped the client area: ask the app to repaint it
+        self.invalidate(hwnd, true);
+    }
+
+    fn window_at(&self, x: i32, y: i32) -> Option<u32> {
+        self.wm.zorder.iter().rev().copied().find(|h| {
+            self.wm.windows.get(h).is_some_and(|w| w.visible && x >= w.rect[0] && x < w.rect[2] && y >= w.rect[1] && y < w.rect[3])
+        })
+    }
+
+    /// Desktop mouse events from the shell. kind: 0 = down, 1 = move, 2 = up.
+    pub fn mouse(&mut self, kind: u32, x: i32, y: i32) {
+        match kind {
+            0 => {
+                let Some(h) = self.window_at(x, y) else { return };
+                let (r, style) = { let w = &self.wm.windows[&h]; (w.rect, w.style) };
+                if self.wm.active != h {
+                    let old = std::mem::replace(&mut self.wm.active, h);
+                    self.wm.zorder.retain(|z| *z != h);
+                    self.wm.zorder.push(h);
+                    if let Some(s) = self.wm.windows[&h].surface { self.wm.backend.raise(s); }
+                    self.repaint_frame(old);
+                    self.repaint_frame(h);
+                }
+                let (lx, ly) = (x - r[0], y - r[1]);
+                let in_caption = style & WS_CAPTION == WS_CAPTION && ly >= BORDER && ly < BORDER + CAPTION - 4;
+                if in_caption && lx >= r[2] - r[0] - BORDER - 20 {
+                    self.post_message(h, WM_CLOSE, 0, 0);
+                } else if in_caption {
+                    self.wm.drag = Some((h, lx, ly));
+                } else {
+                    let (ox, oy) = Wm::client_off(style);
+                    self.post_message(h, 0x201, 1, ((ly - oy) as u32) << 16 | ((lx - ox) as u32 & 0xffff));
+                }
+            }
+            1 => {
+                if let Some((h, gx, gy)) = self.wm.drag {
+                    if let Some(w) = self.wm.windows.get_mut(&h) {
+                        let (ww, wh) = (w.rect[2] - w.rect[0], w.rect[3] - w.rect[1]);
+                        w.rect = [x - gx, y - gy, x - gx + ww, y - gy + wh];
+                        if let Some(s) = w.surface { self.wm.backend.place(s, w.rect[0], w.rect[1], w.visible); }
+                    }
+                }
+            }
+            _ => self.wm.drag = None,
         }
     }
+
+    /// Mouse click at a desktop position (down + up).
+    pub fn click(&mut self, x: i32, y: i32) { self.mouse(0, x, y); self.mouse(2, x, y); }
 
     /// Composite all visible windows onto the desktop as RGBA bytes (for ImageData).
     pub fn compose_rgba(&self, w: u32, h: u32) -> Vec<u8> {
@@ -517,3 +565,5 @@ impl WineProc {
         self.wm.backend.draw_text(s, ox + x, oy + y, text, color);
     }
 }
+
+fn w_is_top(p: &WineProc, hwnd: u32) -> bool { p.wm.windows.get(&hwnd).is_some_and(|w| w.surface.is_some()) }

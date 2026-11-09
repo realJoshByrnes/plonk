@@ -38,6 +38,10 @@ pub extern "C" fn plonk_wine_run() -> i32 {
     }
 }
 
+/// kind: 0 = mouse down, 1 = move, 2 = up (desktop coordinates).
+#[no_mangle]
+pub extern "C" fn plonk_wine_mouse(kind: u32, x: i32, y: i32) { wine().mouse(kind, x, y); }
+
 #[no_mangle]
 pub extern "C" fn plonk_wine_click(x: i32, y: i32) { wine().click(x, y); }
 

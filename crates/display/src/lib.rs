@@ -14,6 +14,8 @@ pub trait Backend {
     fn blit(&mut self, id: SurfaceId, x: i32, y: i32, w: u32, h: u32, pixels: &[u32], stride: u32);
     /// Shell-side placement of a surface on the desktop.
     fn place(&mut self, id: SurfaceId, x: i32, y: i32, visible: bool);
+    /// Move a surface to the top of the stacking order.
+    fn raise(&mut self, id: SurfaceId);
     /// Flush to the screen (no-op for headless).
     fn present(&mut self);
 }
@@ -30,6 +32,8 @@ pub struct Surface {
 #[derive(Default)]
 pub struct SoftBackend {
     surfaces: Vec<Option<Surface>>,
+    /// Stacking order, bottom to top.
+    order: Vec<SurfaceId>,
     /// Count of present() calls, handy in tests.
     pub presents: u32,
 }
@@ -44,7 +48,7 @@ impl SoftBackend {
     /// Compose all visible surfaces (in creation order = z-order) onto a w*h desktop.
     pub fn compose(&self, w: u32, h: u32, bg: u32) -> Vec<u32> {
         let mut out = vec![bg; (w * h) as usize];
-        for s in self.surfaces.iter().flatten().filter(|s| s.visible) {
+        for s in self.order.iter().filter_map(|id| self.surface(*id)).filter(|s| s.visible) {
             for sy in 0..s.h as i32 {
                 let dy = sy + s.y;
                 if dy < 0 || dy >= h as i32 { continue; }
@@ -62,7 +66,9 @@ impl SoftBackend {
 impl Backend for SoftBackend {
     fn create_surface(&mut self, w: u32, h: u32) -> SurfaceId {
         self.surfaces.push(Some(Surface { w, h, pix: vec![0xFF00_0000; (w * h) as usize], x: 0, y: 0, visible: false }));
-        self.surfaces.len() as SurfaceId
+        let id = self.surfaces.len() as SurfaceId;
+        self.order.push(id);
+        id
     }
     fn resize_surface(&mut self, id: SurfaceId, w: u32, h: u32) {
         if let Some(s) = self.get(id) {
@@ -73,6 +79,7 @@ impl Backend for SoftBackend {
     }
     fn destroy_surface(&mut self, id: SurfaceId) {
         if let Some(slot) = self.surfaces.get_mut((id as usize).wrapping_sub(1)) { *slot = None; }
+        self.order.retain(|i| *i != id);
     }
     fn fill_rect(&mut self, id: SurfaceId, x: i32, y: i32, w: i32, h: i32, argb: u32) {
         let Some(s) = self.get(id) else { return };
@@ -107,12 +114,28 @@ impl Backend for SoftBackend {
     fn place(&mut self, id: SurfaceId, x: i32, y: i32, visible: bool) {
         if let Some(s) = self.get(id) { s.x = x; s.y = y; s.visible = visible; }
     }
+    fn raise(&mut self, id: SurfaceId) {
+        if self.order.contains(&id) { self.order.retain(|i| *i != id); self.order.push(id); }
+    }
     fn present(&mut self) { self.presents += 1; }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn raise_reorders_compose() {
+        let mut b = SoftBackend::new();
+        let (a, c) = (b.create_surface(4, 4), b.create_surface(4, 4));
+        b.fill_rect(a, 0, 0, 4, 4, 0xFF11_1111);
+        b.fill_rect(c, 0, 0, 4, 4, 0xFF22_2222);
+        b.place(a, 0, 0, true);
+        b.place(c, 0, 0, true);
+        assert_eq!(b.compose(4, 4, 0)[0], 0xFF22_2222);
+        b.raise(a);
+        assert_eq!(b.compose(4, 4, 0)[0], 0xFF11_1111);
+    }
+
     #[test]
     fn fill_and_compose() {
         let mut b = SoftBackend::new();
