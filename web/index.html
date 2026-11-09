@@ -30,7 +30,7 @@ let x, wasm;
 async function boot(app) {
   const manifest = await (await fetch("/manifest.json")).json();
   const sel = document.getElementById("app");
-  if (!sel.options.length) for (const a of manifest.apps) sel.add(new Option(a));
+  if (!sel.options.length) for (const a of [...manifest.apps].sort((p, q) => (q === "gui_stay.exe") - (p === "gui_stay.exe"))) sel.add(new Option(a));
   app = app ?? sel.value;
   wasm = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
   x = wasm.instance.exports;
