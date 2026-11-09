@@ -4,6 +4,11 @@
 
 pub type SurfaceId = u32;
 
+/// 8x8 glyph rows (bit 0 = leftmost pixel); non-ASCII maps to '?'.
+pub fn glyph8(c: char) -> [u8; 8] {
+    font8x8::legacy::BASIC_LEGACY[if (c as u32) < 128 { c as usize } else { b'?' as usize }]
+}
+
 pub trait Backend {
     fn create_surface(&mut self, w: u32, h: u32) -> SurfaceId;
     fn resize_surface(&mut self, id: SurfaceId, w: u32, h: u32);

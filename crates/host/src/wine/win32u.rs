@@ -6,6 +6,9 @@ use plonk_cpu::{ESP, EAX};
 use plonk_display::{Backend, SoftBackend, SurfaceId};
 use std::collections::{BTreeMap, VecDeque};
 
+mod gdi;
+use gdi::Bitmap;
+
 const DESKTOP: u32 = 0x10010;
 const WM_CREATE: u32 = 0x01;
 const WM_DESTROY: u32 = 0x02;
@@ -59,9 +62,9 @@ pub struct Window {
 struct Msg { hwnd: u32, msg: u32, wp: u32, lp: u32 }
 
 #[derive(Clone, Copy)]
-enum Gdi { Brush(u32), NullBrush, Pen(u32, bool), Region(Rect), Font, Other }
+enum Gdi { Brush(u32), NullBrush, Pen(u32, bool), Region(Rect), Font, Bitmap, Other }
 
-struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32, pen: u32, pos: (i32, i32), font: u32 }
+struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32, pen: u32, pos: (i32, i32), font: u32, bitmap: u32 }
 
 pub struct Wm {
     classes: Vec<Class>,
@@ -80,6 +83,8 @@ pub struct Wm {
     drag: Option<(u32, i32, i32)>, // hwnd, grab offset
     capture: u32,
     focus: u32,
+    bitmaps: BTreeMap<u32, Bitmap>,
+    stock_bitmap: u32,
     client_procs_w: [u32; 14],
     pub keep_snapshot: bool,
     pub snapshot: Option<(u32, u32, Vec<u32>)>,
@@ -89,7 +94,7 @@ impl Wm {
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
-            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, client_procs_w: [0; 14],
+            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
         };
         w.classes.push(Class { atom: 0xC000, name: "#32769".into(), wndproc: 0, bg: 0, raw: [0; 12], ansi: false });
         w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None, ex_style: 0, id: 0, inst: 0, userdata: 0, proc_override: 0, extra: Vec::new() });
@@ -552,6 +557,8 @@ impl WineProc {
             }
             "NtGdiDeleteObjectApp" => {
                 let ok = self.wm.gdi.remove(&a[0]).is_some();
+                self.wm.dcs.remove(&a[0]);
+                if let Some(b) = self.wm.bitmaps.remove(&a[0]) { if a[0] & 0x80_0000 == 0 { self.vm_release(b.addr()); } }
                 if ok { let _ = self.mem.w8(self.gdi_table + (a[0] & 0xffff) * 24 + 14, 0); }
                 ok as u32
             }
@@ -689,7 +696,7 @@ impl WineProc {
                 Some("GetParent") => self.wm.windows.get(&a[0]).map_or(0, |w| if w.parent == DESKTOP { 0 } else { w.parent }),
                 n => return Err(format!("NtUserCallHwnd {n:?}")),
             },
-            _ => return Ok(None),
+            _ => return self.gdi_call(name, a),
         }))
     }
 
@@ -813,7 +820,7 @@ impl WineProc {
         w(self, 132, 1024); w(self, 136, 768); w(self, 140, 320); w(self, 144, 240);
         w(self, 148, 1252);
         let _ = self.mem.w32(self.gdi_table + (h & 0xffff) * 24 + 16, at);
-        self.wm.dcs.insert(h, Dc { hwnd, clip, brush: 0, pen: 0, pos: (0, 0), font: 0 });
+        self.wm.dcs.insert(h, Dc { hwnd, clip, brush: 0, pen: 0, pos: (0, 0), font: 0, bitmap: 0 });
         h
     }
 
@@ -840,14 +847,23 @@ impl WineProc {
     fn dc_fill(&mut self, hdc: u32, mut r: Rect, argb: u32) {
         let Some(dc) = self.wm.dcs.get(&hdc) else { return };
         if let Some(c) = dc.clip { r = [r[0].max(c[0]), r[1].max(c[1]), r[2].min(c[2]), r[3].min(c[3])]; }
-        let hwnd = dc.hwnd;
+        let (hwnd, bitmap) = (dc.hwnd, dc.bitmap);
+        if bitmap != 0 { self.bmp_fill(bitmap, r, argb); return; }
         self.fill_client(hwnd, r, argb);
     }
 
     fn dc_text(&mut self, hdc: u32, x: i32, y: i32, text: &str) {
         let Some(dc) = self.wm.dcs.get(&hdc) else { return };
-        let hwnd = dc.hwnd;
+        let (hwnd, bitmap) = (dc.hwnd, dc.bitmap);
         let color = colorref(self.r32(self.gdi_table + (hdc & 0xffff) * 24 + 16).and_then(|at| self.r32(at + 24)).unwrap_or(0));
+        if bitmap != 0 {
+            for (i, c) in text.chars().enumerate() {
+                for (row, bits) in plonk_display::glyph8(c).iter().enumerate() {
+                    for col in 0..8 { if bits >> col & 1 != 0 { self.bmp_set(bitmap, x + i as i32 * 8 + col, y + row as i32, color); } }
+                }
+            }
+            return;
+        }
         let top = self.toplevel_of(hwnd);
         let Some(s) = self.wm.windows.get(&top).and_then(|w| w.surface) else { return };
         if !self.is_shown(hwnd) { return; }
