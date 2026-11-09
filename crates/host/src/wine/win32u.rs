@@ -425,6 +425,12 @@ impl WineProc {
                 for h in hs { self.invalidate(h, a[2] != 0); }
                 1
             }
+            "NtUserGetGUIThreadInfo" => {
+                // GUITHREADINFO: cbSize, flags, active, focus, capture, menuOwner, moveSize, caret, rcCaret
+                let (active, focus, capture) = (self.wm.active, self.wm.focus, self.wm.capture);
+                for (i, v) in [48, 0, active, focus, capture, 0, 0, 0, 0, 0, 0, 0].iter().enumerate() { self.w32(a[1] + i as u32 * 4, *v)?; }
+                1
+            }
             "NtUserShowWindow" => self.show_window(a[0], a[1] != 0)? as u32,
             "NtUserDestroyWindow" => self.destroy_window(a[0])? as u32,
             "NtUserGetMessage" => {

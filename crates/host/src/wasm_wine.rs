@@ -8,7 +8,7 @@ static mut MSG: String = String::new();
 
 #[allow(static_mut_refs)]
 fn wine() -> &'static mut WineProc {
-    unsafe { WINE.get_or_insert_with(WineProc::new) }
+    unsafe { WINE.get_or_insert_with(|| { let mut p = WineProc::new(); p.lenient = true; p }) }
 }
 unsafe fn bytes<'a>(p: *const u8, n: u32) -> &'a [u8] { core::slice::from_raw_parts(p, n as usize) }
 
@@ -63,3 +63,12 @@ pub extern "C" fn plonk_wine_msg_len() -> u32 { unsafe { MSG.len() as u32 } }
 pub extern "C" fn plonk_wine_stdout_ptr() -> *const u8 { wine().stdout.as_ptr() }
 #[no_mangle]
 pub extern "C" fn plonk_wine_stdout_len() -> u32 { wine().stdout.len() as u32 }
+
+/// Space-separated NtUser*/NtGdi* syscalls that had no handler and were answered with 0.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_wine_stubbed_ptr() -> *const u8 { unsafe { OUT_STUB = wine().stubbed.join(" "); OUT_STUB.as_ptr() } }
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_wine_stubbed_len() -> u32 { unsafe { OUT_STUB.len() as u32 } }
+static mut OUT_STUB: String = String::new();
