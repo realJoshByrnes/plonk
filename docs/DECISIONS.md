@@ -6,3 +6,7 @@
 - No wasm-pack; plain cargo --target wasm32-unknown-unknown.
 - Thunks are magic eip addresses (0xF0000000+) outside guest RAM; stdcall cleanup done by host. Prebuilt tests/guests/hello.exe is committed so tests need no mingw.
 - M2: Wine-compiled-to-wasm32 is NO-GO; fallback (Wine PE DLLs interpreted, native syscalls + mini-wineserver) recommended. See docs/M2_PLAN.md.
+- Guest memory is 2GB flat (0..0x80000000) so Wine's fixed addresses (KUSER_SHARED_DATA 0x7ffe0000, DLL bases 0x7b...) work unrelocated.
+- Syscall args: [esp]=ret into ntdll stub, [esp+4]=caller ret, args from esp+8; host pops one return and the stub's `ret N` cleans up.
+- stdout is a fake file handle (Obj::Stdout) so Wine's WriteFile uses NtWriteFile, avoiding ConDrv/conhost.
+- Unimplemented syscalls abort the run with the name (fail fast); implement on demand.

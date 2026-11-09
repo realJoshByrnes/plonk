@@ -1,4 +1,6 @@
 //! Host: process (memory + cpu + thunk dispatch) and wasm exports.
+pub mod sysnames;
+pub mod wine;
 use plonk_cpu::{Cpu, Exit, EAX, ESP};
 use plonk_mem::Mem;
 

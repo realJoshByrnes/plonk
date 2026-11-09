@@ -5,6 +5,9 @@ pub struct Image {
     pub base: u32,
     pub entry: u32,
     pub size: u32,
+    /// Preferred ImageBase from the header.
+    pub pref_base: u32,
+    import_rva: u32,
 }
 
 fn u16_at(f: &[u8], o: usize) -> Result<u32, String> {
@@ -23,9 +26,9 @@ fn cstr(m: &Mem, a: u32) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&v).into_owned())
 }
 
-/// Load `file` at `base` (None = preferred ImageBase) into fresh (zeroed) memory.
-/// `resolve(dll, name)` returns the address to store in the IAT slot (ordinals are "#<n>").
-pub fn load(file: &[u8], mem: &mut Mem, base: Option<u32>, resolve: &mut dyn FnMut(&str, &str) -> u32) -> Result<Image, String> {
+/// Map headers + sections at `base` (None = preferred ImageBase) into fresh (zeroed) memory and
+/// apply relocations. Does not resolve imports.
+pub fn map(file: &[u8], mem: &mut Mem, base: Option<u32>) -> Result<Image, String> {
     if file.get(0..2) != Some(b"MZ") { return Err("no MZ".into()); }
     let pe = u32_at(file, 0x3C)? as usize;
     if file.get(pe..pe + 4) != Some(b"PE\0\0") { return Err("no PE sig".into()); }
@@ -73,8 +76,17 @@ pub fn load(file: &[u8], mem: &mut Mem, base: Option<u32>, resolve: &mut dyn FnM
     } else if delta != 0 {
         return Err("image needs relocation but has none".into());
     }
-    // imports (data dir 1)
     let irva = u32_at(file, opt + 96 + 8)?;
+    Ok(Image { base, entry: base + entry_rva, size, pref_base: pref, import_rva: irva })
+}
+
+/// Map and resolve imports. `resolve(dll, name)` returns the address to store in the IAT slot
+/// (ordinals are "#<n>").
+pub fn load(file: &[u8], mem: &mut Mem, base: Option<u32>, resolve: &mut dyn FnMut(&str, &str) -> u32) -> Result<Image, String> {
+    let img = map(file, mem, base)?;
+    let base = img.base;
+    let e = |_| "image does not fit in guest memory".to_string();
+    let irva = img.import_rva;
     if irva != 0 {
         let mut d = base + irva;
         loop {
@@ -95,5 +107,24 @@ pub fn load(file: &[u8], mem: &mut Mem, base: Option<u32>, resolve: &mut dyn FnM
             d += 20;
         }
     }
-    Ok(Image { base, entry: base + entry_rva, size })
+    Ok(img)
+}
+
+/// Looks up a named export in an image already mapped at `base`. Returns its absolute address.
+pub fn find_export(mem: &Mem, base: u32, name: &str) -> Option<u32> {
+    let pe = base + mem.r32(base + 0x3C).ok()?;
+    let (rva, sz) = (mem.r32(pe + 24 + 96).ok()?, mem.r32(pe + 24 + 100).ok()?);
+    if rva == 0 { return None; }
+    let d = base + rva;
+    let (n, funcs, names, ords) = (mem.r32(d + 24).ok()?, mem.r32(d + 28).ok()?, mem.r32(d + 32).ok()?, mem.r32(d + 36).ok()?);
+    for i in 0..n {
+        let nm = cstr(mem, base + mem.r32(base + names + i * 4).ok()?).ok()?;
+        if nm == name {
+            let ord = mem.r16(base + ords + i * 2).ok()? as u32;
+            let f = mem.r32(base + funcs + ord * 4).ok()?;
+            if f >= rva && f < rva + sz { return None; } // forwarder
+            return Some(base + f);
+        }
+    }
+    None
 }
