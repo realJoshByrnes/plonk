@@ -13,7 +13,7 @@
 
 ## Gaps
 - Text: bundled Inter (fontdue) behind GDI font calls: HfontCreate, text metrics, extents, ExtTextOut with alignment/opaque bg/clipping, GetObject(font); DC window/viewport mapping honoured. One family (+SemiBold for bold); no mono, no hinting, no font enumeration; only solid brushes, PatBlt/FillRect.
-- Shell: drag by title bar, click-to-raise, active/inactive caption, close box (no resize/min/max, no taskbar). Child windows + built-in classes (real Wine BUTTON works: clicks -> WM_COMMAND), window longs, capture/focus, pens/lines/Rectangle, fixed-metrics text, GDI bitmap engine (memory DCs, DDB/DIB sections in guest memory, BitBlt/StretchBlt/AlphaBlend with ROPs, DIB transfer, GetObject). Keyboard input + real Wine EDIT control (typing, backspace, focus messages), timers (shell tick), caret stubs. Menus, clipboard, multiple threads: not implemented.
+- Shell: drag by title bar, click-to-raise, active/inactive caption, close box (no resize/min/max, no taskbar). Child windows + built-in classes (real Wine BUTTON works: clicks -> WM_COMMAND), window longs, capture/focus, pens/lines/Rectangle, fixed-metrics text, GDI bitmap engine (memory DCs, DDB/DIB sections in guest memory, BitBlt/StretchBlt/AlphaBlend with ROPs, DIB transfer, GetObject). Keyboard input + real Wine EDIT control (typing, backspace, focus messages), timers (shell tick), caret stubs. Menus: menu bars + one-level glass popups + TrackPopupMenu (no submenus, keyboard nav, check marks, accelerators). Clipboard, multiple threads: not implemented.
 - Registry/VFS minimal; most wineserver requests unimplemented; unimplemented syscalls abort the run (LENIENT=1 in run_wine stubs NtUser/NtGdi).
 - SSE not implemented (build guests with -mno-sse); x87 uses f64 precision. Guest memory capped at 0x7ffe1000 (wasm32 Vec limit).
 - CRT-linked (msvcrt) apps untested.
@@ -23,7 +23,7 @@ See docs/DESIGN.md (compatibility strategy, Plonk Flat visual spec, layer owners
 
 ## Next (priority order, hand-off)
 1. G4 Plonk control theme: author .msstyles (windres + generator), have Wine uxtheme load it; needs comctl32/uxtheme DLLs in wine/build.sh and DrawThemeBackground-related NtGdi calls.
-2. (keyboard, Edit, timers done) Menus (glass popups), clipboard, selection/caret rendering polish.
+2. (keyboard, Edit, timers, basic menus done) Submenus, menu keyboard nav, check marks, clipboard, caret rendering.
 3. Compatibility meter: enable Wine tests in wine/build.sh, run user32/gdi32 test exes, publish pass counts.
 4. GPU (WebGL) compositor for blur; resize/min/max; taskbar/shell.
 Workflow tips: `LENIENT=1 N=40 ./target/release/examples/run_wine.exe <exe>` shows last syscalls + unimplemented list; `examples/shot.exe <exe> out.ppm "d,x,y;u,x,y"` renders the desktop (convert with web/ppm2png.mjs).

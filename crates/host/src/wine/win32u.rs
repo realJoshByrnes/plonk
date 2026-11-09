@@ -7,7 +7,9 @@ use plonk_display::{Backend, SoftBackend, SurfaceId};
 use std::collections::{BTreeMap, VecDeque};
 
 mod gdi;
+mod menu;
 use gdi::Bitmap;
+use menu::{Menu, OpenMenu, MENU_H};
 
 #[derive(Clone)]
 struct FontSpec { px: f32, bold: bool, face: String, raw: Vec<u8> }
@@ -54,6 +56,7 @@ pub struct Window {
     needs_erase: bool,
     surface: Option<SurfaceId>,
     ex_style: u32,
+    menu: u32,
     id: u32,
     inst: u32,
     userdata: u32,
@@ -86,6 +89,11 @@ pub struct Wm {
     drag: Option<(u32, i32, i32)>, // hwnd, grab offset
     capture: u32,
     focus: u32,
+    menus: BTreeMap<u32, Menu>,
+    next_menu: u32,
+    open: Option<OpenMenu>,
+    track_pending: bool,
+    track_done: Option<u32>,
     timers: Vec<(u32, u32, u32, u64, u32)>, // hwnd, id, interval ms, next due, callback
     now_ms: u64,
     keys: [bool; 256],
@@ -101,10 +109,10 @@ impl Wm {
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
-            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
+            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, menus: BTreeMap::new(), next_menu: 0x30020, open: None, track_pending: false, track_done: None, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
         };
         w.classes.push(Class { atom: 0xC000, name: "#32769".into(), wndproc: 0, bg: 0, raw: [0; 12], ansi: false });
-        w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None, ex_style: 0, id: 0, inst: 0, userdata: 0, proc_override: 0, extra: Vec::new() });
+        w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None, ex_style: 0, menu: 0, id: 0, inst: 0, userdata: 0, proc_override: 0, extra: Vec::new() });
         w
     }
     fn new_gdi(&mut self, kind: u32, g: Gdi) -> u32 {
@@ -118,7 +126,7 @@ impl Wm {
     }
     fn client_rect(&self, hwnd: u32) -> Rect {
         let Some(w) = self.windows.get(&hwnd) else { return [0; 4] };
-        let (ox, oy) = if w.surface.is_some() { Self::client_off(w.style) } else { (0, 0) };
+        let (ox, oy) = if w.surface.is_some() { let (a, b) = Self::client_off(w.style); (a, b + if w.menu != 0 { MENU_H } else { 0 }) } else { (0, 0) };
         [0, 0, (w.rect[2] - w.rect[0] - 2 * ox).max(0), (w.rect[3] - w.rect[1] - oy - ox).max(0)]
     }
 }
@@ -238,6 +246,7 @@ impl WineProc {
         let xc = bx + 2 * CAPBTN_W + CAPBTN_W / 2;
         let xcol = if active { 0xFFFF_FFFF } else { 0xFF80_858D };
         for i in -4..=4 { b.fill_rect(s, xc + i, cy + i, 1, 1, xcol); b.fill_rect(s, xc + i, cy - i, 1, 1, xcol); } // close
+        self.paint_menu_bar(hwnd);
     }
 
     fn show_window(&mut self, hwnd: u32, show: bool) -> Res<bool> {
@@ -296,7 +305,7 @@ impl WineProc {
         let Some(w) = self.wm.windows.get(&hwnd) else { return (0, 0) };
         if w.surface.is_some() {
             let (ox, oy) = Wm::client_off(w.style);
-            (w.rect[0] + ox, w.rect[1] + oy)
+            (w.rect[0] + ox, w.rect[1] + oy + if w.menu != 0 { MENU_H } else { 0 })
         } else {
             let (px, py) = self.client_origin_screen(w.parent);
             (px + w.rect[0], py + w.rect[1])
@@ -476,7 +485,7 @@ impl WineProc {
                 let surface = if toplevel { Some(self.wm.backend.create_surface(cx.max(1) as u32, cy.max(1) as u32)) } else { None };
                 if let (Some(sid), true) = (surface, style & WS_CAPTION == WS_CAPTION) { self.wm.backend.set_glass(sid, 10, 24, 28); }
                 if toplevel { self.wm.zorder.push(hwnd); }
-                self.wm.windows.insert(hwnd, Window { class: ci, style: style & !WS_VISIBLE, rect: [x, y, x + cx, y + cy], parent: if toplevel { DESKTOP } else { parent }, text: title.clone(), visible: false, invalid: None, needs_erase: false, surface, ex_style, id: a[10], inst: a[11], userdata: 0, proc_override: 0, extra: vec![0; self.wm.classes[ci].raw[4] as usize] });
+                self.wm.windows.insert(hwnd, Window { class: ci, style: style & !WS_VISIBLE, rect: [x, y, x + cx, y + cy], parent: if toplevel { DESKTOP } else { parent }, text: title.clone(), visible: false, invalid: None, needs_erase: false, surface, ex_style, menu: if toplevel && self.wm.menus.contains_key(&a[10]) { a[10] } else { 0 }, id: a[10], inst: a[11], userdata: 0, proc_override: 0, extra: vec![0; self.wm.classes[ci].raw[4] as usize] });
                 // CREATESTRUCTW on the guest stack for WM_NCCREATE / WM_CREATE
                 let cs = (self.cpu.r[ESP].wrapping_sub(0x800)) & !15;
                 let (name_p, _) = self.put_wstr_at(cs + 0x40, &title);
@@ -670,6 +679,8 @@ impl WineProc {
                 n => return Err(format!("NtUserCallNoParam {n:?}")),
             },
             "NtUserCallOneParam" => match codes::CALL_ONE_PARAM.get(a[1] as usize).copied() {
+                Some("CreateMenu") => { let h = self.wm.next_menu; self.wm.next_menu += 4; self.wm.menus.insert(h, Menu::default()); h }
+                Some("GetMenuItemCount") => self.menu_count(a[0]),
                 Some("GetSysColor") => argb_to_colorref(sys_color(a[0])),
                 Some("GetSysColorBrush") => self.gdi_alloc(0x100000 | 0x80_0000, Gdi::Brush(sys_color(a[0]))),
                 Some("GetSysColorPen") => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(sys_color(a[0]), false)),
@@ -677,6 +688,8 @@ impl WineProc {
             },
             "NtUserCallTwoParam" => match codes::CALL_TWO_PARAM.get(a[2] as usize).copied() {
                 Some("SetCaretPos") => 1,
+                Some("GetMenuInfo") => { if self.wm.menus.contains_key(&a[0]) { for o in (4..28).step_by(4) { self.w32(a[1] + o, 0)?; } 1 } else { 0 } }
+                Some("SetMenuInfo") => 1,
                 n => return Err(format!("NtUserCallTwoParam {n:?} a={:#x} b={:#x}", a[0], a[1])),
             },
             "NtUserCallHwndParam" => match codes::CALL_HWND_PARAM.get(a[2] as usize).copied() {
@@ -699,12 +712,14 @@ impl WineProc {
                 Some("IsWindowVisible") => self.wm.windows.get(&a[0]).map_or(0, |w| w.visible as u32),
                 Some("GetWindowDpiAwarenessContext") => 0x8000_0010,
                 Some("GetDpiForWindow") => 96,
+                Some("DrawMenuBar") => { self.paint_frame(a[0]); self.invalidate(a[0], true); 1 }
+                Some("GetWindowSysSubMenu") => 0,
                 Some("GetDialogInfo" | "GetWindowContextHelpId" | "GetWindowInputContext" | "GetDefaultImeWindow" | "GetMDIClientInfo") => 0,
                 Some("IsWindowEnabled" | "IsWindowUnicode") => 1,
                 Some("GetParent") => self.wm.windows.get(&a[0]).map_or(0, |w| if w.parent == DESKTOP { 0 } else { w.parent }),
                 n => return Err(format!("NtUserCallHwnd {n:?}")),
             },
-            _ => return self.gdi_call(name, a),
+            _ => match self.menu_call(name, a)? { Some(v) => v, None => return self.gdi_call(name, a) },
         }))
     }
 
@@ -749,6 +764,7 @@ impl WineProc {
 
     /// Desktop mouse events from the shell. kind: 0 = down, 1 = move, 2 = up.
     pub fn mouse(&mut self, kind: u32, x: i32, y: i32) {
+        if self.menu_mouse(kind, x, y) { return; }
         match kind {
             0 => {
                 let Some(h) = self.window_at(x, y) else { return };
@@ -767,6 +783,7 @@ impl WineProc {
                     self.post_message(h, WM_CLOSE, 0, 0);
                 } else if in_caption {
                     self.wm.drag = Some((h, lx, ly));
+                } else if self.menu_bar_click(h, lx, ly) {
                 } else {
                     let t = self.hit_child(h, x, y);
                     let (cx, cy) = self.client_origin_screen(t);
