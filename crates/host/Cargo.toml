@@ -1,0 +1,11 @@
+[package]
+name = "plonk-host"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+plonk-mem = { path = "../mem" }
+plonk-cpu = { path = "../cpu" }

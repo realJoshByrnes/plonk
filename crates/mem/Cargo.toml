@@ -1,0 +1,6 @@
+[package]
+name = "plonk-mem"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

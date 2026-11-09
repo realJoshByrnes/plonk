@@ -1,0 +1,6 @@
+- Cargo workspace: mem, cpu, pe, host, display, testkit; Wine lives outside Cargo in wine/.
+- Guest memory = linear-memory region, guest_addr -> base + addr; Mem wraps a raw base ptr.
+- Interpreter is 32-bit flat only; structured (modrm/ops) so long mode can be added later.
+- Flags computed eagerly (no lazy flags) for simplicity; revisit if slow.
+- Tests: Rust snippet table (testkit) natively; wasm checked via Node selftest.
+- No wasm-pack; plain cargo --target wasm32-unknown-unknown.

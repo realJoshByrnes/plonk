@@ -1,0 +1,8 @@
+[package]
+name = "plonk-testkit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+plonk-mem = { path = "../mem" }
+plonk-cpu = { path = "../cpu" }
