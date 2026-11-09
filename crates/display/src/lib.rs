@@ -14,6 +14,8 @@ pub trait Backend {
     fn blit(&mut self, id: SurfaceId, x: i32, y: i32, w: u32, h: u32, pixels: &[u32], stride: u32);
     /// Shell-side placement of a surface on the desktop.
     fn place(&mut self, id: SurfaceId, x: i32, y: i32, visible: bool);
+    /// Glass styling: corner radius, backdrop blur radius and shadow size (px); 0 disables each.
+    fn set_glass(&mut self, id: SurfaceId, radius: i32, blur: i32, shadow: i32);
     /// Move a surface to the top of the stacking order.
     fn raise(&mut self, id: SurfaceId);
     /// Flush to the screen (no-op for headless).
@@ -27,6 +29,9 @@ pub struct Surface {
     pub x: i32,
     pub y: i32,
     pub visible: bool,
+    pub radius: i32,
+    pub blur: i32,
+    pub shadow: i32,
 }
 
 #[derive(Default)]
@@ -34,6 +39,7 @@ pub struct SoftBackend {
     surfaces: Vec<Option<Surface>>,
     /// Stacking order, bottom to top.
     order: Vec<SurfaceId>,
+    wall: std::cell::RefCell<Option<(u32, u32, Vec<u32>)>>,
     /// Count of present() calls, handy in tests.
     pub presents: u32,
 }
@@ -45,27 +51,56 @@ impl SoftBackend {
         let s = self.surface(id)?;
         if x < s.w && y < s.h { Some(s.pix[(y * s.w + x) as usize]) } else { None }
     }
-    /// Compose all visible surfaces (in creation order = z-order) onto a w*h desktop.
+    /// Compose all visible surfaces (stacking order) over a flat background.
     pub fn compose(&self, w: u32, h: u32, bg: u32) -> Vec<u32> {
         let mut out = vec![bg; (w * h) as usize];
+        self.compose_into(&mut out, w, h);
+        out
+    }
+
+    /// Compose over the default wallpaper (gives glass surfaces something to blur).
+    pub fn compose_desktop(&self, w: u32, h: u32) -> Vec<u32> {
+        let mut cache = self.wall.borrow_mut();
+        if !matches!(&*cache, Some((cw, ch_, _)) if *cw == w && *ch_ == h) {
+            *cache = Some((w, h, (0..h).flat_map(|y| (0..w).map(move |x| wallpaper(x, y, w, h))).collect()));
+        }
+        let mut out = cache.as_ref().unwrap().2.clone();
+        drop(cache);
+        self.compose_into(&mut out, w, h);
+        out
+    }
+
+    fn compose_into(&self, out: &mut [u32], w: u32, h: u32) {
         for s in self.order.iter().filter_map(|id| self.surface(*id)).filter(|s| s.visible) {
+            if s.shadow > 0 { draw_shadow(out, w, h, s); }
+            let blurred = if s.blur > 0 { Some(blur_region(out, w, h, s)) } else { None };
             for sy in 0..s.h as i32 {
                 let dy = sy + s.y;
                 if dy < 0 || dy >= h as i32 { continue; }
                 for sx in 0..s.w as i32 {
                     let dx = sx + s.x;
-                    if dx >= 0 && dx < w as i32 { out[(dy as u32 * w + dx as u32) as usize] = s.pix[(sy as u32 * s.w + sx as u32) as usize]; }
+                    if dx < 0 || dx >= w as i32 { continue; }
+                    let src = s.pix[(sy as u32 * s.w + sx as u32) as usize];
+                    let cov = if s.radius > 0 { corner_cov(sx, sy, s.w as i32, s.h as i32, s.radius) } else { 1.0 };
+                    let a = (src >> 24) as f32 / 255.0;
+                    let di = (dy as u32 * w + dx as u32) as usize;
+                    if cov >= 1.0 && a >= 1.0 { out[di] = src | 0xFF00_0000; continue; }
+                    if cov <= 0.0 { continue; }
+                    let base = out[di];
+                    let back = match &blurred { Some(b) => glass_adjust(b[(sy as u32 * s.w + sx as u32) as usize], dx, dy), None => base };
+                    let color = mix(back, src, a);
+                    out[di] = mix(base, color, cov);
                 }
             }
         }
-        out
     }
+
     fn get(&mut self, id: SurfaceId) -> Option<&mut Surface> { self.surfaces.get_mut((id as usize).checked_sub(1)?)?.as_mut() }
 }
 
 impl Backend for SoftBackend {
     fn create_surface(&mut self, w: u32, h: u32) -> SurfaceId {
-        self.surfaces.push(Some(Surface { w, h, pix: vec![0xFF00_0000; (w * h) as usize], x: 0, y: 0, visible: false }));
+        self.surfaces.push(Some(Surface { w, h, pix: vec![0xFF00_0000; (w * h) as usize], x: 0, y: 0, visible: false, radius: 0, blur: 0, shadow: 0 }));
         let id = self.surfaces.len() as SurfaceId;
         self.order.push(id);
         id
@@ -114,10 +149,107 @@ impl Backend for SoftBackend {
     fn place(&mut self, id: SurfaceId, x: i32, y: i32, visible: bool) {
         if let Some(s) = self.get(id) { s.x = x; s.y = y; s.visible = visible; }
     }
+    fn set_glass(&mut self, id: SurfaceId, radius: i32, blur: i32, shadow: i32) {
+        if let Some(s) = self.get(id) { s.radius = radius; s.blur = blur; s.shadow = shadow; }
+    }
     fn raise(&mut self, id: SurfaceId) {
         if self.order.contains(&id) { self.order.retain(|i| *i != id); self.order.push(id); }
     }
     fn present(&mut self) { self.presents += 1; }
+}
+
+fn ch(c: u32, sh: u32) -> f32 { ((c >> sh) & 0xff) as f32 }
+fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let m = |sh: u32| (ch(a, sh) * (1.0 - t) + ch(b, sh) * t).round().clamp(0.0, 255.0) as u32;
+    0xFF00_0000 | m(16) << 16 | m(8) << 8 | m(0)
+}
+
+/// Anti-aliased coverage of a rounded rectangle at pixel (x, y).
+fn corner_cov(x: i32, y: i32, w: i32, h: i32, r: i32) -> f32 {
+    let (px, py, r) = (x as f32 + 0.5, y as f32 + 0.5, r as f32);
+    let (cx, cy) = (px.clamp(r, w as f32 - r), py.clamp(r, h as f32 - r));
+    let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - r;
+    (0.5 - d).clamp(0.0, 1.0)
+}
+
+fn draw_shadow(out: &mut [u32], w: u32, h: u32, s: &Surface) {
+    let (sh, off) = (s.shadow, s.shadow / 3);
+    let r = s.radius.max(1) as f32;
+    for dy in (s.y - sh).max(0)..(s.y + s.h as i32 + sh + off).min(h as i32) {
+        for dx in (s.x - sh).max(0)..(s.x + s.w as i32 + sh).min(w as i32) {
+            let (px, py) = ((dx - s.x) as f32 + 0.5, (dy - s.y - off) as f32 + 0.5);
+            let (cx, cy) = (px.clamp(r, s.w as f32 - r), py.clamp(r, s.h as f32 - r));
+            let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - r;
+            if d <= 0.0 { continue; }
+            let a = 0.32 * (1.0 - d / sh as f32).clamp(0.0, 1.0).powi(2);
+            let i = (dy as u32 * w + dx as u32) as usize;
+            out[i] = mix(out[i], 0xFF00_0000, a);
+        }
+    }
+}
+
+/// Backdrop under a surface, box-blurred (3 passes ~ gaussian). Indexed like the surface pixels.
+fn blur_region(out: &[u32], w: u32, h: u32, s: &Surface) -> Vec<u32> {
+    let (sw, sh) = (s.w as usize, s.h as usize);
+    let mut px: Vec<[f32; 3]> = Vec::with_capacity(sw * sh);
+    for sy in 0..sh as i32 {
+        for sx in 0..sw as i32 {
+            let (dx, dy) = ((sx + s.x).clamp(0, w as i32 - 1), (sy + s.y).clamp(0, h as i32 - 1));
+            let c = out[(dy as u32 * w + dx as u32) as usize];
+            px.push([ch(c, 16), ch(c, 8), ch(c, 0)]);
+        }
+    }
+    let r = (s.blur / 3).max(1) as usize;
+    for _ in 0..3 {
+        box_pass(&mut px, sw, sh, r, true);
+        box_pass(&mut px, sw, sh, r, false);
+    }
+    px.iter().map(|c| 0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).collect()
+}
+
+fn box_pass(px: &mut [[f32; 3]], w: usize, h: usize, r: usize, horiz: bool) {
+    let (n, m) = if horiz { (w, h) } else { (h, w) };
+    let idx = |line: usize, i: usize| if horiz { line * w + i } else { i * w + line };
+    let mut tmp = vec![[0f32; 3]; n];
+    for line in 0..m {
+        for c in 0..3 {
+            let mut sum = 0.0;
+            for i in 0..=r.min(n - 1) { sum += px[idx(line, i)][c]; }
+            let mut cnt = r.min(n - 1) + 1;
+            for i in 0..n {
+                tmp[i][c] = sum / cnt as f32;
+                if i + r + 1 < n { sum += px[idx(line, i + r + 1)][c]; cnt += 1; }
+                if i >= r { sum -= px[idx(line, i - r)][c]; cnt -= 1; }
+            }
+        }
+        for i in 0..n { px[idx(line, i)] = tmp[i]; }
+    }
+}
+
+/// Frosted look: slight saturation boost and brightening, plus faint grain.
+fn glass_adjust(c: u32, x: i32, y: i32) -> u32 {
+    let (r, g, b) = (ch(c, 16), ch(c, 8), ch(c, 0));
+    let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    let grain = ((((x as u32).wrapping_mul(73856093) ^ (y as u32).wrapping_mul(19349663)) & 0xff) as f32 / 255.0 - 0.5) * 3.0;
+    let f = |v: f32| (lum + (v - lum) * 1.25 + 6.0 + grain).clamp(0.0, 255.0) as u32;
+    0xFF00_0000 | f(r) << 16 | f(g) << 8 | f(b)
+}
+
+/// Default procedural wallpaper: soft aurora gradient (deterministic).
+pub fn wallpaper(x: u32, y: u32, w: u32, h: u32) -> u32 {
+    let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
+    let stops: [(f32, [f32; 3]); 3] = [(0.0, [96.0, 128.0, 220.0]), (0.55, [168.0, 128.0, 226.0]), (1.0, [240.0, 156.0, 190.0])];
+    let t = (u * 0.55 + v * 0.45).clamp(0.0, 1.0);
+    let (a, b) = if t < stops[1].0 { (stops[0], stops[1]) } else { (stops[1], stops[2]) };
+    let k = ((t - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
+    let mut c = [0f32; 3];
+    for i in 0..3 { c[i] = a.1[i] * (1.0 - k) + b.1[i] * k; }
+    for (cx, cy, rad, col) in [(0.22f32, 0.78f32, 0.35f32, [60.0f32, 210.0, 230.0]), (0.82, 0.22, 0.30, [255.0, 200.0, 120.0])] {
+        let d = (((u - cx) * w as f32).powi(2) + ((v - cy) * h as f32).powi(2)).sqrt() / (rad * w as f32);
+        let wgt = (1.0 - d).clamp(0.0, 1.0).powi(2) * 0.55;
+        for i in 0..3 { c[i] = c[i] * (1.0 - wgt) + col[i] * wgt; }
+    }
+    0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32
 }
 
 #[cfg(test)]

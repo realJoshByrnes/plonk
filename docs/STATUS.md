@@ -1,5 +1,5 @@
 # Plonk status
-**Milestone:** M4 done (headless-verified): a GUI exe creates a window, paints, handles WM_CLOSE through Wine 9.0's real PE user32/gdi32; our native win32u draws to per-window surfaces.
+**Milestone:** M4 done; Plonk Glass visual direction chosen (docs/DESIGN.md); stage G0 (software glass compositor + glass chrome) done.
 
 ## Works
 - Crates: mem, cpu (i386 integer + x87, FS base), pe, display (Backend trait, SoftBackend, compose), host (WineProc + Process), testkit.

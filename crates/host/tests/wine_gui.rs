@@ -18,8 +18,8 @@ fn gui_through_wine() {
     assert_eq!(r, Ok(7), "last syscalls: {tail:?}");
     let (w, h, pix) = p.wm.snapshot.clone().expect("window was painted");
     assert_eq!((w, h), (320, 240));
-    // client area starts at (4, 27); FillRect(20,20,180,100) in RGB(200,30,30)
+    // client area starts at (4, 32); FillRect(20,20,180,100) in RGB(200,30,30)
     let at = |x: u32, y: u32| pix[(y * w + x) as usize];
-    assert_eq!(at(4 + 50, 27 + 50), 0xFFC8_1E1E, "red rect");
-    assert_eq!(at(4 + 5, 27 + 5), 0xFFFF_FFFF, "class background (COLOR_WINDOW)");
+    assert_eq!(at(4 + 50, 32 + 50), 0xFFC8_1E1E, "red rect");
+    assert_eq!(at(4 + 5, 32 + 5), 0xFFFF_FFFF, "class background (COLOR_WINDOW)");
 }

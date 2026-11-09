@@ -23,7 +23,8 @@ const WS_CAPTION: u32 = 0x00C0_0000;
 const WS_CHILD: u32 = 0x4000_0000;
 const CW_USEDEFAULT: u32 = 0x8000_0000;
 const BORDER: i32 = 4;
-const CAPTION: i32 = 23;
+const CAPTION: i32 = 28;
+const CAPBTN_W: i32 = 36; // caption button width (min / max / close)
 
 type Rect = [i32; 4]; // l, t, r, b
 
@@ -112,9 +113,10 @@ impl Wm {
 
 fn colorref(c: u32) -> u32 { 0xFF00_0000 | (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff) }
 fn sys_color(i: u32) -> u32 {
-    const T: [u32; 25] = [0xD4D0C8, 0x3A6EA5, 0x0A246A, 0x808080, 0xD4D0C8, 0xFFFFFF, 0x000000, 0x000000, 0x000000, 0xFFFFFF, 0xD4D0C8, 0xD4D0C8, 0x808080,
-        0x0A246A, 0xFFFFFF, 0xD4D0C8, 0x808080, 0x808080, 0x000000, 0xD4D0C8, 0xFFFFFF, 0x404040, 0xD4D0C8, 0x000000, 0xFFFFE1];
-    0xFF00_0000 | T.get(i as usize).copied().unwrap_or(0xD4D0C8)
+    // Plonk Glass (light): see docs/DESIGN.md section 3.1
+    const T: [u32; 25] = [0xF0F2F5, 0x6A8FD8, 0x0A64C8, 0xDADDE1, 0xF7F8FA, 0xFFFFFF, 0x8A93A0, 0x1A1A1A, 0x1A1A1A, 0x1A1A1A, 0xF0F2F5, 0xF0F2F5, 0x9AA3B0,
+        0x0A64C8, 0xFFFFFF, 0xF1F3F6, 0xA7B0BC, 0x8A8F96, 0x1A1A1A, 0x5C6168, 0xFFFFFF, 0x8E98A6, 0xE6EAF0, 0x1A1A1A, 0xFFFFE1];
+    0xFF00_0000 | T.get(i as usize).copied().unwrap_or(0xF1F3F6)
 }
 fn argb_to_colorref(c: u32) -> u32 { (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff) }
 
@@ -176,19 +178,54 @@ impl WineProc {
         for c in self.children_of(hwnd) { self.invalidate(c, erase); }
     }
 
+    /// Plonk Glass chrome: translucent frame + title bar over the blurred backdrop (the compositor
+    /// blurs behind every pixel whose alpha < 255), opaque client area.
     fn paint_frame(&mut self, hwnd: u32) {
         let Some(w) = self.wm.windows.get(&hwnd) else { return };
         let (Some(s), true) = (w.surface, w.style & WS_CAPTION == WS_CAPTION) else { return };
         let (ww, wh) = (w.rect[2] - w.rect[0], w.rect[3] - w.rect[1]);
         let title = w.text.clone();
+        let active = self.wm.active == hwnd;
         let b = &mut self.wm.backend;
-        b.fill_rect(s, 0, 0, ww, wh, 0xFFD4_D0C8);
-        let cap = if self.wm.active == hwnd { 0xFF0A_246A } else { 0xFF80_8080 };
-        let b = &mut self.wm.backend;
-        b.fill_rect(s, BORDER, BORDER, ww - 2 * BORDER, CAPTION - 4, cap);
-        b.draw_text(s, BORDER + 4, BORDER + 6, &title, 0xFFFF_FFFF);
-        b.fill_rect(s, ww - BORDER - 20, BORDER + 2, 18, CAPTION - 8, 0xFFC0_3030); // close box
-        b.draw_text(s, ww - BORDER - 15, BORDER + 6, "x", 0xFFFF_FFFF);
+        let a = |alpha: f32, rgb: u32| ((alpha * 255.0) as u32) << 24 | (rgb & 0xFF_FFFF);
+        let top = BORDER + CAPTION;
+        // opaque client background, then the glass ring on top of it
+        b.fill_rect(s, 0, 0, ww, wh, 0xFFF1_F3F6);
+        let (a0, a1) = if active { (0.58, 0.34) } else { (0.40, 0.26) };
+        for y in 0..top {
+            let t = y as f32 / top as f32;
+            b.fill_rect(s, 0, y, ww, 1, a(a0 + (a1 - a0) * t, 0xFFFFFF));
+        }
+        let side = if active { 0.38 } else { 0.28 };
+        b.fill_rect(s, 0, top, BORDER, wh - top, a(side, 0xFFFFFF));
+        b.fill_rect(s, ww - BORDER, top, BORDER, wh - top, a(side, 0xFFFFFF));
+        b.fill_rect(s, 0, wh - BORDER, ww, BORDER, a(side, 0xFFFFFF));
+        // hairline under the title bar and around the client area
+        b.fill_rect(s, 0, top - 1, ww, 1, a(0.10, 0x000000));
+        for (x, y, w2, h2) in [(BORDER - 1, top, 1, wh - top - BORDER + 1), (ww - BORDER, top, 1, wh - top - BORDER + 1), (BORDER - 1, wh - BORDER, ww - 2 * BORDER + 2, 1)] {
+            b.fill_rect(s, x, y, w2, h2, a(0.12, 0x000000));
+        }
+        // luminous edge: specular top, softer sides, faint bottom
+        b.fill_rect(s, 0, 0, ww, 1, a(0.95, 0xFFFFFF));
+        b.fill_rect(s, 0, 1, 1, wh - 2, a(0.55, 0xFFFFFF));
+        b.fill_rect(s, ww - 1, 1, 1, wh - 2, a(0.40, 0xFFFFFF));
+        b.fill_rect(s, 0, wh - 1, ww, 1, a(0.28, 0xFFFFFF));
+        // title (etched: light shadow under dark text)
+        let (tc, ty) = (if active { 0xFF1A_1A1A } else { 0xFF6B_7078 }, BORDER + (CAPTION - 8) / 2);
+        b.draw_text(s, BORDER + 11, ty + 1, &title, a(0.7, 0xFFFFFF));
+        b.draw_text(s, BORDER + 10, ty, &title, tc);
+        // caption buttons: minimize, maximize, close (neutral glyphs, close gets a red glass pill)
+        let bx = ww - BORDER - 3 * CAPBTN_W;
+        let (by, bh) = (BORDER + 3, CAPTION - 6);
+        b.fill_rect(s, bx + 2 * CAPBTN_W, by, CAPBTN_W, bh, a(if active { 0.80 } else { 0.35 }, 0xE5484D));
+        let gc = if active { 0xFF2A_2E35 } else { 0xFF80_858D };
+        let cy = by + bh / 2;
+        b.fill_rect(s, bx + CAPBTN_W / 2 - 5, cy + 3, 10, 1, gc); // minimize
+        let mx = bx + CAPBTN_W + CAPBTN_W / 2 - 5;
+        for (x, y, w2, h2) in [(mx, cy - 5, 10, 1), (mx, cy + 4, 10, 1), (mx, cy - 5, 1, 10), (mx + 9, cy - 5, 1, 10)] { b.fill_rect(s, x, y, w2, h2, gc); } // maximize
+        let xc = bx + 2 * CAPBTN_W + CAPBTN_W / 2;
+        let xcol = if active { 0xFFFF_FFFF } else { 0xFF80_858D };
+        for i in -4..=4 { b.fill_rect(s, xc + i, cy + i, 1, 1, xcol); b.fill_rect(s, xc + i, cy - i, 1, 1, xcol); } // close
     }
 
     fn show_window(&mut self, hwnd: u32, show: bool) -> Res<bool> {
@@ -404,6 +441,7 @@ impl WineProc {
                 let parent = if a[9] == 0 { DESKTOP } else { a[9] };
                 let toplevel = style & WS_CHILD == 0;
                 let surface = if toplevel { Some(self.wm.backend.create_surface(cx.max(1) as u32, cy.max(1) as u32)) } else { None };
+                if let (Some(sid), true) = (surface, style & WS_CAPTION == WS_CAPTION) { self.wm.backend.set_glass(sid, 10, 24, 28); }
                 if toplevel { self.wm.zorder.push(hwnd); }
                 self.wm.windows.insert(hwnd, Window { class: ci, style: style & !WS_VISIBLE, rect: [x, y, x + cx, y + cy], parent: if toplevel { DESKTOP } else { parent }, text: title.clone(), visible: false, invalid: None, needs_erase: false, surface, ex_style, id: a[10], inst: a[11], userdata: 0, proc_override: 0, extra: vec![0; self.wm.classes[ci].raw[4] as usize] });
                 // CREATESTRUCTW on the guest stack for WM_NCCREATE / WM_CREATE
@@ -685,8 +723,8 @@ impl WineProc {
                     self.repaint_frame(h);
                 }
                 let (lx, ly) = (x - r[0], y - r[1]);
-                let in_caption = style & WS_CAPTION == WS_CAPTION && ly >= BORDER && ly < BORDER + CAPTION - 4;
-                if in_caption && lx >= r[2] - r[0] - BORDER - 20 {
+                let in_caption = style & WS_CAPTION == WS_CAPTION && ly >= BORDER && ly < BORDER + CAPTION;
+                if in_caption && lx >= r[2] - r[0] - BORDER - CAPBTN_W {
                     self.post_message(h, WM_CLOSE, 0, 0);
                 } else if in_caption {
                     self.wm.drag = Some((h, lx, ly));
@@ -728,7 +766,7 @@ impl WineProc {
 
     /// Composite all visible windows onto the desktop as RGBA bytes (for ImageData).
     pub fn compose_rgba(&self, w: u32, h: u32) -> Vec<u8> {
-        let px = self.wm.backend.compose(w, h, 0xFF3A_6EA5);
+        let px = self.wm.backend.compose_desktop(w, h);
         let mut out = Vec::with_capacity(px.len() * 4);
         for p in px { out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 0xFF]); }
         out

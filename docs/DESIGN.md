@@ -1,6 +1,6 @@
 # Plonk design
 
-Status: proposal for review. Sections 1-2 say how we keep compatibility from collapsing; sections 3-5 define how windows and controls look and which layer draws what; section 6 lists decisions needed. A live visual preview of section 3 is in `web/design.html` (served by `node web/serve.mjs`).
+Status: direction chosen (Plonk Glass). Sections 1-2 say how we keep compatibility from collapsing; section 3 defines the glass look; 4 says which layer draws what; 5 is the staged roadmap; 6 lists open decisions. Preview: `web/design.html`.
 
 ## 1. Principles
 
@@ -37,103 +37,116 @@ Each tier closes only when its exit tests pass.
 3. **Borrow Wine's code where it is pure computation.** Wine's `dibdrv` (software GDI raster), region math and font mapping are portable C. Spike (time-boxed): compile selected win32u source files to wasm32 as a library called from our handlers. Go/no-go after the spike; this is the "reuse more of Wine" option without taking the whole Unix layer and wineserver.
 4. Keep demand-driven order within each family (real apps decide).
 
-## 3. Visual design
+## 3. Visual design: Plonk Glass
 
-Name: **Plonk Flat** (default), with a **Plonk Dark** variant. Goals: crisp, flat, high-contrast, legible at 1x and 2x; looks deliberate, not like emulation.
+Decision (owner): go straight to a real visual style, with a premium glass feel. Light is the first-class scheme; dark is derived from the same recipe. Live preview: `web/design.html`. The glass compositor and chrome in section 3.2-3.5 are **already implemented** (software, Rust).
 
-### 3.1 Palette (system colors, COLOR_* indices)
-Light / Dark. Wine's controls draw from these, so changing them restyles every control.
+### 3.1 Concept
+Frosted, translucent **chrome** floating over a vivid wallpaper; **opaque, quiet content** inside so text stays crisp. One accent colour. Depth comes from blur, soft shadow and a thin luminous edge, not from bevels.
 
+Layers, back to front: wallpaper -> shadow -> glass frame/title bar (blurs what is behind it) -> opaque client area (controls) -> optional glass regions inside a client (sidebars/toolbars, section 3.7).
+
+### 3.2 Glass recipe (all values are data in the theme file; light first)
+| Property | Light | Dark |
+|---|---|---|
+| Backdrop blur | 24px (3 box passes, ~gaussian) | 24px |
+| Backdrop adjust | saturation x1.25, +6/255 brightness | x1.15, -4/255 |
+| Frame tint (active) | white 58% at top fading to 34% | #12161C 55% -> 38% |
+| Frame tint (inactive) | white 40% -> 26% | #12161C 40% -> 28% |
+| Side/bottom border tint | white 38% (active), 28% (inactive) | #12161C 40% / 30% |
+| Specular edge | top 1px white 95%, left 55%, right 40%, bottom 28% | white 40% / 22% / 16% / 10% |
+| Hairlines | 1px black 10-12% under the title bar and around the client | white 8% |
+| Grain | +/-1.5 levels on glass pixels (kills banding) | same |
+| Corner radius | 10px chrome | 10px |
+| Shadow | 28px, offset y = 1/3 of size, max 32% black, only outside the window | 40% |
+| Reduce-transparency mode | tints become 100% opaque, blur off | same |
+
+Wallpaper (default): soft aurora gradient (blue -> violet -> pink with cyan and amber glows), chosen so glass has colour to pick up. Replaceable; glass adapts automatically.
+
+### 3.3 Palette (system colours used by Wine's controls)
 | Role | Light | Dark |
 |---|---|---|
-| Desktop (COLOR_BACKGROUND) | #3A6EA5 | #1B2433 |
-| Window / editable (WINDOW) | #FFFFFF | #1F2329 |
-| Window text (WINDOWTEXT) | #1A1A1A | #E6E8EB |
-| Button face / dialog bg (BTNFACE, 3DFACE) | #F0F0F0 | #2B3038 |
-| Button text (BTNTEXT) | #1A1A1A | #E6E8EB |
-| Button highlight (BTNHILIGHT) | #FFFFFF | #3A4048 |
-| 3D light (3DLIGHT) | #E3E3E3 | #323840 |
-| Button shadow (BTNSHADOW) | #A0A0A0 | #1A1D22 |
-| 3D dark shadow (3DDKSHADOW) | #696969 | #0F1114 |
-| Window frame (WINDOWFRAME) | #646464 | #0F1114 |
-| Accent / selection (HIGHLIGHT) | #0A64C8 | #3B8EEA |
-| Selection text (HIGHLIGHTTEXT) | #FFFFFF | #FFFFFF |
-| Active caption (ACTIVECAPTION) | #0A64C8 | #2C3A52 |
-| Inactive caption (INACTIVECAPTION) | #DADDE1 | #23272E |
-| Caption text (CAPTIONTEXT) | #FFFFFF | #FFFFFF |
-| Inactive caption text | #5C6168 | #8B9199 |
-| Disabled text (GRAYTEXT) | #8A8F96 | #6B7078 |
-| Menu / menu text | #F7F7F7 / #1A1A1A | #262B32 / #E6E8EB |
-| Tooltip bg / text (INFOBK/INFOTEXT) | #FFFFE1 / #1A1A1A | #33383F / #E6E8EB |
+| Window / editable | #FFFFFF | #1F2329 |
+| Window text | #1A1A1A | #E6E8EB |
+| Face / dialog bg (BTNFACE) | #F1F3F6 | #2B3038 |
+| Button text | #1A1A1A | #E6E8EB |
+| Highlight 3D (BTNHILIGHT) | #FFFFFF | #3A4048 |
+| 3D light | #E6EAF0 | #323840 |
+| Shadow (BTNSHADOW) | #A7B0BC | #1A1D22 |
+| Dark shadow (3DDKSHADOW) | #8E98A6 | #0F1114 |
+| Frame (WINDOWFRAME) | #8A93A0 | #0F1114 |
+| Accent / selection | #0A64C8 | #3B8EEA |
+| Selection text | #FFFFFF | #FFFFFF |
+| Caption text (active / inactive) | #1A1A1A / #6B7078 | #F2F4F7 / #8B9199 |
+| Disabled text | #8A8F96 | #6B7078 |
+| Menu | #F7F8FA | #262B32 |
+| Tooltip bg / text | #FFFFE1 / #1A1A1A | #33383F / #E6E8EB |
 
-### 3.2 Metrics (GetSystemMetrics, at 96 dpi; scale by dpi/96)
-Border 1px (frame 4px resizable, 1px fixed), caption height 28, caption buttons 28x22 with 1px gap, menu bar height 24, scrollbar width 16 (thumb min 24), small icon 16, icon 32, default control height 24 (buttons/edits), padding 6, corner radius 0 for chrome (square), 2px for focus-visible only.
+### 3.4 Metrics (96 dpi; scale by dpi/96)
+Frame ring 4px, caption 28px, caption buttons 36x22 with the close button a red glass pill (80% active, 35% inactive), menu bar 24, scrollbar 16, default control height 24, padding 6, chrome radius 10, control radius 4, focus ring 2px accent at 60% with 2px soft glow.
 
-### 3.3 Typography
-- UI font: bundled open font (candidates: Inter, Noto Sans; both OFL), 12px at 96 dpi (9pt), hinting off, grayscale antialiasing. GDI names ("MS Shell Dlg", "Tahoma", "Segoe UI", "Arial", "Microsoft Sans Serif") map to it; "Courier New"/"Consolas" map to a bundled mono (Noto Sans Mono / JetBrains Mono).
-- Fixed 8x8 bitmap font stays as the last-resort fallback and for the boot console.
-- Text metrics must come from the real font so layout code in apps (GetTextExtent, DrawText) matches what is drawn.
+### 3.5 Window chrome (ours, implemented)
+Drawn into the window surface with alpha; the compositor blurs behind every pixel whose alpha is below 255 and applies the recipe. Title: 11px-equivalent, etched (light 70% shadow one pixel down-right). Buttons: minimize, maximize, close with thin 1px glyphs. Hit regions: title band drags, close button posts WM_CLOSE; resize edges and min/max are next.
 
-### 3.4 Window chrome (drawn by us in the non-client handler)
-- Title bar: 28px, flat accent fill when active, neutral when inactive, 12px title text left aligned with 8px padding, icon 16px optional.
-- Caption buttons right-aligned: minimize, maximize/restore, close. Glyphs are 10px vector strokes, 1px; hover = 12% overlay, close hover = #E5484D with white glyph, pressed = 20% overlay.
-- Border: 1px #646464-ish line (WINDOWFRAME) plus 3px invisible resize hit area; subtle 1px lighter inner edge in dark mode.
-- Drop shadow: 0 4px 16px rgba(0,0,0,0.35) drawn by the compositor (surfaces carry shadow metadata, not pixels).
-- Active window drawn above inactive; inactive window title/border de-emphasized per palette.
+### 3.6 Controls: real visual style (Wine uxtheme + a Plonk theme)
+Controls are drawn by Wine's user32/comctl32. With the classic path they are bevelled and opaque, which fights the glass look. The real style means Wine's **uxtheme** loads a **Plonk theme** (.msstyles: a resource DLL with an INI part list and 9-slice bitmaps with alpha) so every control state is a bitmap we design. Built-in classes then render through `DrawThemeBackground`, which needs the bitmap/DIB engine (AlphaBlend, StretchBlt, DIB sections) and comctl32 v6 theming (manifest + SubclassWindow behaviour).
 
-### 3.5 Controls (drawn by Wine's user32/comctl32 from the palette and metrics)
-Classic Win32 controls are bevelled. Tier 1 achieves a flat look by choosing the palette so the bevel collapses into a 1px border (BTNHILIGHT = 3DLIGHT = face-adjacent, BTNSHADOW = border). Tier 2 (section 6, decision 2) replaces this with a real visual style.
-
+Control look (light; dark swaps colours per 3.3):
 | Control | Rest | Hover | Pressed | Disabled | Focus |
 |---|---|---|---|---|---|
-| Push button | face #F0F0F0, 1px border #A0A0A0, 24px high | border #0A64C8, face #F7FAFF | face #DCE9FA, border #0A64C8, text offset 1px | text GRAYTEXT, face #F4F4F4, border #D0D0D0 | 1px dotted inner focus rect, #1A1A1A |
-| Default button | as rest, border #0A64C8 2px | as hover | as pressed | - | - |
-| Checkbox / radio | 14px box (radio circle), 1px #8A8F96, white fill | border #0A64C8 | fill #DCE9FA | text GRAYTEXT, border #C8CCD0 | focus rect on label |
-| Edit | white, 1px border #A0A0A0, 6px padding | border #6E7681 | n/a | face #F4F4F4, text GRAYTEXT | border #0A64C8, 2px |
-| Static / group box | no chrome; group box 1px #C8CCD0 line, label on interruption | - | - | text GRAYTEXT | - |
-| List box / list view | white, 1px border, row 20px, selection #0A64C8 with white text | row #EAF2FD | - | text GRAYTEXT | dotted row focus |
-| Combo box | edit + 16px drop button with chevron, list as list box | as button | list open: border #0A64C8 | as edit | as edit |
-| Scrollbar | 16px track #F0F0F0, thumb #C1C5CA (hover #A8ADB3, drag #8A8F96), arrows are chevrons | thumb darkens | - | thumb hidden | - |
-| Tab control | selected tab white with accent top line 2px | tab face #F7FAFF | - | - | dotted |
-| Progress | 8px track #E3E3E3, fill #0A64C8, no segments | - | - | - | - |
-| Menu | #F7F7F7, 1px border, 24px rows, 28px icon gutter, accelerator column right-aligned, selected row accent | - | - | text GRAYTEXT | - |
-| Tooltip | INFOBK, 1px border, 6px padding, 150ms delay | - | - | - | - |
+| Push button | white 78% fill, 1px border black 16%, top inner highlight white 70%, radius 4 | fill white 95%, border accent 55% | fill accent 14% over white, inner shadow 1px, text +1px | fill white 40%, text #8A8F96 | 2px accent ring 60% |
+| Default / primary | accent gradient #2A7FE0 -> #0A64C8, white text, inner highlight | +6% lighter | -8% darker | 40% opacity | accent ring + white 1px gap |
+| Check / radio | 14px, white fill, 1px #8A93A0, 4px radius (radio round) | border accent | fill accent 14% | border #C8CCD0 | accent ring |
+| Edit | white, 1px #A7B0BC, radius 4, padding 6 | border #6E7681 | n/a | fill #F4F4F4 | border accent 2px |
+| List / list view | white, row 22, selection accent with white text | row accent 8% | row accent 18% | text grey | dotted row |
+| Combo | edit + 22px chevron button | as button | list opens as glass popup | as edit | as edit |
+| Scrollbar | 10px thin overlay track (grows to 16 on hover), thumb black 22% | black 36% | black 50% | hidden | - |
+| Tab | selected: white, 2px accent top line | face white 40% | - | - | accent ring |
+| Progress | 6px track black 8%, fill accent gradient, 3px radius | - | - | - | - |
+| Menu / popup | **glass popup** (blur 24, tint white 70%), 1px edge, row 26, selection accent 14% | - | - | grey | - |
+| Tooltip | glass pill, tint white 80%, 150ms delay | - | - | - | - |
 
-Dark values come from the palette in 3.1; interactive accents use the dark accent #3B8EEA.
+Dark values come from 3.3; hover/pressed overlays use white instead of black.
 
-### 3.6 Motion and compositor effects
-Window open: 120ms fade+scale from 98%; close: 80ms fade. Drag: no live resample (move surface only). Respect reduced-motion. All effects live in the compositor, never in app drawing.
+### 3.7 Glass inside client areas
+Apps opt in as on Windows (DwmExtendFrameIntoClientArea, and painting with alpha-0 pixels via GDI/layered paths). We provide a `dwmapi` shim and treat alpha-0 or alpha-keyed regions in a client surface as glass; default is opaque. Toolbars/status bars may use it; text areas never do.
 
-### 3.7 DPI and scaling
-Default 96 dpi. Support 1x/1.5x/2x via devicePixelRatio: apps are DPI-unaware by default (we scale the surface, bitmap-stretched, as Windows does); DPI-aware apps get real metrics. Fonts and chrome are re-rasterized at scale; control bitmaps/icons use 1x and 2x assets.
+### 3.8 Typography
+UI font: bundled open font (Inter or Noto Sans; OFL), 12px at 96 dpi, grayscale AA, hinting off, 400/600 weights; GDI names (MS Shell Dlg, Tahoma, Segoe UI, Arial) map to it, monospace names to a bundled mono. Text over glass is always dark-on-tinted with the etched shadow; minimum 4.5:1 against the worst case (white tint 34% over saturated wallpaper). The 8x8 bitmap font remains only as a boot/fallback face; real glyph metrics are required before premium finish.
 
-### 3.8 Accessibility
-Minimum 4.5:1 contrast for text and 3:1 for control boundaries (palette above is built to it), visible focus indicator always, keyboard-operable chrome (Alt+Space menu, Alt+F4), high-contrast variant derived from the palette.
+### 3.9 Motion
+Open 140ms (fade + scale from 97%, ease-out), close 90ms, minimize to taskbar: shrink toward icon 180ms, drag: no live resample. Respect reduced-motion. All effects live in the compositor.
+
+### 3.10 DPI and accessibility
+1x/1.5x/2x via devicePixelRatio; DPI-unaware apps are stretched, aware apps get real metrics; chrome and fonts re-rasterize. "Reduce transparency" and high-contrast switch tints to opaque and boost borders. Visible focus ring always; chrome keyboard-operable (Alt+Space, Alt+F4).
 
 ## 4. Which layer draws what
 
 | Thing | Drawn by | We change it via |
 |---|---|---|
-| Window frame, title bar, caption buttons, system menu | Our win32u non-client handler | theme file + chrome renderer (ours) |
-| Client-area controls (button, edit, static, list...) | Wine user32 (GDI calls into our NtGdi) | system colors/metrics, fonts |
-| comctl32 controls (toolbar, status bar, listview, tab, progress) | Wine comctl32 (GDI, optionally uxtheme) | same + uxtheme theme |
-| Scrollbars of windows | Wine user32 scroll code | colors/metrics |
-| Desktop, taskbar, launcher, notifications, shadows, animations | Shell + compositor (ours) | shell code |
-| Cursors, icons | Our assets via NtUserSetCursor / LoadImage resources | asset pack |
+| Wallpaper, shadows, blur, rounded corners, animations | Compositor (ours; software now, WebGL later) | theme + compositor |
+| Window frame, title bar, caption buttons | Our win32u non-client code (alpha pixels) | theme + chrome renderer |
+| Client controls (button, edit, static, list, ...) | Wine user32 via GDI/uxtheme into our NtGdi | Plonk theme (msstyles) + palette + fonts |
+| comctl32 controls (toolbar, status bar, listview, tab, progress) | Wine comctl32 via uxtheme | same |
+| Popup menus, tooltips | Wine user32 windows we mark as glass surfaces | surface style flags |
+| Taskbar, launcher, notifications | Shell (ours) | shell code |
 
-## 5. Engineering plan for the look
+## 5. Roadmap (stages, each with an exit test)
+| Stage | Work | Exit test | Status |
+|---|---|---|---|
+| G0 | Software glass compositor + glass chrome + wallpaper | PNG goldens, 15 ms compose for 2 glass windows at 1024x768 (wasm) | done |
+| G1 | GPU compositor (WebGL blur/shadow); keeps software fallback | 60 fps with 8 glass windows | next |
+| G2 | Bitmap/DIB engine: NtGdi DIB sections, BitBlt/StretchBlt/AlphaBlend, icons, cursors | Wine gdi32 tests for blits pass | |
+| G3 | Font engine + real metrics (bundled fonts) | text layout tests match drawn text | |
+| G4 | Plonk theme as .msstyles, built by a generator; Wine uxtheme loads it; comctl32 v6 | golden PNG per control state, light + dark | |
+| G5 | Popup menus/tooltips as glass surfaces; client glass (dwmapi shim) | Notepad-class apps look native | |
+| G6 | Resize, min/max, taskbar, shell | shell scenario tests | |
 
-1. `theme` module: palette + metrics + font mapping as data (TOML/JSON, embedded), served to win32u for `GetSysColor`, `GetSystemMetrics`, `SystemParametersInfo`.
-2. Font engine (fontdue or similar, Rust, wasm friendly) behind NtGdi font calls; real metrics for layout.
-3. Non-client renderer for chrome, used by DefWindowProc handling.
-4. Bitmap/DIB engine so GDI fills, blits, icons, alpha work (needed for flat icons and caption glyphs).
-5. Compositor: shadows, z-order, focus rings of surfaces; later WebGL.
-6. Visual regression: golden PNG per control state and theme (the Node snapshot tool already produces PNGs), compared with tolerance in CI.
-
-## 6. Decisions needed
-1. **Flat look scope.** Tier 1 palette trick now (cheap, still has some bevel artifacts) vs. going straight to a real visual style.
-2. **Visual style mechanism.** (a) Keep classic GDI drawing + palette; (b) run Wine's uxtheme with a Plonk-authored msstyles/theme (truer flat look, more work, needs bitmap engine first); (c) intercept control painting in our layer (breaks fidelity, not recommended).
-3. **Fonts.** Which bundled families (Inter vs Noto Sans; mono choice), and licence acceptance (OFL).
-4. **Default scheme.** Light first, dark as a toggle, or follow `prefers-color-scheme`.
-5. **Reuse-Wine spike.** Approve the time-boxed spike to compile Wine's dibdrv/region/font code to wasm as a library (section 2.4.3).
-6. **Compatibility meter.** Approve enabling Wine's own tests in the build as the headline metric.
+## 6. Decisions
+Resolved: real visual style (not the palette trick); premium glass look; light first, dark derived.
+Open (defaults in bold, change if you disagree):
+1. **Theme mechanism: msstyles via Wine uxtheme** (alternatives: our own uxtheme-compatible provider replacing Wine's DLL, more work, more control).
+2. **Fonts: Inter + Noto Sans Mono** (OFL).
+3. **GPU path: WebGL for the compositor in G1**, software blur stays as fallback and for tests.
+4. Reuse spike for Wine's dibdrv/region code (section 2.4.3): run it **alongside G2**, since G2 is where it would pay off.
+5. Make Wine's conformance tests the headline compatibility metric (section 2.3), starting with user32 and gdi32.

@@ -25,7 +25,7 @@ const W = 1024, H = 768;
 const px = (buf, X, Y) => { const o = (Y * W + X) * 4; return [buf[o], buf[o + 1], buf[o + 2]].join(","); };
 const fbp = x.plonk_wine_compose(W, H) >>> 0;
 const fb = new Uint8Array(x.memory.buffer, fbp, W * H * 4);
-const red = px(fb, 10 + 4 + 50, 10 + 27 + 50);
+const red = px(fb, 10 + 4 + 50, 10 + 32 + 50);
 console.log(`wasm wine: window painted, pixel=${red} (${Date.now() - t0} ms)`);
 let ok = red === "200,30,30";
 if (process.env.SNAPSHOT) { // dump the desktop as PNG for eyeballing
