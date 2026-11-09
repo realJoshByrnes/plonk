@@ -1,5 +1,5 @@
 # Plonk status
-**Milestone:** M1 done (PE loader + thunks + kernel32 stubs). Next: M2 (Wine feasibility spike, then STOP and report).
+**Milestone:** M2 plan written (docs/M2_PLAN.md), awaiting go-ahead for M3.
 
 ## Works
 - Crates: mem, cpu, pe (sections/relocs/imports), host (Process, thunk dispatch, wasm exports), testkit.

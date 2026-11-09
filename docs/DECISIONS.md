@@ -5,3 +5,4 @@
 - Tests: Rust snippet table (testkit) natively; wasm checked via Node selftest.
 - No wasm-pack; plain cargo --target wasm32-unknown-unknown.
 - Thunks are magic eip addresses (0xF0000000+) outside guest RAM; stdcall cleanup done by host. Prebuilt tests/guests/hello.exe is committed so tests need no mingw.
+- M2: Wine-compiled-to-wasm32 is NO-GO; fallback (Wine PE DLLs interpreted, native syscalls + mini-wineserver) recommended. See docs/M2_PLAN.md.
