@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plonk</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b1b1f; color: #ddd; font: 14px system-ui, sans-serif; }
+  #bar { padding: 8px 12px; display: flex; gap: 12px; align-items: center; }
+  select, button { font: inherit; }
+  canvas { display: block; margin: 0 12px; background: #3a6ea5; image-rendering: pixelated; max-width: calc(100% - 24px); }
+  #log { padding: 8px 12px; color: #9a9; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <strong>Plonk</strong>
+  <label>App <select id="app"></select></label>
+  <button id="run">Run</button>
+</div>
+<canvas id="screen" width="1024" height="768"></canvas>
+<div id="log">loading…</div>
+<script type="module">
+const W = 1024, H = 768;
+const log = (s) => (document.getElementById("log").textContent = s);
+const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
+const enc = new TextEncoder();
+let x, wasm;
+
+async function boot(app) {
+  const manifest = await (await fetch("/manifest.json")).json();
+  const sel = document.getElementById("app");
+  if (!sel.options.length) for (const a of manifest.apps) sel.add(new Option(a));
+  app = app ?? sel.value;
+  wasm = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
+  x = wasm.instance.exports;
+  const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
+  const add = async (name, url) => {
+    const b = new Uint8Array(await (await fetch(url)).arrayBuffer());
+    const n = enc.encode(name);
+    x.plonk_wine_add_file(put(n), n.length, put(b), b.length);
+  };
+  log("fetching Wine DLLs…");
+  await Promise.all([
+    ...manifest.dlls.map((f) => add(`c:\windows\system32\${f}`, `/wine/out/${f}`)),
+    ...manifest.nls.map((f) => add(`nls\${f}`, `/wine/out/nls/${f}`)),
+    add("c:\app.exe", `/tests/guests/${app}`),
+  ]);
+  const path = enc.encode("c:\app.exe");
+  if (x.plonk_wine_boot(put(path), path.length) !== 0) return log("boot failed: " + msg());
+  step();
+}
+const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len()));
+
+function step() {
+  const st = x.plonk_wine_run();
+  const p = x.plonk_wine_compose(W, H) >>> 0;
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer.slice(p, p + W * H * 4)), W, H), 0, 0);
+  log(st === 0 ? "running (waiting for input) — click a window's red X to close it" : st === 1 ? "exited with code " + msg() : "error: " + msg());
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (!x) return;
+  const r = canvas.getBoundingClientRect();
+  x.plonk_wine_click(Math.floor((e.clientX - r.left) * W / r.width), Math.floor((e.clientY - r.top) * H / r.height));
+  step();
+});
+document.getElementById("run").onclick = () => boot();
+boot();
+</script>
+</body>
+</html>

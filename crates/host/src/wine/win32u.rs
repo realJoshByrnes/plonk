@@ -51,9 +51,9 @@ pub struct Window {
 struct Msg { hwnd: u32, msg: u32, wp: u32, lp: u32 }
 
 #[derive(Clone, Copy)]
-enum Gdi { Brush(u32), Pen(u32), Other }
+enum Gdi { Brush(u32), Other }
 
-struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32, text_color: u32, bk_color: u32 }
+struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32 }
 
 pub struct Wm {
     classes: Vec<Class>,
@@ -168,6 +168,8 @@ impl WineProc {
         b.fill_rect(s, 0, 0, ww, wh, 0xFFD4_D0C8);
         b.fill_rect(s, BORDER, BORDER, ww - 2 * BORDER, CAPTION - 4, 0xFF0A_246A);
         b.draw_text(s, BORDER + 4, BORDER + 6, &title, 0xFFFF_FFFF);
+        b.fill_rect(s, ww - BORDER - 20, BORDER + 2, 18, CAPTION - 8, 0xFFC0_3030); // close box
+        b.draw_text(s, ww - BORDER - 15, BORDER + 6, "x", 0xFFFF_FFFF);
     }
 
     fn show_window(&mut self, hwnd: u32, show: bool) -> Res<bool> {
@@ -309,7 +311,10 @@ impl WineProc {
             "NtUserShowWindow" => self.show_window(a[0], a[1] != 0)? as u32,
             "NtUserDestroyWindow" => self.destroy_window(a[0])? as u32,
             "NtUserGetMessage" => {
-                let m = match self.next_message(true) { Some(m) => m, None => return Err("idle: GetMessage with empty queue".into()) };
+                let m = match self.next_message(true) {
+                    Some(m) => m,
+                    None => { self.idle = true; self.took_over = true; return Ok(Some(0)); } // park at the syscall; resumed when input arrives
+                };
                 self.put_msg(a[0], m)?;
                 (m.msg != WM_QUIT) as u32
             }
@@ -425,6 +430,31 @@ impl WineProc {
         }))
     }
 
+    /// Queue a message for a window (input injection from the shell).
+    pub fn post_message(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) { self.wm.queue.push_back(Msg { hwnd, msg, wp, lp }); }
+
+    /// Desktop-level mouse click: close box -> WM_CLOSE, client area -> WM_LBUTTONDOWN.
+    pub fn click(&mut self, x: i32, y: i32) {
+        let hit = self.wm.windows.iter().rev().find(|(h, w)| **h != DESKTOP && w.visible && w.surface.is_some()
+            && x >= w.rect[0] && x < w.rect[2] && y >= w.rect[1] && y < w.rect[3]).map(|(h, w)| (*h, w.rect, w.style));
+        let Some((h, r, style)) = hit else { return };
+        let (lx, ly) = (x - r[0], y - r[1]);
+        if style & WS_CAPTION == WS_CAPTION && ly >= BORDER && ly < BORDER + CAPTION - 4 && lx >= r[2] - r[0] - BORDER - 20 {
+            self.post_message(h, WM_CLOSE, 0, 0);
+        } else {
+            let (ox, oy) = Wm::client_off(style);
+            self.post_message(h, 0x201, 1, ((ly - oy) as u32) << 16 | ((lx - ox) as u32 & 0xffff));
+        }
+    }
+
+    /// Composite all visible windows onto the desktop as RGBA bytes (for ImageData).
+    pub fn compose_rgba(&self, w: u32, h: u32) -> Vec<u8> {
+        let px = self.wm.backend.compose(w, h, 0xFF3A_6EA5);
+        let mut out = Vec::with_capacity(px.len() * 4);
+        for p in px { out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 0xFF]); }
+        out
+    }
+
     pub(crate) fn post_quit(&mut self, code: u32) { self.wm.quit = Some(code); }
 
     /// Allocate a GDI handle and publish it in the shared handle table that gdi32 (PE) reads.
@@ -466,7 +496,7 @@ impl WineProc {
         w(self, 132, 1024); w(self, 136, 768); w(self, 140, 320); w(self, 144, 240);
         w(self, 148, 1252);
         let _ = self.mem.w32(self.gdi_table + (h & 0xffff) * 24 + 16, at);
-        self.wm.dcs.insert(h, Dc { hwnd, clip, brush: 0, text_color: 0, bk_color: 0xFF_FFFF });
+        self.wm.dcs.insert(h, Dc { hwnd, clip, brush: 0 });
         h
     }
 
@@ -479,7 +509,8 @@ impl WineProc {
 
     fn dc_text(&mut self, hdc: u32, x: i32, y: i32, text: &str) {
         let Some(dc) = self.wm.dcs.get(&hdc) else { return };
-        let (hwnd, color) = (dc.hwnd, colorref(dc.text_color));
+        let hwnd = dc.hwnd;
+        let color = colorref(self.r32(self.gdi_table + (hdc & 0xffff) * 24 + 16).and_then(|at| self.r32(at + 24)).unwrap_or(0));
         let Some(w) = self.wm.windows.get(&hwnd) else { return };
         let Some(s) = w.surface else { return };
         let (ox, oy) = Wm::client_off(w.style);

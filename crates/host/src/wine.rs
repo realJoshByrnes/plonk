@@ -8,7 +8,8 @@ mod win32u;
 pub use win32u::Wm;
 use std::collections::{HashMap, VecDeque};
 
-pub const GUEST_SIZE: u32 = 0x8000_0000;
+/// Just past KUSER_SHARED_DATA (0x7ffe0000); a wasm32 Vec cannot exceed isize::MAX (2GB-1).
+pub const GUEST_SIZE: u32 = 0x7ffe_1000;
 const SYSCALL_THUNK: u32 = 0xF000_0000;
 const UNIXCALL_THUNK: u32 = 0xF000_0010;
 pub(crate) const CALL_RETURN_THUNK: u32 = 0xF000_0020;
@@ -28,6 +29,9 @@ pub const STATUS_INVALID_PARAMETER: u32 = 0xC000_000D;
 pub const STATUS_NO_MEMORY: u32 = 0xC000_0017;
 pub const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
 pub const STATUS_CONFLICTING_ADDRESSES: u32 = 0xC000_0018;
+
+#[derive(Debug, PartialEq)]
+pub enum RunState { Exited(u32), Idle }
 
 pub enum Obj {
     File { path: String, pos: u32, dir: bool },
@@ -52,6 +56,8 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    took_over: bool,
+    idle: bool,
     dcattr_next: u32,
     gdi_table: u32,
     /// Debug: log eip + eax/ebx/esi/esp for every instruction executed with eip in [lo, hi).
@@ -77,7 +83,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
@@ -328,13 +334,23 @@ impl WineProc {
     }
 
     // ---- run loop ----
-    /// Run the guest until process exit. Each loop iteration handles one guest->host trap.
-    pub fn run(&mut self, max_syscalls: u64) -> Res<u32> {
-        for _ in 0..max_syscalls {
+    /// Run the guest until it exits or parks waiting for input (GetMessage on an empty queue).
+    pub fn run_until_idle(&mut self, max_traps: u64) -> Res<RunState> {
+        self.idle = false;
+        for _ in 0..max_traps {
             self.pump()?;
-            if let Some(c) = self.exit { return Ok(c); }
+            if let Some(c) = self.exit { return Ok(RunState::Exited(c)); }
+            if self.idle { return Ok(RunState::Idle); }
         }
         Err("syscall budget exhausted".into())
+    }
+
+    /// Run to process exit; waiting for input is an error here (tests).
+    pub fn run(&mut self, max_syscalls: u64) -> Res<u32> {
+        match self.run_until_idle(max_syscalls)? {
+            RunState::Exited(c) => Ok(c),
+            RunState::Idle => Err("idle: waiting for input".into()),
+        }
     }
 
     /// Execute guest code until the next trap and handle it.
@@ -360,6 +376,7 @@ impl WineProc {
 
     /// Call into guest user32 like win32u's KeUserModeCallback: runs KiUserCallbackDispatcher(id, args, len)
     /// on the current guest stack until it executes NtCallbackReturn. Returns (return bytes, status).
+    #[allow(dead_code)] // for hooks/other kernel->user callbacks; window procs use call_guest
     pub(crate) fn user_callback(&mut self, id: u32, args: &[u8]) -> Res<(Vec<u8>, u32)> {
         let saved = self.cpu.clone();
         let mut sp = (self.cpu.r[ESP].wrapping_sub(0x400)) & !15;
@@ -445,7 +462,10 @@ impl WineProc {
     /// Ok(Some(status)) = return to caller; Ok(None) = handler already set the cpu state.
     fn dispatch(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
         if name.starts_with("NtUser") || name.starts_with("NtGdi") {
-            if let Some(r) = self.win32u_call(name, a)? { return Ok(Some(r)); }
+            if let Some(r) = self.win32u_call(name, a)? {
+                if std::mem::take(&mut self.took_over) { return Ok(None); }
+                return Ok(Some(r));
+            }
         }
         Ok(Some(match name {
             "NtAllocateVirtualMemory" => {

@@ -2,6 +2,7 @@
 pub mod ntuser_codes;
 pub mod reqnames;
 pub mod sysnames;
+pub mod wasm_wine;
 pub mod wine;
 use plonk_cpu::{Cpu, Exit, EAX, ESP};
 use plonk_mem::Mem;

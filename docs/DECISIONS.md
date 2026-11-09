@@ -10,3 +10,9 @@
 - Syscall args: [esp]=ret into ntdll stub, [esp+4]=caller ret, args from esp+8; host pops one return and the stub's `ret N` cleans up.
 - stdout is a fake file handle (Obj::Stdout) so Wine's WriteFile uses NtWriteFile, avoiding ConDrv/conhost.
 - Unimplemented syscalls abort the run with the name (fail fast); implement on demand.
+- win32u is ours (Wine 9's lives in win32u.so, which we do not run): NtUser*/NtGdi* are native Rust handlers; Wine PE user32/gdi32 stay unmodified.
+- gdi32 (PE) reads GDI handles/DC_ATTR from PEB->GdiSharedHandleTable in guest memory, so handles must be published there (type bits in handle, entry UserPointer = DC_ATTR).
+- Window procs for host-initiated sends are called directly (call_guest) rather than through user32's KeUserModeCallback packing; SendMessage/DispatchMessage from guest use win_proc_params so user32 dispatches itself.
+- GetMessage on an empty queue parks the guest at the syscall (RunState::Idle); input injection resumes it.
+- Each top-level window is its own display surface; the shell/compositor (placement, z-order) lives behind Backend::place/compose.
+- wasm32 Vec limit forces guest memory to end just past KUSER_SHARED_DATA (0x7ffe1000) instead of a full 2GB.
