@@ -7,6 +7,7 @@ fn main() {
     p.load_dir(&dir);
     p.files.insert("c:\\hello.exe".into(), std::fs::read(&a[1]).unwrap());
     p.lenient = std::env::var("LENIENT").is_ok();
+    if let Ok(v) = std::env::var("TRACE_RANGE") { let (a, b) = v.split_once('-').unwrap(); p.step_trace = Some((u32::from_str_radix(a, 16).unwrap(), u32::from_str_radix(b, 16).unwrap())); }
     let r = p.boot("c:\\hello.exe").and_then(|_| p.run(100_000));
     let n = p.trace.len();
     for l in p.trace.iter().skip(n.saturating_sub(std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(12))) {

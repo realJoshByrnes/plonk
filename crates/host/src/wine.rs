@@ -3,11 +3,15 @@
 use crate::sysnames::{NT, WIN32U};
 use plonk_cpu::{Cpu, Exit, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP};
 use plonk_mem::Mem;
+
+mod win32u;
+pub use win32u::Wm;
 use std::collections::{HashMap, VecDeque};
 
 pub const GUEST_SIZE: u32 = 0x8000_0000;
 const SYSCALL_THUNK: u32 = 0xF000_0000;
 const UNIXCALL_THUNK: u32 = 0xF000_0010;
+pub(crate) const CALL_RETURN_THUNK: u32 = 0xF000_0020;
 const KUSER: u32 = 0x7ffe_0000;
 const PEB: u32 = 0x7ffd_f000;
 const TEB: u32 = 0x7ffd_d000;
@@ -48,6 +52,14 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    dcattr_next: u32,
+    gdi_table: u32,
+    /// Debug: log eip + eax/ebx/esi/esp for every instruction executed with eip in [lo, hi).
+    pub step_trace: Option<(u32, u32)>,
+    pub wm: Wm,
+    guest_returned: bool,
+    ki_user_callback: u32,
+    callback_ret: Option<(u32, u32, u32)>,
     /// Debug: win32u syscalls with no handler return 0 and are recorded here instead of aborting.
     pub lenient: bool,
     pub stubbed: Vec<String>,
@@ -65,7 +77,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
@@ -226,6 +238,7 @@ impl WineProc {
         let exp = |n: &str, p: &Self| plonk_pe::find_export(&p.mem, ntdll.base, n).ok_or(format!("ntdll export {n} missing"));
         let (sd, ud, uh) = (exp("__wine_syscall_dispatcher", self)?, exp("__wine_unix_call_dispatcher", self)?, exp("__wine_unixlib_handle", self)?);
         let (ldr_init, thread_start) = (exp("LdrInitializeThunk", self)?, exp("RtlUserThreadStart", self)?);
+        self.ki_user_callback = exp("KiUserCallbackDispatcher", self)?;
         self.w32(sd, SYSCALL_THUNK)?;
         self.w32(ud, UNIXCALL_THUNK)?;
         self.w32(uh, 1)?;
@@ -251,6 +264,8 @@ impl WineProc {
         let stack = self.vm_reserve(None, STACK_SIZE).ok_or("stack")?;
         let stack_top = stack + STACK_SIZE;
         self.w32(PEB + 0x08, exe.base)?;
+        self.gdi_table = self.vm_reserve(None, 0x10000 * 24).ok_or("gdi table")?;
+        self.w32(PEB + 0x94, self.gdi_table)?; // GdiSharedHandleTable
         self.w32(PEB + 0x64, 1)?; // NumberOfProcessors
         self.w32(PEB + 0xA4, 10)?;
         self.w32(PEB + 0xA8, 0)?;
@@ -301,7 +316,7 @@ impl WineProc {
         for v in [0, 0, 0, ctx, 0xdead_babe] { sp -= 4; self.w32(sp, v)?; }
         self.cpu.r[ESP] = sp;
         self.cpu.eip = ldr_init;
-        self.cpu.thunk = (SYSCALL_THUNK, SYSCALL_THUNK + 0x20);
+        self.cpu.thunk = (SYSCALL_THUNK, SYSCALL_THUNK + 0x40);
         Ok(())
     }
 
@@ -313,19 +328,73 @@ impl WineProc {
     }
 
     // ---- run loop ----
+    /// Run the guest until process exit. Each loop iteration handles one guest->host trap.
     pub fn run(&mut self, max_syscalls: u64) -> Res<u32> {
         for _ in 0..max_syscalls {
-            match self.cpu.run(&mut self.mem, 500_000_000) {
-                Exit::Thunk(SYSCALL_THUNK) => self.syscall()?,
-                Exit::Thunk(UNIXCALL_THUNK) => self.unixcall()?,
-                e => return Err(format!("cpu stopped: {:?} eip={:#x}", e, self.cpu.eip)),
-            }
+            self.pump()?;
             if let Some(c) = self.exit { return Ok(c); }
         }
         Err("syscall budget exhausted".into())
     }
 
-    fn ret_stdcall(&mut self, status: u32) -> Res<()> {
+    /// Execute guest code until the next trap and handle it.
+    fn pump(&mut self) -> Res<()> {
+        let exit = if let Some((lo, hi)) = self.step_trace {
+            loop {
+                if self.cpu.eip >= lo && self.cpu.eip < hi {
+                    let r = self.cpu.r;
+                    eprintln!("@{:x} eax={:x} ebx={:x} esi={:x} esp={:x}", self.cpu.eip, r[0], r[3], r[6], r[4]);
+                }
+                if let Err(e) = self.cpu.step(&mut self.mem) { break e; }
+            }
+        } else {
+            self.cpu.run(&mut self.mem, 500_000_000)
+        };
+        match exit {
+            Exit::Thunk(SYSCALL_THUNK) => self.syscall(),
+            Exit::Thunk(UNIXCALL_THUNK) => self.unixcall(),
+            Exit::Thunk(CALL_RETURN_THUNK) => { self.guest_returned = true; Ok(()) }
+            e => Err(format!("cpu stopped: {:?} eip={:#x}", e, self.cpu.eip)),
+        }
+    }
+
+    /// Call into guest user32 like win32u's KeUserModeCallback: runs KiUserCallbackDispatcher(id, args, len)
+    /// on the current guest stack until it executes NtCallbackReturn. Returns (return bytes, status).
+    pub(crate) fn user_callback(&mut self, id: u32, args: &[u8]) -> Res<(Vec<u8>, u32)> {
+        let saved = self.cpu.clone();
+        let mut sp = (self.cpu.r[ESP].wrapping_sub(0x400)) & !15;
+        sp -= align(args.len() as u32, 16);
+        let args_ptr = sp;
+        self.mem.write_bytes(args_ptr, args).map_err(|_| "callback args")?;
+        for v in [args.len() as u32, args_ptr, id, 0] { sp -= 4; self.w32(sp, v)?; }
+        self.cpu.r[ESP] = sp;
+        self.cpu.eip = self.ki_user_callback;
+        self.callback_ret = None;
+        while self.callback_ret.is_none() {
+            self.pump()?;
+            if self.exit.is_some() { return Err("process exited inside callback".into()); }
+        }
+        let (ptr, len, status) = self.callback_ret.take().unwrap();
+        let ret = if len > 0 { self.mem.read_bytes(ptr, len).map_err(|_| "callback ret")?.to_vec() } else { Vec::new() };
+        self.cpu = saved;
+        Ok((ret, status))
+    }
+
+    /// wineserver request issued by PE code (`wine_server_call`). Only what the GUI path needs.
+    fn server_call(&mut self, req: u32) -> Res<()> {
+        let id = self.r32(req)? as usize;
+        let name = crate::reqnames::REQUESTS.get(id).copied().unwrap_or("?");
+        self.log(format!("  (server request {name})"));
+        match name {
+            "post_quit_message" => { let c = self.r32(req + 12)?; self.post_quit(c); }
+            _ => return Err(format!("unimplemented server request {name}")),
+        }
+        self.w32(req, 0)?; // reply.error = STATUS_SUCCESS
+        self.w32(req + 4, 0)?;
+        Ok(())
+    }
+
+    pub(crate) fn ret_stdcall(&mut self, status: u32) -> Res<()> {
         let ra = self.r32(self.cpu.r[ESP])?;
         self.cpu.r[ESP] = self.cpu.r[ESP].wrapping_add(4);
         self.cpu.r[EAX] = status;
@@ -337,7 +406,10 @@ impl WineProc {
         let (hlo, code, args) = (self.arg(0), self.arg(2), self.arg(3));
         let module = self.module_at(hlo).map(|(_, n)| n.to_string()).unwrap_or_default();
         self.log(format!("unixcall {module} code={code} args={args:#x}"));
-        let st = if module.ends_with("win32u.dll") && code == 0 { 0 } else {
+        let st = if module.ends_with("win32u.dll") && code == 0 { 0 }
+        else if hlo == 1 && code == 3 { self.server_call(args)?; 0 }
+        else if hlo == 1 && code == 2 { 0 } // wine_dbg_write
+        else {
             return Err(format!("unimplemented unix call {module} code={code}"));
         };
         // stdcall: 4 dword args (u64 handle, code, args) cleaned by the callee
@@ -360,11 +432,21 @@ impl WineProc {
         let st = match &r { Ok(Some(s)) => *s, Ok(None) => return Ok(()), Err(_) => 0xDEAD_0000 };
         let a: Vec<String> = args.iter().map(|a| format!("{a:x}")).collect();
         self.log(format!("{name}({}) = {st:#x}", a.join(",")));
-        match r { Err(e) => Err(format!("{name}: {e}")), Ok(_) => self.ret_stdcall(st) }
+        match r {
+            Err(e) => {
+                let ra = self.arg(0);
+                let where_ = self.module_at(ra).map(|(b, n)| format!("{n}+{:#x}", ra - b)).unwrap_or_default();
+                Err(format!("{name}: {e} [caller {ra:#x} {where_}]"))
+            }
+            Ok(_) => self.ret_stdcall(st),
+        }
     }
 
     /// Ok(Some(status)) = return to caller; Ok(None) = handler already set the cpu state.
     fn dispatch(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
+        if name.starts_with("NtUser") || name.starts_with("NtGdi") {
+            if let Some(r) = self.win32u_call(name, a)? { return Ok(Some(r)); }
+        }
         Ok(Some(match name {
             "NtAllocateVirtualMemory" => {
                 let (pbase, psize) = (a[1], a[3]);
@@ -683,6 +765,7 @@ impl WineProc {
                 }
             }
             "NtWow64IsProcessorFeaturePresent" => 0, // no SSE/x87-extension features advertised
+            "NtCallbackReturn" => { self.callback_ret = Some((a[0], a[1], a[2])); return Ok(None); }
             "NtTerminateProcess" => { self.exit = Some(a[1]); return Ok(None); }
             "NtClose" => if self.handles.remove(&a[0]).is_some() { 0 } else { STATUS_INVALID_HANDLE },
             _ if self.lenient && (name.starts_with("NtUser") || name.starts_with("NtGdi")) => {

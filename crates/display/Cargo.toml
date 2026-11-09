@@ -1,0 +1,6 @@
+[package]
+name = "plonk-display"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

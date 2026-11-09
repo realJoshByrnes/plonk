@@ -1,4 +1,6 @@
 //! Host: process (memory + cpu + thunk dispatch) and wasm exports.
+pub mod ntuser_codes;
+pub mod reqnames;
 pub mod sysnames;
 pub mod wine;
 use plonk_cpu::{Cpu, Exit, EAX, ESP};

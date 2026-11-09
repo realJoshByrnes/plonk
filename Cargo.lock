@@ -10,10 +10,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "plonk-display"
+version = "0.1.0"
+
+[[package]]
 name = "plonk-host"
 version = "0.1.0"
 dependencies = [
  "plonk-cpu",
+ "plonk-display",
  "plonk-mem",
  "plonk-pe",
 ]
