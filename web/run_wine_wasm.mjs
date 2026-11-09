@@ -1,5 +1,6 @@
 // Headless Node check of the Wine path in wasm: boot gui_stay.exe, verify pixels, click close.
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, writeFileSync } from "node:fs";
+import { deflateSync } from "node:zlib";
 const root = new URL("../", import.meta.url);
 const wineOut = new URL("wine/out/", root);
 if (!existsSync(new URL("user32.dll", wineOut))) { console.log("wasm wine: SKIP (wine/out not built)"); process.exit(0); }
@@ -27,6 +28,13 @@ const fb = new Uint8Array(x.memory.buffer, fbp, W * H * 4);
 const red = px(fb, 10 + 4 + 50, 10 + 27 + 50);
 console.log(`wasm wine: window painted, pixel=${red} (${Date.now() - t0} ms)`);
 let ok = red === "200,30,30";
+if (process.env.SNAPSHOT) { // dump the desktop as PNG for eyeballing
+  const crc = (b) => { let c, t = []; for (let n = 0; n < 256; n++) { c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } let r = 0xffffffff; for (const v of b) r = t[(r ^ v) & 255] ^ (r >>> 8); return (r ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const b = Buffer.concat([Buffer.from(type), data]); const o = Buffer.alloc(4); o.writeUInt32BE(data.length); const c = Buffer.alloc(4); c.writeUInt32BE(crc(b)); return Buffer.concat([o, b, c]); };
+  const raw = Buffer.alloc((W * 4 + 1) * H); for (let y = 0; y < H; y++) { raw[y * (W * 4 + 1)] = 0; Buffer.from(fb.subarray(y * W * 4, (y + 1) * W * 4)).copy(raw, y * (W * 4 + 1) + 1); }
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(W, 0); ihdr.writeUInt32BE(H, 4); ihdr[8] = 8; ihdr[9] = 6;
+  writeFileSync(process.env.SNAPSHOT, Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]));
+}
 x.plonk_wine_click(10 + 320 - 4 - 10, 10 + 4 + 8); // close box
 st = x.plonk_wine_run();
 ok &&= st === 1 && msg() === "7";

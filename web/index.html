@@ -54,6 +54,7 @@ const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plo
 
 function step() {
   const st = x.plonk_wine_run();
+  document.getElementById("out").textContent = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stdout_ptr() >>> 0, x.plonk_wine_stdout_len()));
   const p = x.plonk_wine_compose(W, H) >>> 0;
   ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer.slice(p, p + W * H * 4)), W, H), 0, 0);
   log(st === 0 ? "running (waiting for input) — click a window's red X to close it" : st === 1 ? "exited with code " + msg() : "error: " + msg());

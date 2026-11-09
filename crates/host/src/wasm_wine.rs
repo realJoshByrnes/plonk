@@ -54,3 +54,8 @@ pub extern "C" fn plonk_wine_msg_ptr() -> *const u8 { unsafe { MSG.as_ptr() } }
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub extern "C" fn plonk_wine_msg_len() -> u32 { unsafe { MSG.len() as u32 } }
+
+#[no_mangle]
+pub extern "C" fn plonk_wine_stdout_ptr() -> *const u8 { wine().stdout.as_ptr() }
+#[no_mangle]
+pub extern "C" fn plonk_wine_stdout_len() -> u32 { wine().stdout.len() as u32 }

@@ -80,11 +80,17 @@ impl Backend for SoftBackend {
         let (x1, y1) = ((x + w).min(s.w as i32), (y + h).min(s.h as i32));
         for yy in y0..y1 { for xx in x0..x1 { s.pix[(yy as u32 * s.w + xx as u32) as usize] = argb; } }
     }
-    /// Placeholder glyphs: 6x8 cells, a solid 5x7 block per non-space character. Real fonts come
-    /// from the browser (Canvas fillText) or a bitmap font later.
+    /// 8x8 bitmap font (font8x8, public domain), 8px advance. Non-ASCII renders as '?'.
     fn draw_text(&mut self, id: SurfaceId, x: i32, y: i32, text: &str, argb: u32) {
-        for (i, c) in text.chars().enumerate() {
-            if !c.is_whitespace() { self.fill_rect(id, x + i as i32 * 6, y, 5, 7, argb); }
+        let mut cx = x;
+        for c in text.chars() {
+            let g = font8x8::legacy::BASIC_LEGACY[if (c as u32) < 128 { c as usize } else { b'?' as usize }];
+            for (row, bits) in g.iter().enumerate() {
+                for col in 0..8 {
+                    if bits >> col & 1 != 0 { self.fill_rect(id, cx + col, y + row as i32, 1, 1, argb); }
+                }
+            }
+            cx += 8;
         }
     }
     fn blit(&mut self, id: SurfaceId, x: i32, y: i32, w: u32, h: u32, pixels: &[u32], stride: u32) {

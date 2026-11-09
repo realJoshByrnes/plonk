@@ -12,11 +12,11 @@
 - Build Wine DLLs: wine/build.sh in WSL, copy into wine/out (+ nls/ from wine-src/nls). Generators: wine/gen_*.sh.
 
 ## Gaps
-- Text is placeholder blocks (no font engine); only solid brushes, PatBlt/FillRect; no pens/lines/bitmaps/regions/clipping beyond the paint rect.
+- Text is a fixed 8x8 bitmap font (font8x8; no GDI font engine/metrics); only solid brushes, PatBlt/FillRect; no pens/lines/bitmaps/regions/clipping beyond the paint rect.
 - Child windows, menus, non-client painting beyond a static frame, keyboard, timers, focus/activation, multiple threads: not implemented.
 - Registry/VFS minimal; most wineserver requests unimplemented; unimplemented syscalls abort the run (LENIENT=1 in run_wine stubs NtUser/NtGdi).
 - SSE not implemented (build guests with -mno-sse); x87 uses f64 precision. Guest memory capped at 0x7ffe1000 (wasm32 Vec limit).
 - CRT-linked (msvcrt) apps untested.
 
 ## Next
-Real text (font via Canvas fillText bridge or bitmap font), pens/lines/bitmaps, child windows/controls, keyboard, timers, a shell (move/stack windows), WebGL compositor.
+Pens/lines/bitmaps, child windows/controls, keyboard, timers, a shell (move/stack windows), WebGL compositor.
