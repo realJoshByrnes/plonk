@@ -18,5 +18,8 @@
 - SSE not implemented (build guests with -mno-sse); x87 uses f64 precision. Guest memory capped at 0x7ffe1000 (wasm32 Vec limit).
 - CRT-linked (msvcrt) apps untested.
 
+## Design
+See docs/DESIGN.md (compatibility strategy, Plonk Flat visual spec, layer ownership, open decisions); preview at /web/design.html.
+
 ## Next
 Pens/lines/bitmaps, child windows/controls, keyboard, timers, a shell (move/stack windows), WebGL compositor.

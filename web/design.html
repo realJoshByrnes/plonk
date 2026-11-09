@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plonk Flat - visual preview</title>
+<style>
+  :root {
+    --desktop:#3A6EA5; --window:#FFFFFF; --text:#1A1A1A; --face:#F0F0F0; --hilight:#FFFFFF; --light:#E3E3E3;
+    --shadow:#A0A0A0; --dkshadow:#696969; --frame:#646464; --accent:#0A64C8; --accent-text:#FFFFFF;
+    --cap-active:#0A64C8; --cap-inactive:#DADDE1; --cap-inactive-text:#5C6168; --gray:#8A8F96; --menu:#F7F7F7;
+    --hover-face:#F7FAFF; --pressed:#DCE9FA; --track:#E3E3E3; --thumb:#C1C5CA; --disabled-face:#F4F4F4; --disabled-border:#D0D0D0;
+    --font: Inter, "Noto Sans", system-ui, "Segoe UI", sans-serif;
+  }
+  :root[data-theme="dark"] {
+    --desktop:#1B2433; --window:#1F2329; --text:#E6E8EB; --face:#2B3038; --hilight:#3A4048; --light:#323840;
+    --shadow:#1A1D22; --dkshadow:#0F1114; --frame:#0F1114; --accent:#3B8EEA; --cap-active:#2C3A52; --cap-inactive:#23272E;
+    --cap-inactive-text:#8B9199; --gray:#6B7078; --menu:#262B32; --hover-face:#333A44; --pressed:#2E4466; --track:#323840; --thumb:#4A515B;
+    --disabled-face:#252A31; --disabled-border:#343A43;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--desktop); color: #fff; font: 12px var(--font); min-height: 100vh; }
+  header { padding: 12px 16px; display: flex; gap: 12px; align-items: center; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header button { font: inherit; padding: 4px 10px; }
+  main { display: flex; flex-wrap: wrap; gap: 20px; padding: 8px 16px 32px; align-items: flex-start; }
+  .win { width: 360px; background: var(--face); border: 1px solid var(--frame); box-shadow: 0 4px 16px rgba(0,0,0,.35); color: var(--text); }
+  .win.inactive .cap { background: var(--cap-inactive); color: var(--cap-inactive-text); }
+  .cap { height: 28px; background: var(--cap-active); color: #fff; display: flex; align-items: center; padding-left: 8px; font-weight: 600; }
+  .cap span { flex: 1; }
+  .cap i { width: 28px; height: 22px; margin-right: 1px; display: grid; place-items: center; font-style: normal; font-size: 12px; }
+  .cap i.close:hover { background: #E5484D; }
+  .menu { background: var(--menu); height: 24px; display: flex; gap: 14px; align-items: center; padding: 0 8px; border-bottom: 1px solid var(--light); }
+  .body { padding: 12px; display: grid; gap: 10px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .btn { height: 24px; min-width: 76px; padding: 0 12px; background: var(--face); color: var(--text); border: 1px solid var(--shadow); font: inherit; }
+  .btn.hover { border-color: var(--accent); background: var(--hover-face); }
+  .btn.pressed { border-color: var(--accent); background: var(--pressed); padding-top: 1px; }
+  .btn.default { border: 2px solid var(--accent); }
+  .btn.disabled { color: var(--gray); background: var(--disabled-face); border-color: var(--disabled-border); }
+  .btn.focus { outline: 1px dotted var(--text); outline-offset: -4px; }
+  .edit { height: 24px; width: 150px; background: var(--window); color: var(--text); border: 1px solid var(--shadow); padding: 0 6px; display: flex; align-items: center; }
+  .edit.focus { border: 2px solid var(--accent); padding: 0 5px; }
+  .edit.disabled { background: var(--disabled-face); color: var(--gray); border-color: var(--disabled-border); }
+  .chk { display: inline-flex; gap: 6px; align-items: center; }
+  .chk b { width: 14px; height: 14px; background: var(--window); border: 1px solid var(--gray); display: inline-block; text-align: center; line-height: 12px; font-size: 11px; color: var(--accent); }
+  .chk.radio b { border-radius: 50%; }
+  .list { width: 150px; background: var(--window); color: var(--text); border: 1px solid var(--shadow); }
+  .list div { height: 20px; padding: 3px 6px; }
+  .list .sel { background: var(--accent); color: var(--accent-text); }
+  .list .hov { background: color-mix(in srgb, var(--accent) 14%, var(--window)); }
+  .sb { display: flex; align-items: center; gap: 0; height: 16px; background: var(--face); border: 1px solid var(--light); width: 200px; }
+  .sb em { width: 16px; text-align: center; color: var(--gray); font-style: normal; }
+  .sb .thumb { flex: 1; height: 10px; margin: 0 1px; background: var(--thumb); }
+  .prog { width: 200px; height: 8px; background: var(--track); }
+  .prog div { width: 60%; height: 100%; background: var(--accent); }
+  .tip { background: #FFFFE1; color: #1A1A1A; border: 1px solid var(--frame); padding: 6px; display: inline-block; }
+  :root[data-theme="dark"] .tip { background: #33383F; color: #E6E8EB; }
+  .swatches { display: grid; grid-template-columns: repeat(4, 84px); gap: 6px; padding: 12px; background: var(--face); color: var(--text); border: 1px solid var(--frame); }
+  .sw { font-size: 10px; } .sw b { display: block; height: 32px; border: 1px solid var(--frame); margin-bottom: 2px; }
+  h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; opacity: .8; margin: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Plonk Flat - visual preview (spec: docs/DESIGN.md, section 3)</h1>
+  <button id="t">Toggle light / dark</button>
+</header>
+<main>
+  <section>
+    <div class="win">
+      <div class="cap"><span>Controls - active window</span><i>_</i><i>&#9633;</i><i class="close">&#10005;</i></div>
+      <div class="menu"><span>File</span><span>Edit</span><span>View</span><span>Help</span></div>
+      <div class="body">
+        <h2>Push buttons</h2>
+        <div class="row">
+          <button class="btn">Rest</button><button class="btn hover">Hover</button><button class="btn pressed">Pressed</button>
+          <button class="btn default">Default</button><button class="btn disabled">Disabled</button><button class="btn focus">Focus</button>
+        </div>
+        <h2>Edit</h2>
+        <div class="row"><div class="edit">Rest</div><div class="edit focus">Focused</div><div class="edit disabled">Disabled</div></div>
+        <h2>Check / radio</h2>
+        <div class="row">
+          <span class="chk"><b></b>Off</span><span class="chk"><b>&#10003;</b>On</span>
+          <span class="chk radio"><b></b>Off</span><span class="chk radio"><b>&#9679;</b>On</span>
+        </div>
+        <h2>List, scrollbar, progress</h2>
+        <div class="row">
+          <div class="list"><div>Item one</div><div class="hov">Item two (hover)</div><div class="sel">Item three (selected)</div></div>
+          <div style="display:grid;gap:10px"><div class="sb"><em>&#8249;</em><div class="thumb"></div><em>&#8250;</em></div><div class="prog"><div></div></div><span class="tip">Tooltip text</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section style="display:grid;gap:20px">
+    <div class="win inactive" style="width:300px">
+      <div class="cap"><span>Inactive window</span><i>_</i><i>&#9633;</i><i class="close">&#10005;</i></div>
+      <div class="body"><div class="row"><button class="btn">OK</button><button class="btn">Cancel</button></div></div>
+    </div>
+    <div class="swatches" id="sw"></div>
+  </section>
+</main>
+<script>
+const root = document.documentElement;
+const names = { "--desktop": "Desktop", "--window": "Window", "--text": "Text", "--face": "Face", "--hilight": "Highlight 3D", "--light": "3D light",
+  "--shadow": "Shadow", "--dkshadow": "Dark shadow", "--frame": "Frame", "--accent": "Accent", "--cap-active": "Caption", "--cap-inactive": "Caption (inactive)" };
+function swatches() {
+  const cs = getComputedStyle(root);
+  document.getElementById("sw").innerHTML = Object.entries(names).map(([v, n]) =>
+    `<div class="sw"><b style="background:var(${v})"></b>${n}<br>${cs.getPropertyValue(v).trim()}</div>`).join("");
+}
+document.getElementById("t").onclick = () => { root.dataset.theme = root.dataset.theme === "dark" ? "light" : "dark"; swatches(); };
+swatches();
+</script>
+</body>
+</html>
