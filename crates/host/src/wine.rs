@@ -56,6 +56,7 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    atoms: Vec<(String, u32)>,
     took_over: bool,
     idle: bool,
     dcattr_next: u32,
@@ -83,7 +84,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
@@ -95,6 +96,7 @@ impl WineProc {
         let rd = |p: &str| std::fs::read_dir(p).into_iter().flatten().flatten().collect::<Vec<_>>();
         for e in rd(dir) {
             let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if n.ends_with(".msstyles") { self.files.insert(format!("c:\\windows\\resources\\themes\\light\\{n}"), std::fs::read(e.path()).unwrap()); }
             if n.ends_with(".dll") { self.files.insert(format!("c:\\windows\\system32\\{n}"), std::fs::read(e.path()).unwrap()); }
         }
         for e in rd(&format!("{dir}/nls")) {
@@ -785,6 +787,16 @@ impl WineProc {
                 }
             }
             "NtWow64IsProcessorFeaturePresent" => 0, // no SSE/x87-extension features advertised
+            "NtAddAtom" | "NtFindAtom" => {
+                // (WCHAR *name, ULONG length_bytes, RTL_ATOM *atom)
+                let adding = name == "NtAddAtom";
+                let an = if a[1] > 0 { let mut v = Vec::new(); for i in 0..a[1] / 2 { v.push(self.mem.r16(a[0] + i * 2).unwrap_or(0)); } String::from_utf16_lossy(&v).to_ascii_lowercase() } else { String::new() };
+                match self.atoms.iter().find(|(n, _)| *n == an).map(|(_, id)| *id) {
+                    Some(id) => { self.w16(a[2], id as u16)?; 0 }
+                    None if adding => { let id = 0xC000 + self.atoms.len() as u32; self.atoms.push((an, id)); self.w16(a[2], id as u16)?; 0 }
+                    None => STATUS_OBJECT_NAME_NOT_FOUND,
+                }
+            }
             "NtCallbackReturn" => { self.callback_ret = Some((a[0], a[1], a[2])); return Ok(None); }
             "NtTerminateProcess" => { self.exit = Some(a[1]); return Ok(None); }
             "NtClose" => if self.handles.remove(&a[0]).is_some() { 0 } else { STATUS_INVALID_HANDLE },

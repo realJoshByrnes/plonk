@@ -8,7 +8,7 @@ rm -rf ~/wine-build && mkdir ~/wine-build && cd ~/wine-build
   --without-sane --without-v4l2 --without-gstreamer --without-opencl --without-pcap --without-usb --without-wayland --disable-tests >cfg.log 2>&1
 make -j"$(nproc)" __tooldeps__ >tools.log 2>&1
 make -j"$(nproc)" include/all >inc.log 2>&1
-D="ntdll kernel32 kernelbase win32u user32 gdi32 advapi32 sechost ucrtbase msvcrt imm32 rpcrt4 msimg32"
+D="ntdll kernel32 kernelbase win32u user32 gdi32 advapi32 sechost ucrtbase msvcrt imm32 rpcrt4 msimg32 uxtheme comctl32 shlwapi version"
 make -j"$(nproc)" -k $(for d in $D; do echo dlls/$d/i386-windows/$d.dll; done) >dll.log 2>&1
 mkdir -p /tmp/wine-out
 for d in $D; do i686-w64-mingw32-strip -o /tmp/wine-out/$d.dll dlls/$d/i386-windows/$d.dll; done

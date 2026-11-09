@@ -138,6 +138,18 @@ fn sys_color(i: u32) -> u32 {
         0x0A64C8, 0xFFFFFF, 0xF1F3F6, 0xA7B0BC, 0x8A8F96, 0x1A1A1A, 0x5C6168, 0xFFFFFF, 0x8E98A6, 0xE6EAF0, 0x1A1A1A, 0xFFFFE1];
     0xFF00_0000 | T.get(i as usize).copied().unwrap_or(0xF1F3F6)
 }
+/// GetSystemMetrics values (96 dpi) matching the Plonk Glass metrics in docs/DESIGN.md.
+fn system_metric(i: u32) -> u32 {
+    match i {
+        0 | 16 | 61 | 78 | 59 => 1024, 1 | 79 | 60 => 768, 17 | 62 => 728,
+        2 | 3 | 9 | 10 | 20 | 21 => 16, 4 => 28, 5 | 6 | 83 | 84 => 1, 7 | 8 => 3, 11 | 12 | 13 | 14 => 32, 15 => 24,
+        19 | 75 | 81 | 80 => 1, 28 | 34 => 120, 29 | 35 => 40, 30 => 36, 31 => 22, 32 | 33 => 4, 36 | 37 | 68 | 69 => 4, 38 | 39 => 75,
+        43 => 3, 45 | 46 => 2, 47 | 57 => 160, 48 | 58 => 24, 49 | 50 => 16, 51 => 20, 52 => 28, 53 => 20, 54 | 55 => 18, 56 => 8, 63 => 1, 71 | 72 => 13,
+        76 | 77 => 0,
+        _ => 0,
+    }
+}
+
 fn argb_to_colorref(c: u32) -> u32 { (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff) }
 
 impl WineProc {
@@ -427,6 +439,9 @@ impl WineProc {
             }
             "NtUserSetCapture" => std::mem::replace(&mut self.wm.capture, a[0]),
             "NtUserQueryInputContext" => 0,
+            "NtUserSetCursorIconData" | "NtUserSetCursor" | "NtUserDestroyCursor" => 1,
+            "NtGdiOpenDCW" => self.new_dc(DESKTOP, None),
+            "NtGdiCreatePatternBrushInternal" => self.gdi_alloc(0x100000, Gdi::Brush(0xFFC0_C0C0)),
             "NtUserSetTimer" => {
                 // (hwnd, id, elapse, callback, tolerance)
                 let id = if a[1] == 0 { 0x1000 + self.wm.timers.len() as u32 } else { a[1] };
@@ -679,6 +694,8 @@ impl WineProc {
                 n => return Err(format!("NtUserCallNoParam {n:?}")),
             },
             "NtUserCallOneParam" => match codes::CALL_ONE_PARAM.get(a[1] as usize).copied() {
+                Some("GetSystemMetrics") => system_metric(a[0]),
+                Some("CreateCursorIcon") => { let h = self.wm.next_menu; self.wm.next_menu += 4; h }
                 Some("CreateMenu") => { let h = self.wm.next_menu; self.wm.next_menu += 4; self.wm.menus.insert(h, Menu::default()); h }
                 Some("GetMenuItemCount") => self.menu_count(a[0]),
                 Some("GetSysColor") => argb_to_colorref(sys_color(a[0])),

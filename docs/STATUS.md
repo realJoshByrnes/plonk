@@ -21,6 +21,12 @@
 ## Design
 See docs/DESIGN.md (compatibility strategy, Plonk Flat visual spec, layer ownership, open decisions); preview at /web/design.html.
 
+## G4 theme spike (findings)
+- Built uxtheme, comctl32, shlwapi, version and Wine's stock `light.msstyles` (7.5MB resource DLL) in WSL; all load in the interpreter.
+- `tests/guests/gui_button_v6.exe` (comctl32 v6 manifest + InitCommonControls) runs to idle after adding atoms, GetSystemMetrics table, cursor/icon stubs.
+- Theming still inactive: uxtheme is never loaded because comctl32 resolves to the v5 build. Needs side-by-side (winsxs) resolution of Microsoft.Windows.Common-Controls 6.0 via ntdll activation contexts (VFS layout + manifest), then registry ThemeManager seeding (ThemeActive, DllName=...\light.msstyles, ColorName, SizeName), then DrawThemeBackground paths (AlphaBlend/StretchBlt exist).
+- After that: replace light.msstyles bitmaps with the Plonk Glass set (generator tool) - see DESIGN section 3.6.
+
 ## Next (priority order, hand-off)
 1. G4 Plonk control theme: author .msstyles (windres + generator), have Wine uxtheme load it; needs comctl32/uxtheme DLLs in wine/build.sh and DrawThemeBackground-related NtGdi calls.
 2. (keyboard, Edit, timers, basic menus done) Submenus, menu keyboard nav, check marks, clipboard, caret rendering.
