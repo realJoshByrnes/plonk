@@ -20,6 +20,7 @@ const WM_NCHITTEST: u32 = 0x84;
 const WM_SYSCOMMAND: u32 = 0x112;
 const WS_VISIBLE: u32 = 0x1000_0000;
 const WS_CAPTION: u32 = 0x00C0_0000;
+const WS_CHILD: u32 = 0x4000_0000;
 const CW_USEDEFAULT: u32 = 0x8000_0000;
 const BORDER: i32 = 4;
 const CAPTION: i32 = 23;
@@ -45,15 +46,21 @@ pub struct Window {
     invalid: Option<Rect>, // client coordinates
     needs_erase: bool,
     surface: Option<SurfaceId>,
+    ex_style: u32,
+    id: u32,
+    inst: u32,
+    userdata: u32,
+    proc_override: u32,
+    extra: Vec<u8>,
 }
 
 #[derive(Clone, Copy)]
 struct Msg { hwnd: u32, msg: u32, wp: u32, lp: u32 }
 
 #[derive(Clone, Copy)]
-enum Gdi { Brush(u32), Other }
+enum Gdi { Brush(u32), NullBrush, Pen(u32, bool), Region(Rect), Font, Other }
 
-struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32 }
+struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32, pen: u32, pos: (i32, i32), font: u32 }
 
 pub struct Wm {
     classes: Vec<Class>,
@@ -70,6 +77,9 @@ pub struct Wm {
     zorder: Vec<u32>, // top-level windows, bottom to top
     active: u32,
     drag: Option<(u32, i32, i32)>, // hwnd, grab offset
+    capture: u32,
+    focus: u32,
+    client_procs_w: [u32; 14],
     pub keep_snapshot: bool,
     pub snapshot: Option<(u32, u32, Vec<u32>)>,
 }
@@ -78,10 +88,10 @@ impl Wm {
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
-            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None,
+            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, client_procs_w: [0; 14],
         };
         w.classes.push(Class { atom: 0xC000, name: "#32769".into(), wndproc: 0, bg: 0, raw: [0; 12], ansi: false });
-        w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None });
+        w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None, ex_style: 0, id: 0, inst: 0, userdata: 0, proc_override: 0, extra: Vec::new() });
         w
     }
     fn new_gdi(&mut self, kind: u32, g: Gdi) -> u32 {
@@ -95,15 +105,18 @@ impl Wm {
     }
     fn client_rect(&self, hwnd: u32) -> Rect {
         let Some(w) = self.windows.get(&hwnd) else { return [0; 4] };
-        let (ox, oy) = Self::client_off(w.style);
+        let (ox, oy) = if w.surface.is_some() { Self::client_off(w.style) } else { (0, 0) };
         [0, 0, (w.rect[2] - w.rect[0] - 2 * ox).max(0), (w.rect[3] - w.rect[1] - oy - ox).max(0)]
     }
 }
 
 fn colorref(c: u32) -> u32 { 0xFF00_0000 | (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff) }
 fn sys_color(i: u32) -> u32 {
-    match i { 5 => 0xFFFF_FFFF, 15 => 0xFFD4_D0C8, 1 => 0xFF3A_6EA5, 0 => 0xFFC0_C0C0, _ => 0xFFD4_D0C8 }
+    const T: [u32; 25] = [0xD4D0C8, 0x3A6EA5, 0x0A246A, 0x808080, 0xD4D0C8, 0xFFFFFF, 0x000000, 0x000000, 0x000000, 0xFFFFFF, 0xD4D0C8, 0xD4D0C8, 0x808080,
+        0x0A246A, 0xFFFFFF, 0xD4D0C8, 0x808080, 0x808080, 0x000000, 0xD4D0C8, 0xFFFFFF, 0x404040, 0xD4D0C8, 0x000000, 0xFFFFE1];
+    0xFF00_0000 | T.get(i as usize).copied().unwrap_or(0xD4D0C8)
 }
+fn argb_to_colorref(c: u32) -> u32 { (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff) }
 
 impl WineProc {
     // ---- guest memory helpers ----
@@ -150,7 +163,7 @@ impl WineProc {
 
     fn send(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) -> Res<u32> {
         let Some(w) = self.wm.windows.get(&hwnd) else { return Ok(0) };
-        let proc_ = self.wm.classes[w.class].wndproc;
+        let proc_ = if w.proc_override != 0 { w.proc_override } else { self.wm.classes[w.class].wndproc };
         if proc_ == 0 { return Ok(0); }
         self.call_guest(proc_, &[hwnd, msg, wp, lp])
     }
@@ -160,6 +173,7 @@ impl WineProc {
         if let Some(w) = self.wm.windows.get_mut(&hwnd) {
             if w.visible { w.invalid = Some(cr); w.needs_erase |= erase; }
         }
+        for c in self.children_of(hwnd) { self.invalidate(c, erase); }
     }
 
     fn paint_frame(&mut self, hwnd: u32) {
@@ -212,7 +226,7 @@ impl WineProc {
             if remove { self.wm.quit = None; }
             Some(Msg { hwnd: 0, msg: WM_QUIT, wp: code, lp: 0 })
         } else {
-            self.wm.windows.iter().find(|(_, w)| w.visible && w.invalid.is_some()).map(|(h, _)| Msg { hwnd: *h, msg: WM_PAINT, wp: 0, lp: 0 })
+            self.wm.windows.iter().find(|(h, w)| **h != DESKTOP && w.visible && w.invalid.is_some() && self.is_shown(**h)).map(|(h, _)| Msg { hwnd: *h, msg: WM_PAINT, wp: 0, lp: 0 })
         };
         m
     }
@@ -223,11 +237,86 @@ impl WineProc {
         Ok(())
     }
 
+    fn toplevel_of(&self, mut hwnd: u32) -> u32 {
+        while let Some(w) = self.wm.windows.get(&hwnd) { if w.surface.is_some() || w.parent == DESKTOP || w.parent == 0 { return hwnd; } hwnd = w.parent; }
+        hwnd
+    }
+
+    /// Client-area origin of `hwnd` in desktop (screen) coordinates.
+    fn client_origin_screen(&self, hwnd: u32) -> (i32, i32) {
+        let Some(w) = self.wm.windows.get(&hwnd) else { return (0, 0) };
+        if w.surface.is_some() {
+            let (ox, oy) = Wm::client_off(w.style);
+            (w.rect[0] + ox, w.rect[1] + oy)
+        } else {
+            let (px, py) = self.client_origin_screen(w.parent);
+            (px + w.rect[0], py + w.rect[1])
+        }
+    }
+
+    fn get_window_long(&self, hwnd: u32, idx: i32) -> u32 {
+        let Some(w) = self.wm.windows.get(&hwnd) else { return 0 };
+        match idx {
+            -16 => w.style | if w.visible { WS_VISIBLE } else { 0 },
+            -20 => w.ex_style,
+            -4 => if w.proc_override != 0 { w.proc_override } else { self.wm.classes[w.class].wndproc },
+            -6 => w.inst,
+            -12 => w.id,
+            -21 => w.userdata,
+            -8 => 0,
+            i if i >= 0 && (i as usize) + 4 <= w.extra.len() => u32::from_le_bytes(w.extra[i as usize..i as usize + 4].try_into().unwrap()),
+            _ => 0,
+        }
+    }
+
+    fn set_window_long(&mut self, hwnd: u32, idx: i32, v: u32) -> u32 {
+        let old = self.get_window_long(hwnd, idx);
+        let Some(w) = self.wm.windows.get_mut(&hwnd) else { return 0 };
+        match idx {
+            -16 => w.style = v & !WS_VISIBLE,
+            -20 => w.ex_style = v,
+            -4 => w.proc_override = v,
+            -12 => w.id = v,
+            -21 => w.userdata = v,
+            i if i >= 0 && (i as usize) + 4 <= w.extra.len() => w.extra[i as usize..i as usize + 4].copy_from_slice(&v.to_le_bytes()),
+            _ => {}
+        }
+        old
+    }
+
+    fn is_shown(&self, mut hwnd: u32) -> bool {
+        while hwnd != DESKTOP && hwnd != 0 {
+            let Some(w) = self.wm.windows.get(&hwnd) else { return false };
+            if !w.visible { return false; }
+            hwnd = w.parent;
+        }
+        true
+    }
+
+    fn children_of(&self, hwnd: u32) -> Vec<u32> {
+        self.wm.windows.iter().filter(|(h, w)| **h != DESKTOP && hwnd != 0 && w.parent == hwnd && w.surface.is_none()).map(|(h, _)| *h).collect()
+    }
+
+    /// Deepest visible window under a desktop point (starting from a top-level window).
+    fn hit_child(&self, top: u32, x: i32, y: i32) -> u32 {
+        for c in self.children_of(top).into_iter().rev() {
+            if !self.wm.windows[&c].visible { continue; }
+            let (cx, cy) = self.client_origin_screen(c);
+            let cr = self.wm.client_rect(c);
+            if x >= cx && x < cx + cr[2] && y >= cy && y < cy + cr[3] { return self.hit_child(c, x, y); }
+        }
+        top
+    }
+
     fn fill_client(&mut self, hwnd: u32, r: Rect, argb: u32) {
-        let Some(w) = self.wm.windows.get(&hwnd) else { return };
-        let Some(s) = w.surface else { return };
-        let (ox, oy) = Wm::client_off(w.style);
-        self.wm.backend.fill_rect(s, ox + r[0], oy + r[1], r[2] - r[0], r[3] - r[1], argb);
+        let top = self.toplevel_of(hwnd);
+        let Some(s) = self.wm.windows.get(&top).and_then(|w| w.surface) else { return };
+        if !self.is_shown(hwnd) { return; }
+        let cr = self.wm.client_rect(hwnd);
+        let r = [r[0].max(0), r[1].max(0), r[2].min(cr[2]), r[3].min(cr[3])];
+        let (ox, oy) = self.client_origin_screen(hwnd);
+        let (tx, ty) = { let t = &self.wm.windows[&top]; (t.rect[0], t.rect[1]) };
+        self.wm.backend.fill_rect(s, ox - tx + r[0], oy - ty + r[1], r[2] - r[0], r[3] - r[1], argb);
     }
 
     fn brush_argb(&self, brush: u32) -> u32 {
@@ -267,7 +356,21 @@ impl WineProc {
     /// Ok(None): not handled here.
     pub(crate) fn win32u_call(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
         Ok(Some(match name {
-            "NtUserInitializeClientPfnArrays" => 0,
+            "NtUserInitializeClientPfnArrays" => {
+                let mut procs = [0u32; 14];
+                for (i, p) in procs.iter_mut().enumerate() { *p = self.r32(a[1] + i as u32 * 4)?; }
+                self.wm.client_procs_w = procs;
+                // win32u registers the built-in control classes with user32's window procedures
+                for (name, idx) in [("Button", 0), ("ComboBox", 1), ("#32770", 3), ("Edit", 4), ("ListBox", 5), ("MDIClient", 6), ("ScrollBar", 7), ("Static", 8), ("IME", 9)] {
+                    let atom = 0xC001 + self.wm.classes.len() as u32;
+                    self.wm.classes.push(Class { atom, name: name.into(), wndproc: procs[idx], bg: 0, raw: [48, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0], ansi: false });
+                }
+                0
+            }
+            "NtUserSetCapture" => std::mem::replace(&mut self.wm.capture, a[0]),
+            "NtUserSetFocus" => std::mem::replace(&mut self.wm.focus, a[0]),
+            "NtUserGetFocus" => self.wm.focus,
+            "NtUserGetForegroundWindow" => self.wm.active,
             "NtUserGetSystemDpiForProcess" => 96,
             "NtUserGetProcessDpiAwarenessContext" | "NtUserGetThreadDpiAwarenessContext" => 0x6010,
             "NtUserGetClassInfoEx" => {
@@ -290,7 +393,6 @@ impl WineProc {
             }
             "NtUserCreateWindowEx" => {
                 let (ex_style, style) = (a[0], a[4]);
-                let _ = ex_style;
                 let cname = self.class_arg(a[1])?;
                 let ci = self.wm.classes.iter().position(|c| match &cname { Ok(at) => c.atom == *at, Err(n) => c.name.eq_ignore_ascii_case(n) });
                 let Some(ci) = ci else { self.log(format!("  (CreateWindowEx: unknown class {cname:?})")); return Ok(Some(0)); };
@@ -300,10 +402,10 @@ impl WineProc {
                 let hwnd = self.wm.next_hwnd;
                 self.wm.next_hwnd += 4;
                 let parent = if a[9] == 0 { DESKTOP } else { a[9] };
-                let toplevel = parent == DESKTOP;
+                let toplevel = style & WS_CHILD == 0;
                 let surface = if toplevel { Some(self.wm.backend.create_surface(cx.max(1) as u32, cy.max(1) as u32)) } else { None };
                 if toplevel { self.wm.zorder.push(hwnd); }
-                self.wm.windows.insert(hwnd, Window { class: ci, style: style & !WS_VISIBLE, rect: [x, y, x + cx, y + cy], parent, text: title.clone(), visible: false, invalid: None, needs_erase: false, surface });
+                self.wm.windows.insert(hwnd, Window { class: ci, style: style & !WS_VISIBLE, rect: [x, y, x + cx, y + cy], parent: if toplevel { DESKTOP } else { parent }, text: title.clone(), visible: false, invalid: None, needs_erase: false, surface, ex_style, id: a[10], inst: a[11], userdata: 0, proc_override: 0, extra: vec![0; self.wm.classes[ci].raw[4] as usize] });
                 // CREATESTRUCTW on the guest stack for WM_NCCREATE / WM_CREATE
                 let cs = (self.cpu.r[ESP].wrapping_sub(0x800)) & !15;
                 let (name_p, _) = self.put_wstr_at(cs + 0x40, &title);
@@ -316,6 +418,12 @@ impl WineProc {
                 }
                 if style & WS_VISIBLE != 0 { self.show_window(hwnd, true)?; }
                 hwnd
+            }
+            "NtUserSetWindowLong" | "NtUserSetWindowLongPtr" => self.set_window_long(a[0], a[1] as i32, a[2]),
+            "NtUserInvalidateRect" => {
+                let hs: Vec<u32> = if a[0] == 0 { self.wm.zorder.clone() } else { vec![a[0]] };
+                for h in hs { self.invalidate(h, a[2] != 0); }
+                1
             }
             "NtUserShowWindow" => self.show_window(a[0], a[1] != 0)? as u32,
             "NtUserDestroyWindow" => self.destroy_window(a[0])? as u32,
@@ -403,7 +511,90 @@ impl WineProc {
                 if ok { let _ = self.mem.w8(self.gdi_table + (a[0] & 0xffff) * 24 + 14, 0); }
                 ok as u32
             }
-            "NtGdiGetStockObject" => self.gdi_alloc(0x100000 | 0x80_0000, Gdi::Brush(if a[0] == 0 { 0xFFFF_FFFF } else { 0xFF80_8080 })),
+            "NtGdiGetStockObject" => match a[0] {
+                0..=4 => self.gdi_alloc(0x100000 | 0x80_0000, Gdi::Brush([0xFFFF_FFFF, 0xFFC0_C0C0, 0xFF80_8080, 0xFF40_4040, 0xFF00_0000][a[0] as usize])),
+                5 => self.gdi_alloc(0x100000 | 0x80_0000, Gdi::NullBrush),
+                6 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0xFFFF_FFFF, false)),
+                7 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0xFF00_0000, false)),
+                8 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0, true)),
+                _ => self.gdi_alloc(0x0a0000 | 0x80_0000, Gdi::Font),
+            },
+            "NtUserInternalGetWindowText" => {
+                let t = self.wm.windows.get(&a[0]).map(|w| w.text.clone()).unwrap_or_default();
+                let u: Vec<u16> = t.encode_utf16().take((a[2] as usize).saturating_sub(1)).collect();
+                for (i, c) in u.iter().enumerate() { self.w16(a[1] + i as u32 * 2, *c)?; }
+                if a[2] > 0 { self.w16(a[1] + u.len() as u32 * 2, 0)?; }
+                u.len() as u32
+            }
+            "NtGdiGetTextMetricsW" => {
+                let tm: [(u32, u32); 11] = [(0, 8), (4, 7), (8, 1), (12, 0), (16, 0), (20, 8), (24, 8), (28, 400), (32, 0), (36, 96), (40, 96)];
+                for (o, v) in tm { self.w32(a[1] + o, v)?; }
+                self.w16(a[1] + 44, 32)?; self.w16(a[1] + 46, 255)?; self.w16(a[1] + 48, b'?' as u16)?; self.w16(a[1] + 50, 32)?;
+                self.w32(a[1] + 52, 0)?; self.w32(a[1] + 56, 0)?;
+                1
+            }
+            "NtGdiGetTextExtentExW" => {
+                // (hdc, str, count, max_extent, *fit, *dx, SIZE*, flags): fixed 8x8 cells
+                let n = a[2];
+                if a[4] != 0 { self.w32(a[4], n)?; }
+                if a[5] != 0 { for i in 0..n { self.w32(a[5] + i * 4, (i + 1) * 8)?; } }
+                self.w32(a[6], n * 8)?;
+                self.w32(a[6] + 4, 8)?;
+                1
+            }
+            "NtGdiGetAndSetDCDword" => { if a[3] != 0 { self.w32(a[3], 0)?; } 1 }
+            "NtGdiComputeXformCoefficients" => 1,
+            "NtGdiExtSelectClipRgn" => 2,
+            "NtGdiCreatePen" => self.gdi_alloc(0x300000, Gdi::Pen(colorref(a[2]), a[0] == 5)),
+            "NtGdiSelectPen" => {
+                let Some(dc) = self.wm.dcs.get_mut(&a[0]) else { return Ok(Some(0)) };
+                std::mem::replace(&mut dc.pen, a[1])
+            }
+            "NtGdiSelectFont" => {
+                let Some(dc) = self.wm.dcs.get_mut(&a[0]) else { return Ok(Some(0)) };
+                std::mem::replace(&mut dc.font, a[1])
+            }
+            "NtGdiCreateRectRgn" => self.gdi_alloc(0x040000, Gdi::Region([a[0] as i32, a[1] as i32, a[2] as i32, a[3] as i32])),
+            "NtGdiGetRandomRgn" => { // visible/clip region of the DC, in screen coordinates
+                let Some(dc) = self.wm.dcs.get(&a[0]) else { return Ok(Some(0)) };
+                let (hwnd, clip) = (dc.hwnd, dc.clip);
+                let (ox, oy) = self.client_origin_screen(hwnd);
+                let c = clip.unwrap_or_else(|| self.wm.client_rect(hwnd));
+                self.wm.gdi.insert(a[1], Gdi::Region([ox + c[0], oy + c[1], ox + c[2], oy + c[3]]));
+                1
+            }
+            "NtGdiIntersectClipRect" => {
+                let r = [a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32];
+                if let Some(dc) = self.wm.dcs.get_mut(&a[0]) {
+                    dc.clip = Some(match dc.clip { Some(c) => [c[0].max(r[0]), c[1].max(r[1]), c[2].min(r[2]), c[3].min(r[3])], None => r });
+                }
+                2
+            }
+            "NtGdiTransformPoints" => { // identity mapping: copy points
+                let (src, dst, n) = (a[1], a[2], a[3]);
+                for i in 0..n * 2 { let v = self.r32(src + i * 4)?; self.w32(dst + i * 4, v)?; }
+                1
+            }
+            "NtGdiMoveTo" => {
+                if let Some(dc) = self.wm.dcs.get_mut(&a[0]) { let old = dc.pos; dc.pos = (a[1] as i32, a[2] as i32); if a[3] != 0 { self.w32(a[3], old.0 as u32)?; self.w32(a[3] + 4, old.1 as u32)?; } }
+                1
+            }
+            "NtGdiLineTo" => {
+                let Some(dc) = self.wm.dcs.get(&a[0]) else { return Ok(Some(0)) };
+                let (from, pen) = (dc.pos, dc.pen);
+                let to = (a[1] as i32, a[2] as i32);
+                self.dc_line(a[0], from, to, pen);
+                if let Some(dc) = self.wm.dcs.get_mut(&a[0]) { dc.pos = to; }
+                1
+            }
+            "NtGdiRectangle" => {
+                let (hdc, r) = (a[0], [a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32]);
+                let Some(dc) = self.wm.dcs.get(&hdc) else { return Ok(Some(0)) };
+                let (brush, pen) = (dc.brush, dc.pen);
+                if !matches!(self.wm.gdi.get(&brush), Some(Gdi::NullBrush)) { let c = self.brush_argb(brush); self.dc_fill(hdc, [r[0] + 1, r[1] + 1, r[2] - 1, r[3] - 1], c); }
+                for (f, t) in [((r[0], r[1]), (r[2] - 1, r[1])), ((r[2] - 1, r[1]), (r[2] - 1, r[3] - 1)), ((r[2] - 1, r[3] - 1), (r[0], r[3] - 1)), ((r[0], r[3] - 1), (r[0], r[1]))] { self.dc_line(hdc, f, t, pen); }
+                1
+            }
             "NtGdiPatBlt" => {
                 let (hdc, x, y, w, h, rop) = (a[0], a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32, a[5]);
                 let Some(dc) = self.wm.dcs.get(&hdc) else { return Ok(Some(0)) };
@@ -420,11 +611,28 @@ impl WineProc {
             "NtGdiGetDeviceCaps" => match a[1] { 8 => 1024, 10 => 768, 12 => 32, 14 => 1, 88 | 90 => 96, 24 => 0xFFFF_FFFF, _ => 0 },
             "NtUserCallNoParam" => match codes::CALL_NO_PARAM.get(a[0] as usize).copied() {
                 Some("GetDesktopWindow") => DESKTOP,
+                Some("ReleaseCapture") => { self.wm.capture = 0; 1 }
                 n => return Err(format!("NtUserCallNoParam {n:?}")),
             },
             "NtUserCallOneParam" => match codes::CALL_ONE_PARAM.get(a[1] as usize).copied() {
-                Some("GetSysColor") => 0,
+                Some("GetSysColor") => argb_to_colorref(sys_color(a[0])),
+                Some("GetSysColorBrush") => self.gdi_alloc(0x100000 | 0x80_0000, Gdi::Brush(sys_color(a[0]))),
+                Some("GetSysColorPen") => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(sys_color(a[0]), false)),
                 n => return Err(format!("NtUserCallOneParam {n:?} arg={:#x}", a[0])),
+            },
+            "NtUserCallHwndParam" => match codes::CALL_HWND_PARAM.get(a[2] as usize).copied() {
+                Some("GetClientRect") => { let r = self.wm.client_rect(a[0]); self.put_rect(a[1], r)?; 1 }
+                Some("GetWindowRect") => {
+                    let Some(w) = self.wm.windows.get(&a[0]) else { return Ok(Some(0)) };
+                    let r = if w.surface.is_some() { w.rect } else {
+                        let (x, y) = self.client_origin_screen(a[0]);
+                        [x, y, x + w.rect[2] - w.rect[0], y + w.rect[3] - w.rect[1]]
+                    };
+                    self.put_rect(a[1], r)?;
+                    1
+                }
+                Some(n) if n.starts_with("GetWindowLong") => self.get_window_long(a[0], a[1] as i32),
+                n => return Err(format!("NtUserCallHwndParam {n:?} hwnd={:#x} param={:#x}", a[0], a[1])),
             },
             "NtUserCallHwnd" => match codes::CALL_HWND.get(a[1] as usize).copied() {
                 Some("IsWindow") => self.wm.windows.contains_key(&a[0]) as u32,
@@ -432,6 +640,8 @@ impl WineProc {
                 Some("IsWindowVisible") => self.wm.windows.get(&a[0]).map_or(0, |w| w.visible as u32),
                 Some("GetWindowDpiAwarenessContext") => 0x8000_0010,
                 Some("GetDpiForWindow") => 96,
+                Some("GetDialogInfo" | "GetWindowContextHelpId" | "GetWindowInputContext" | "GetDefaultImeWindow" | "GetMDIClientInfo") => 0,
+                Some("IsWindowEnabled" | "IsWindowUnicode") => 1,
                 Some("GetParent") => self.wm.windows.get(&a[0]).map_or(0, |w| if w.parent == DESKTOP { 0 } else { w.parent }),
                 n => return Err(format!("NtUserCallHwnd {n:?}")),
             },
@@ -475,8 +685,16 @@ impl WineProc {
                 } else if in_caption {
                     self.wm.drag = Some((h, lx, ly));
                 } else {
-                    let (ox, oy) = Wm::client_off(style);
-                    self.post_message(h, 0x201, 1, ((ly - oy) as u32) << 16 | ((lx - ox) as u32 & 0xffff));
+                    let t = self.hit_child(h, x, y);
+                    let (cx, cy) = self.client_origin_screen(t);
+                    self.post_message(t, 0x201, 1, ((y - cy) as u32) << 16 | ((x - cx) as u32 & 0xffff));
+                }
+            }
+            1 if self.wm.drag.is_none() => {
+                let t = self.wm.capture;
+                if t != 0 && self.wm.windows.contains_key(&t) {
+                    let (cx, cy) = self.client_origin_screen(t);
+                    self.post_message(t, 0x200, 1, ((y - cy) as u32) << 16 | ((x - cx) as u32 & 0xffff));
                 }
             }
             1 => {
@@ -488,7 +706,14 @@ impl WineProc {
                     }
                 }
             }
-            _ => self.wm.drag = None,
+            _ => {
+                self.wm.drag = None;
+                let t = if self.wm.capture != 0 { self.wm.capture } else { self.window_at(x, y).map_or(0, |h| self.hit_child(h, x, y)) };
+                if t != 0 {
+                    let (cx, cy) = self.client_origin_screen(t);
+                    self.post_message(t, 0x202, 0, ((y - cy) as u32) << 16 | ((x - cx) as u32 & 0xffff));
+                }
+            }
         }
     }
 
@@ -544,8 +769,28 @@ impl WineProc {
         w(self, 132, 1024); w(self, 136, 768); w(self, 140, 320); w(self, 144, 240);
         w(self, 148, 1252);
         let _ = self.mem.w32(self.gdi_table + (h & 0xffff) * 24 + 16, at);
-        self.wm.dcs.insert(h, Dc { hwnd, clip, brush: 0 });
+        self.wm.dcs.insert(h, Dc { hwnd, clip, brush: 0, pen: 0, pos: (0, 0), font: 0 });
         h
+    }
+
+    fn pen_argb(&self, pen: u32) -> Option<u32> {
+        match self.wm.gdi.get(&pen) { Some(Gdi::Pen(c, false)) => Some(*c), Some(Gdi::Pen(_, true)) => None, _ => Some(0xFF00_0000) }
+    }
+
+    /// 1px Bresenham line in the DC's client coordinates with the pen color.
+    fn dc_line(&mut self, hdc: u32, from: (i32, i32), to: (i32, i32), pen: u32) {
+        let Some(c) = self.pen_argb(pen) else { return };
+        let (mut x, mut y) = from;
+        let (dx, dy) = ((to.0 - x).abs(), -(to.1 - y).abs());
+        let (sx, sy) = (if x < to.0 { 1 } else { -1 }, if y < to.1 { 1 } else { -1 });
+        let mut err = dx + dy;
+        loop {
+            self.dc_fill(hdc, [x, y, x + 1, y + 1], c);
+            if (x, y) == to { break; }
+            let e2 = 2 * err;
+            if e2 >= dy { err += dy; x += sx; }
+            if e2 <= dx { err += dx; y += sy; }
+        }
     }
 
     fn dc_fill(&mut self, hdc: u32, mut r: Rect, argb: u32) {
@@ -559,10 +804,12 @@ impl WineProc {
         let Some(dc) = self.wm.dcs.get(&hdc) else { return };
         let hwnd = dc.hwnd;
         let color = colorref(self.r32(self.gdi_table + (hdc & 0xffff) * 24 + 16).and_then(|at| self.r32(at + 24)).unwrap_or(0));
-        let Some(w) = self.wm.windows.get(&hwnd) else { return };
-        let Some(s) = w.surface else { return };
-        let (ox, oy) = Wm::client_off(w.style);
-        self.wm.backend.draw_text(s, ox + x, oy + y, text, color);
+        let top = self.toplevel_of(hwnd);
+        let Some(s) = self.wm.windows.get(&top).and_then(|w| w.surface) else { return };
+        if !self.is_shown(hwnd) { return; }
+        let (ox, oy) = self.client_origin_screen(hwnd);
+        let (tx, ty) = { let t = &self.wm.windows[&top]; (t.rect[0], t.rect[1]) };
+        self.wm.backend.draw_text(s, ox - tx + x, oy - ty + y, text, color);
     }
 }
 

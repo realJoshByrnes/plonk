@@ -14,6 +14,8 @@ fn main() {
         p.mouse(k, f[1].parse().unwrap(), f[2].parse().unwrap());
         println!("{:?}", p.run_until_idle(1_000_000));
     }
+    let n: usize = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    for l in p.trace.iter().skip(p.trace.len().saturating_sub(n)) { println!("  {l}"); }
     let px = p.compose_rgba(1024, 768);
     let mut out = b"P6\n1024 768\n255\n".to_vec();
     for c in px.chunks(4) { out.extend_from_slice(&c[..3]); }
