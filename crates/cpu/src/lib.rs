@@ -1,6 +1,8 @@
 //! i386 interpreter core. 32-bit protected-mode flat model (+ FS/GS bases). No FPU/SSE yet.
 use plonk_mem::{Fault, Mem};
 
+mod fpu;
+
 pub const EAX: usize = 0;
 pub const ECX: usize = 1;
 pub const EDX: usize = 2;
@@ -51,6 +53,10 @@ pub struct Cpu {
     pub fs_base: u32,
     pub gs_base: u32,
     pub tsc: u64,
+    pub fst: [f64; 8],
+    pub ftop: u32,
+    pub fsw: u32,
+    pub fcw: u32,
     seg: u32,
     ow: u32,
 }
@@ -63,7 +69,7 @@ fn sx(v: u32, w: u32) -> i64 {
 }
 
 impl Cpu {
-    pub fn new() -> Self { Cpu { eflags: 0x202, ow: 32, ..Default::default() } }
+    pub fn new() -> Self { Cpu { eflags: 0x202, ow: 32, fcw: 0x37F, ..Default::default() } }
 
     pub fn run(&mut self, mem: &mut Mem, max_steps: u64) -> Exit {
         for _ in 0..max_steps {
@@ -479,6 +485,7 @@ impl Cpu {
             0xC9 => { self.r[ESP] = self.r[EBP]; self.r[EBP] = self.pop(m)?; }
             0xCC => return Err(Exit::Interrupt(3)),
             0xCD => { let n = self.f8(m)?; return Err(Exit::Interrupt(n)); }
+            0xD8..=0xDF => self.fpu(m, op, start)?,
             0xE0..=0xE3 => {
                 let d = self.f8(m)? as i8 as i32 as u32;
                 let take = if op == 0xE3 { self.r[ECX] == 0 } else {

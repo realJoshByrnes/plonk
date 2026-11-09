@@ -4,21 +4,17 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let dir = a.get(2).cloned().unwrap_or("wine/out".into());
     let mut p = WineProc::new();
-    for d in ["ntdll", "kernel32", "kernelbase", "win32u", "user32", "gdi32"] {
-        if let Ok(b) = std::fs::read(format!("{dir}/{d}.dll")) {
-            p.files.insert(format!("c:\\windows\\system32\\{d}.dll"), b);
-        }
-    }
-    if let Ok(rd) = std::fs::read_dir(format!("{dir}/nls")) {
-        for e in rd.flatten() {
-            p.files.insert(format!("nls\\{}", e.file_name().to_string_lossy()), std::fs::read(e.path()).unwrap());
-        }
-    }
+    p.load_dir(&dir);
     p.files.insert("c:\\hello.exe".into(), std::fs::read(&a[1]).unwrap());
+    p.lenient = std::env::var("LENIENT").is_ok();
     let r = p.boot("c:\\hello.exe").and_then(|_| p.run(100_000));
     let n = p.trace.len();
-    for l in p.trace.iter().skip(n.saturating_sub(12)) {
+    for l in p.trace.iter().skip(n.saturating_sub(std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(12))) {
         println!("  {l}");
     }
+    if let Ok(b) = p.mem.read_bytes(p.cpu.eip.wrapping_sub(8), 24) { println!("  code@eip-8: {:02x?}", b); }
+    println!("  module: {:x?}", p.module_at(p.cpu.eip));
+    println!("  regs: {:x?}", p.cpu.r);
+    if !p.stubbed.is_empty() { println!("  stubbed: {}", p.stubbed.join(" ")); }
     println!("result: {:?} stdout={:?} eip={:#x}", r, String::from_utf8_lossy(&p.stdout), p.cpu.eip);
 }

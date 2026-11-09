@@ -11,14 +11,7 @@ fn hello_through_wine() {
         return;
     }
     let mut p = WineProc::new();
-    for d in ["ntdll", "kernel32", "kernelbase", "win32u", "user32", "gdi32"] {
-        if let Ok(b) = std::fs::read(dir.join(format!("{d}.dll"))) {
-            p.files.insert(format!("c:\\windows\\system32\\{d}.dll"), b);
-        }
-    }
-    for e in std::fs::read_dir(dir.join("nls")).unwrap().flatten() {
-        p.files.insert(format!("nls\\{}", e.file_name().to_string_lossy()), std::fs::read(e.path()).unwrap());
-    }
+    p.load_dir(dir.to_str().unwrap());
     p.files.insert("c:\\hello.exe".into(), include_bytes!("../../../tests/guests/hello.exe").to_vec());
     let r = p.boot("c:\\hello.exe").and_then(|_| p.run(100_000));
     let tail: Vec<_> = p.trace.iter().rev().take(5).collect();

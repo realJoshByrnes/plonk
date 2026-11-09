@@ -45,9 +45,12 @@ pub struct WineProc {
     scratch: u32,
     exit: Option<u32>,
     pub ntdll_base: u32,
-    images: Vec<u32>,
+    images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    /// Debug: win32u syscalls with no handler return 0 and are recorded here instead of aborting.
+    pub lenient: bool,
+    pub stubbed: Vec<String>,
     values: HashMap<(String, String), (u32, Vec<u8>)>,
     ticks: u64,
     nls: HashMap<String, (u32, u32)>,
@@ -62,10 +65,28 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
+    }
+
+    /// Native convenience: load every *.dll from `dir` as c:\windows\system32\<name> and
+    /// every file in `dir/nls` as nls\<name>.
+    pub fn load_dir(&mut self, dir: &str) {
+        let rd = |p: &str| std::fs::read_dir(p).into_iter().flatten().flatten().collect::<Vec<_>>();
+        for e in rd(dir) {
+            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if n.ends_with(".dll") { self.files.insert(format!("c:\\windows\\system32\\{n}"), std::fs::read(e.path()).unwrap()); }
+        }
+        for e in rd(&format!("{dir}/nls")) {
+            self.files.insert(format!("nls\\{}", e.file_name().to_string_lossy()), std::fs::read(e.path()).unwrap());
+        }
+    }
+
+    /// Debug: which loaded image (base, name) contains `addr`.
+    pub fn module_at(&self, addr: u32) -> Option<(u32, &str)> {
+        self.images.iter().filter(|(b, _)| *b <= addr).max_by_key(|(b, _)| *b).map(|(b, n)| (*b, n.as_str()))
     }
 
     // ---- helpers ----
@@ -194,8 +215,8 @@ impl WineProc {
             u32::from_le_bytes(data[pe + 24 + 56..pe + 24 + 60].try_into().unwrap())
         };
         let base = match self.vm_reserve(Some(pref), size) { Some(b) => b, None => self.vm_reserve(None, size).ok_or("no VM for image")? };
-        self.images.push(base);
-        plonk_pe::map(&data, &mut self.mem, Some(base))
+        self.images.push((base, path.to_string()));
+        plonk_pe::map_ex(&data, &mut self.mem, Some(base), false)
     }
 
     pub fn boot(&mut self, exe_path: &str) -> Res<()> {
@@ -313,9 +334,18 @@ impl WineProc {
     }
 
     fn unixcall(&mut self) -> Res<()> {
-        let (hlo, hhi, code, args) = (self.arg(0), self.arg(1), self.arg(2), self.arg(3));
-        self.log(format!("unixcall handle={hhi:x}:{hlo:x} code={code} args={args:#x}"));
-        Err(format!("unimplemented unix call handle={hlo} code={code}"))
+        let (hlo, code, args) = (self.arg(0), self.arg(2), self.arg(3));
+        let module = self.module_at(hlo).map(|(_, n)| n.to_string()).unwrap_or_default();
+        self.log(format!("unixcall {module} code={code} args={args:#x}"));
+        let st = if module.ends_with("win32u.dll") && code == 0 { 0 } else {
+            return Err(format!("unimplemented unix call {module} code={code}"));
+        };
+        // stdcall: 4 dword args (u64 handle, code, args) cleaned by the callee
+        let ra = self.r32(self.cpu.r[ESP])?;
+        self.cpu.r[ESP] = self.cpu.r[ESP].wrapping_add(4 + 16);
+        self.cpu.r[EAX] = st;
+        self.cpu.eip = ra;
+        Ok(())
     }
 
     fn syscall(&mut self) -> Res<()> {
@@ -372,13 +402,21 @@ impl WineProc {
             }
             "NtQueryVirtualMemory" => {
                 let (addr, class, buf, len, retlen) = (a[1], a[2], a[3], a[4], a[5]);
+                if class == 1000 {
+                    // MemoryWineUnixFuncs: the unixlib handle for a module; we use its base address.
+                    let name = self.module_at(addr).map(|(_, n)| n.to_string()).unwrap_or_default();
+                    self.log(format!("  (unixlib handle for {name})"));
+                    self.w32(buf, addr)?;
+                    self.w32(buf + 4, 0)?;
+                    return Ok(Some(0));
+                }
                 if class != 0 { return Err(format!("QueryVirtualMemory class {class}")); }
                 if len < 28 { return Ok(Some(0xC000_0004)); }
                 let page = addr & !0xfff;
                 let hit = self.regions.iter().copied().find(|&(s, z)| page >= s && page < s + z);
                 let (base, alloc_base, prot, size, state, typ) = match hit {
                     Some((s, z)) => {
-                        let img = self.images.contains(&s);
+                        let img = self.images.iter().any(|(b, _)| *b == s);
                         (page, s, if img { 0x40 } else { 4 }, s + z - page, 0x1000, if img { 0x100_0000 } else { 0x2_0000 })
                     }
                     None => {
@@ -644,8 +682,13 @@ impl WineProc {
                     None => STATUS_INVALID_HANDLE,
                 }
             }
+            "NtWow64IsProcessorFeaturePresent" => 0, // no SSE/x87-extension features advertised
             "NtTerminateProcess" => { self.exit = Some(a[1]); return Ok(None); }
             "NtClose" => if self.handles.remove(&a[0]).is_some() { 0 } else { STATUS_INVALID_HANDLE },
+            _ if self.lenient && (name.starts_with("NtUser") || name.starts_with("NtGdi")) => {
+                if !self.stubbed.iter().any(|n| n == name) { self.stubbed.push(name.to_string()); }
+                0
+            }
             _ => return Err("unimplemented syscall".into()),
         }))
     }

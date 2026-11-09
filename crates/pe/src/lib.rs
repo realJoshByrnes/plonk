@@ -29,6 +29,12 @@ fn cstr(m: &Mem, a: u32) -> Result<String, String> {
 /// Map headers + sections at `base` (None = preferred ImageBase) into fresh (zeroed) memory and
 /// apply relocations. Does not resolve imports.
 pub fn map(file: &[u8], mem: &mut Mem, base: Option<u32>) -> Result<Image, String> {
+    map_ex(file, mem, base, true)
+}
+
+/// Like `map`; with `relocate = false` relocations are left for the caller (Wine's PE ntdll
+/// relocates images itself when the section mapping returns STATUS_IMAGE_NOT_AT_BASE).
+pub fn map_ex(file: &[u8], mem: &mut Mem, base: Option<u32>, relocate: bool) -> Result<Image, String> {
     if file.get(0..2) != Some(b"MZ") { return Err("no MZ".into()); }
     let pe = u32_at(file, 0x3C)? as usize;
     if file.get(pe..pe + 4) != Some(b"PE\0\0") { return Err("no PE sig".into()); }
@@ -54,7 +60,8 @@ pub fn map(file: &[u8], mem: &mut Mem, base: Option<u32>) -> Result<Image, Strin
     // relocations (data dir 5)
     let delta = base.wrapping_sub(pref);
     let (rrva, rsz) = (u32_at(file, opt + 96 + 5 * 8)?, u32_at(file, opt + 96 + 5 * 8 + 4)?);
-    if delta != 0 && rrva != 0 {
+    if !relocate {
+    } else if delta != 0 && rrva != 0 {
         let (mut p, end) = (base + rrva, base + rrva + rsz);
         while p < end {
             let (page, blk) = (mem.r32(p).map_err(e)?, mem.r32(p + 4).map_err(e)?);
