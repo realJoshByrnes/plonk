@@ -70,6 +70,11 @@ let down = false;
 canvas.addEventListener("pointerdown", (e) => { if (!x) return; down = true; canvas.setPointerCapture(e.pointerId); x.plonk_wine_mouse(0, ...pos(e)); step(); });
 canvas.addEventListener("pointermove", (e) => { if (!x || !down) return; x.plonk_wine_mouse(1, ...pos(e)); step(); });
 canvas.addEventListener("pointerup", (e) => { if (!x || !down) return; down = false; x.plonk_wine_mouse(2, ...pos(e)); step(); });
+const vkOf = (e) => ({ Backspace: 8, Tab: 9, Enter: 13, Escape: 27, " ": 32, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46, Home: 36, End: 35 }[e.key] ?? (e.key.length === 1 ? e.key.toUpperCase().charCodeAt(0) : e.keyCode));
+const chOf = (e) => (e.ctrlKey || e.altKey || e.metaKey ? 0 : e.key.length === 1 ? e.key.charCodeAt(0) : { Backspace: 8, Enter: 13, Tab: 9 }[e.key] ?? 0);
+window.addEventListener("keydown", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(0, vkOf(e), chOf(e)); step(); });
+window.addEventListener("keyup", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(1, vkOf(e), 0); step(); });
+setInterval(() => { if (x) { x.plonk_wine_tick(50); step(); } }, 50);
 document.getElementById("run").onclick = () => boot();
 boot();
 </script>

@@ -521,6 +521,17 @@ impl WineProc {
                 }
                 1
             }
+            "NtGdiGetAppClipBox" => {
+                let Some(dc) = self.wm.dcs.get(&a[0]) else { return Ok(Some(0)) };
+                let (hwnd, clip) = (dc.hwnd, dc.clip);
+                let r = clip.unwrap_or_else(|| self.wm.client_rect(hwnd));
+                self.put_rect(a[1], r)?;
+                2
+            }
+            "NtGdiGetDCObject" => {
+                let Some(dc) = self.wm.dcs.get(&a[0]) else { return Ok(Some(0)) };
+                match a[1] { 1 => dc.pen, 2 => dc.brush, 6 => dc.font, 7 => dc.bitmap, _ => 0 }
+            }
             "NtGdiSaveDC" => 1,
             "NtGdiRestoreDC" => 1,
             _ => return Ok(None),

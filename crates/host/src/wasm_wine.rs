@@ -42,6 +42,14 @@ pub extern "C" fn plonk_wine_run() -> i32 {
 #[no_mangle]
 pub extern "C" fn plonk_wine_mouse(kind: u32, x: i32, y: i32) { wine().mouse(kind, x, y); }
 
+/// kind: 0 = key down, 1 = key up; ch = translated character or 0.
+#[no_mangle]
+pub extern "C" fn plonk_wine_key(kind: u32, vk: u32, ch: u32) { wine().key(kind, vk, ch); }
+
+/// Advance the guest clock by dt_ms and run it (call from a ~16-50ms JS interval).
+#[no_mangle]
+pub extern "C" fn plonk_wine_tick(dt_ms: u32) { wine().tick(dt_ms); }
+
 #[no_mangle]
 pub extern "C" fn plonk_wine_click(x: i32, y: i32) { wine().click(x, y); }
 

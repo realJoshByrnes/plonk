@@ -86,6 +86,9 @@ pub struct Wm {
     drag: Option<(u32, i32, i32)>, // hwnd, grab offset
     capture: u32,
     focus: u32,
+    timers: Vec<(u32, u32, u32, u64, u32)>, // hwnd, id, interval ms, next due, callback
+    now_ms: u64,
+    keys: [bool; 256],
     fonts: BTreeMap<u32, FontSpec>,
     bitmaps: BTreeMap<u32, Bitmap>,
     stock_bitmap: u32,
@@ -98,7 +101,7 @@ impl Wm {
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
-            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
+            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
         };
         w.classes.push(Class { atom: 0xC000, name: "#32769".into(), wndproc: 0, bg: 0, raw: [0; 12], ansi: false });
         w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None, ex_style: 0, id: 0, inst: 0, userdata: 0, proc_override: 0, extra: Vec::new() });
@@ -414,7 +417,28 @@ impl WineProc {
                 0
             }
             "NtUserSetCapture" => std::mem::replace(&mut self.wm.capture, a[0]),
-            "NtUserSetFocus" => std::mem::replace(&mut self.wm.focus, a[0]),
+            "NtUserQueryInputContext" => 0,
+            "NtUserSetTimer" => {
+                // (hwnd, id, elapse, callback, tolerance)
+                let id = if a[1] == 0 { 0x1000 + self.wm.timers.len() as u32 } else { a[1] };
+                self.wm.timers.retain(|t| !(t.0 == a[0] && t.1 == id));
+                let ms = a[2].max(10);
+                self.wm.timers.push((a[0], id, ms, self.wm.now_ms + ms as u64, a[3]));
+                id
+            }
+            "NtUserKillTimer" => { let n = self.wm.timers.len(); self.wm.timers.retain(|t| !(t.0 == a[0] && t.1 == a[1])); (n != self.wm.timers.len()) as u32 }
+            "NtUserGetKeyboardLayout" => 0x0409_0409,
+            "NtUserSetFocus" => {
+                let old = std::mem::replace(&mut self.wm.focus, a[0]);
+                if old != a[0] {
+                    if old != 0 { self.send(old, 0x08, a[0], 0)?; }
+                    if a[0] != 0 { self.send(a[0], 0x07, old, 0)?; }
+                }
+                old
+            }
+            "NtUserGetKeyState" | "NtUserGetAsyncKeyState" => if self.wm.keys[(a[0] & 0xff) as usize] { 0x8000 } else { 0 },
+            "NtUserGetKeyboardState" => { for i in 0..256u32 { self.mem.w8(a[0] + i, if self.wm.keys[i as usize] { 0x80 } else { 0 }).map_err(|_| "kbstate")?; } 1 }
+            "NtUserCreateCaret" | "NtUserDestroyCaret" | "NtUserHideCaret" | "NtUserShowCaret" | "NtUserSetCaretPos" => 1,
             "NtUserGetFocus" => self.wm.focus,
             "NtUserGetForegroundWindow" => self.wm.active,
             "NtUserGetSystemDpiForProcess" => 96,
@@ -584,6 +608,7 @@ impl WineProc {
             "NtGdiGetAndSetDCDword" => { if a[3] != 0 { self.w32(a[3], 0)?; } 1 }
             "NtGdiComputeXformCoefficients" => 1,
             "NtGdiExtSelectClipRgn" => 2,
+            "NtGdiExtCreatePen" => self.gdi_alloc(0x500000, Gdi::Pen(colorref(a[3]), a[0] & 0xf == 5)),
             "NtGdiCreatePen" => self.gdi_alloc(0x300000, Gdi::Pen(colorref(a[2]), a[0] == 5)),
             "NtGdiSelectPen" => {
                 let Some(dc) = self.wm.dcs.get_mut(&a[0]) else { return Ok(Some(0)) };
@@ -650,6 +675,10 @@ impl WineProc {
                 Some("GetSysColorPen") => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(sys_color(a[0]), false)),
                 n => return Err(format!("NtUserCallOneParam {n:?} arg={:#x}", a[0])),
             },
+            "NtUserCallTwoParam" => match codes::CALL_TWO_PARAM.get(a[2] as usize).copied() {
+                Some("SetCaretPos") => 1,
+                n => return Err(format!("NtUserCallTwoParam {n:?} a={:#x} b={:#x}", a[0], a[1])),
+            },
             "NtUserCallHwndParam" => match codes::CALL_HWND_PARAM.get(a[2] as usize).copied() {
                 Some("GetClientRect") => { let r = self.wm.client_rect(a[0]); self.put_rect(a[1], r)?; 1 }
                 Some("GetWindowRect") => {
@@ -692,6 +721,30 @@ impl WineProc {
         self.wm.zorder.iter().rev().copied().find(|h| {
             self.wm.windows.get(h).is_some_and(|w| w.visible && x >= w.rect[0] && x < w.rect[2] && y >= w.rect[1] && y < w.rect[3])
         })
+    }
+
+    /// Advance the shell clock; due timers post WM_TIMER to their windows.
+    pub fn tick(&mut self, dt_ms: u32) {
+        self.wm.now_ms += dt_ms as u64;
+        let now = self.wm.now_ms;
+        let mut due = Vec::new();
+        for t in self.wm.timers.iter_mut() {
+            if t.3 <= now { due.push((t.0, t.1, t.4)); t.3 = now + t.2 as u64; }
+        }
+        for (h, id, cb) in due { self.post_message(h, 0x113, id, cb); }
+    }
+
+    /// Keyboard input from the shell. kind: 0 = down, 1 = up. `ch` is the translated character (0 if none).
+    pub fn key(&mut self, kind: u32, vk: u32, ch: u32) {
+        let target = if self.wm.focus != 0 && self.wm.windows.contains_key(&self.wm.focus) { self.wm.focus } else { self.wm.active };
+        if target == 0 { return; }
+        self.wm.keys[(vk & 0xff) as usize] = kind == 0;
+        if kind == 0 {
+            self.post_message(target, 0x100, vk, 1);
+            if ch != 0 { self.post_message(target, 0x102, ch, 1); }
+        } else {
+            self.post_message(target, 0x101, vk, 0xC000_0001);
+        }
     }
 
     /// Desktop mouse events from the shell. kind: 0 = down, 1 = move, 2 = up.
