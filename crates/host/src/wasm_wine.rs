@@ -201,3 +201,14 @@ static mut DIRTY: [u32; 4] = [0; 4];
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub extern "C" fn plonk_wine_dirty() -> *const u32 { unsafe { DIRTY.as_ptr() } }
+
+/// Set the desktop wallpaper from `w*h` RGBA bytes already written at `ptr` (CPU compositor path; the GPU path gets the image directly).
+#[no_mangle]
+pub extern "C" fn plonk_wine_set_wallpaper(ptr: *const u8, w: u32, h: u32) {
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, (w * h * 4) as usize) };
+    let px = bytes.chunks_exact(4).map(|c| 0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).collect();
+    let b = &wine().wm.backend;
+    b.set_wallpaper(w, h, px);
+    let _ = b;
+    wine().wm.backend.gen += 1;
+}

@@ -9,7 +9,7 @@ const CHROME = ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Pro
   "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"].find(existsSync);
 if (!CHROME) { console.log("e2e: SKIP (no Chrome/Edge found)"); process.exit(0); }
 const shotDir = process.argv[2];
-const PORT = 9333, URL_ = "http://localhost:8080/web/index.html";
+const PORT = 9333, URL_ = "http://localhost:8080/web/index.html?nointro";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const chrome = spawn(CHROME, ["--headless=new", "--ignore-gpu-blocklist", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--remote-debugging-port=${PORT}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "plonk-e2e-"))}`,

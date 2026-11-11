@@ -52,6 +52,7 @@ pub struct SoftBackend {
     /// Bumped by every mutation; lets a shell skip composing/drawing unchanged frames.
     pub gen: u64,
     top_cache: std::cell::RefCell<Option<TopCache>>,
+    custom_wall: std::cell::RefCell<Option<(u32, u32, Vec<u32>)>>,
     /// Count of present() calls, handy in tests.
     pub presents: u32,
 }
@@ -76,7 +77,8 @@ impl SoftBackend {
     pub fn compose_desktop(&self, w: u32, h: u32) -> Vec<u32> {
         let mut cache = self.wall.borrow_mut();
         if !matches!(&*cache, Some((cw, ch_, _)) if *cw == w && *ch_ == h) {
-            *cache = Some((w, h, (0..h).flat_map(|y| (0..w).map(move |x| wallpaper(x, y, w, h))).collect()));
+            let custom = self.custom_wall.borrow();
+            *cache = Some((w, h, match &*custom { Some((cw, ch_, px)) if *cw == w && *ch_ == h => px.clone(), _ => (0..h).flat_map(|y| (0..w).map(move |x| wallpaper(x, y, w, h))).collect() }));
         }
         let wall_px = &cache.as_ref().unwrap().2;
         let vis: Vec<&Surface> = self.order.iter().filter_map(|id| self.surface(*id)).filter(|s| s.visible).collect();
@@ -127,6 +129,13 @@ impl SoftBackend {
                 out[di] = mix(base, color, cov);
             }
         }
+    }
+
+    /// Use an image (w*h ARGB pixels) as the desktop wallpaper instead of the procedural one.
+    pub fn set_wallpaper(&self, w: u32, h: u32, px: Vec<u32>) {
+        *self.custom_wall.borrow_mut() = Some((w, h, px));
+        *self.wall.borrow_mut() = None;
+        *self.top_cache.borrow_mut() = None;
     }
 
     /// Visible surfaces, bottom to top (for GPU compositors that draw the layers themselves).

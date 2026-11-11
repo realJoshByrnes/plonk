@@ -96,6 +96,10 @@ const FS_BLIT = HEAD + `
 uniform sampler2D uSrc;
 void main(){ ivec2 p=ivec2(gl_FragCoord.xy); o=vec4(texelFetch(uSrc,ivec2(p.x,int(uScreen.y)-1-p.y),0).rgb,1.); }`;
 
+const FS_IMG = HEAD + `
+uniform sampler2D uImg;
+void main(){ vec2 uv=vec2(gl_FragCoord.x/uScreen.x, 1.-gl_FragCoord.y/uScreen.y); o=vec4(texture(uImg,uv).rgb,1.); }`;
+
 export function createGpuCompositor(width, height) {
   let canvas;
   try { canvas = typeof document !== "undefined" ? document.createElement("canvas") : new OffscreenCanvas(width, height); } catch { return null; }
@@ -115,7 +119,7 @@ export function createGpuCompositor(width, height) {
     return { p, u };
   };
   let P;
-  try { P = { wall: prog(FS_WALL), shadow: prog(FS_SHADOW), down: prog(FS_DOWN), box: prog(FS_BOX), layer: prog(FS_LAYER), blit: prog(FS_BLIT) }; } catch (e) { console.warn("compositor_gpu: shader error", e); return null; }
+  try { P = { wall: prog(FS_WALL), shadow: prog(FS_SHADOW), down: prog(FS_DOWN), box: prog(FS_BOX), layer: prog(FS_LAYER), blit: prog(FS_BLIT), img: prog(FS_IMG) }; } catch (e) { console.warn("compositor_gpu: shader error", e); return null; }
 
   const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
   const makeTex = (iformat, fmt, type, w, h, filter) => {
@@ -167,6 +171,18 @@ export function createGpuCompositor(width, height) {
     return { dw, dh, f, tex: bt[a].t };
   }
 
+  // Replace the procedural wallpaper with an image (ImageBitmap / canvas / ImageData); pass null to go back to the procedural one.
+  let wallTex = null;
+  function setWallpaper(src) {
+    if (wallTex) { gl.deleteTexture(wallTex); wallTex = null; }
+    if (!src) return;
+    wallTex = gl.createTexture(); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, wallTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
   function render(layers) {
     gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
     const seen = new Set();
@@ -174,7 +190,9 @@ export function createGpuCompositor(width, height) {
     for (const [id, e] of layerTex) if (!seen.has(id)) { gl.deleteTexture(e.tex); layerTex.delete(id); }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, curFbo); gl.viewport(0, 0, width, height); gl.disable(gl.BLEND);
-    let u = use(P.wall); quad(u, 0, 0, width, height, width, height);
+    let u;
+    if (wallTex) { u = use(P.img); bindTex(0, wallTex); gl.uniform1i(u.uImg, 0); } else u = use(P.wall);
+    quad(u, 0, 0, width, height, width, height);
 
     for (const L of layers) {
       if (!seen.has(L.id)) continue;
@@ -203,5 +221,5 @@ export function createGpuCompositor(width, height) {
     quad(u, 0, 0, width, height, width, height);
   }
 
-  return { canvas, render, gl };
+  return { canvas, render, setWallpaper, gl };
 }

@@ -28,7 +28,39 @@ const log = (s) => (document.getElementById("log").textContent = s);
 const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
 const enc = new TextEncoder();
 let x, wasm, gpuc = null;
-if (!new URLSearchParams(location.search).has("cpu")) import("./compositor_gpu.mjs").then((m) => { gpuc = m.createGpuCompositor(1024, 768); window.__gpuc = !!gpuc; lastGen = -1; }).catch((e) => console.info("GPU compositor unavailable, using CPU", e));
+if (!new URLSearchParams(location.search).has("cpu")) import("./compositor_gpu.mjs").then((m) => { gpuc = m.createGpuCompositor(1024, 768); window.__gpuc = !!gpuc; if (gpuc && wall) gpuc.setWallpaper(wall); lastGen = -1; }).catch((e) => console.info("GPU compositor unavailable, using CPU", e));
+// ---- boot intro: a glass ball rolls in; its final frame becomes the desktop wallpaper (pre-saved web/wallpaper.png without WebGL2) ----
+let wall = null, introRun = false;
+function applyWallpaper() { // CPU compositor path: hand the image to the host
+  if (!wall || !x || gpuc) return;
+  const c = new OffscreenCanvas(wall.width, wall.height), g = c.getContext("2d");
+  g.drawImage(wall, 0, 0);
+  x.plonk_wine_set_wallpaper(put(new Uint8Array(g.getImageData(0, 0, wall.width, wall.height).data.buffer)), wall.width, wall.height);
+}
+function setWall(bmp) { wall = bmp; if (gpuc) gpuc.setWallpaper(bmp); applyWallpaper(); lastGen = -1; ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height); }
+async function savedWallpaper() { try { setWall(await createImageBitmap(await (await fetch("/web/wallpaper.png")).blob())); } catch (e) { console.info("no saved wallpaper", e); } }
+async function startIntro() {
+  const q = new URLSearchParams(location.search);
+  if (q.has("nointro") || matchMedia("(prefers-reduced-motion: reduce)").matches) return savedWallpaper();
+  let intro = null, m = null;
+  try { m = await import("./intro.mjs"); intro = m.createIntro(canvas.width, canvas.height); } catch (e) { console.info("intro unavailable", e); }
+  if (!intro) return savedWallpaper();
+  introRun = true;
+  const t0 = performance.now();
+  await new Promise((res) => {
+    const f = () => {
+      if (!introRun) return res();
+      const t = (performance.now() - t0) / 1000;
+      intro.draw(Math.min(t, m.DURATION)); ctx.drawImage(intro.canvas, 0, 0);
+      if (t >= m.DURATION) return res();
+      requestAnimationFrame(f);
+    };
+    requestAnimationFrame(f);
+  });
+  if (introRun) { intro.draw(m.DURATION); setWall(await createImageBitmap(intro.canvas)); window.__intro = "played"; } else { await savedWallpaper(); window.__intro = "skipped"; }
+  introRun = false;
+  intro.dispose?.();
+}
 const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
 
 import { peImports } from "/web/pe_imports.mjs";
@@ -51,6 +83,8 @@ async function boot(app) {
     x.plonk_wine_add_file(put(n), n.length, put(b), b.length);
   };
   x.plonk_wine_reset();
+  introRun = false; // pressing Run skips a running intro (the saved wallpaper is used)
+  applyWallpaper();
   lastGen = -1;
   log("downloading Wine runtime (compressed, cached)...");
   const [pack, exe] = await Promise.all([
@@ -202,6 +236,7 @@ window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) { customExe = f; log("Loaded " + f.name + " - press Run."); } });
 document.getElementById("run").onclick = () => boot();
 loadAppList();
+startIntro();
 </script>
 </body>
 </html>
