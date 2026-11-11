@@ -19,7 +19,123 @@
   <button id="run">Run</button>
   <label>or your own 32-bit .exe <input type="file" id="file" accept=".exe"></label>
 </div>
-<div id="stage" style="position:relative"><canvas id="screen" width="1024" height="768"></canvas><canvas id="glov" style="position:absolute;display:none;pointer-events:none;margin:0"></canvas></div>
+<div id="stage" style="position:relative"><!--scene0--><svg id="plonkScene" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMaxYMid slice" style="position:absolute;left:12px;top:0;width:min(1024px,calc(100% - 24px));aspect-ratio:4/3;height:auto;display:block;pointer-events:none"><defs>
+<linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a0a52"/><stop offset=".28" stop-color="#8d1470"/><stop offset=".5" stop-color="#e8366a"/><stop offset=".68" stop-color="#ff7a1c"/><stop offset=".78" stop-color="#ffc13a"/><stop offset="1" stop-color="#ffd978"/></linearGradient>
+<linearGradient id="leftDark" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#12062e" stop-opacity=".78"/><stop offset=".35" stop-color="#1c0838" stop-opacity=".5"/><stop offset=".7" stop-color="#2a0a40" stop-opacity="0"/></linearGradient>
+<linearGradient id="topDark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#14052c" stop-opacity=".55"/><stop offset=".4" stop-color="#14052c" stop-opacity="0"/></linearGradient>
+<radialGradient id="sunGlow" cx="1390" cy="170" r="760" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff6d0" stop-opacity="1"/><stop offset=".07" stop-color="#ffe9a0" stop-opacity=".95"/><stop offset=".2" stop-color="#ffb23c" stop-opacity=".55"/><stop offset=".5" stop-color="#ff5a7a" stop-opacity=".22"/><stop offset="1" stop-color="#ff3d8b" stop-opacity="0"/></radialGradient>
+<radialGradient id="rayg" cx="1390" cy="170" r="1700" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff2c0" stop-opacity=".62"/><stop offset=".4" stop-color="#ffc870" stop-opacity=".28"/><stop offset="1" stop-color="#ff9a60" stop-opacity="0"/></radialGradient>
+<linearGradient id="table" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#6b2a2e"/><stop offset=".12" stop-color="#3c1226"/><stop offset=".55" stop-color="#1c0a1c"/><stop offset="1" stop-color="#0f0612"/></linearGradient>
+<linearGradient id="tableEdge" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffc060" stop-opacity="0"/><stop offset=".6" stop-color="#ffd890" stop-opacity=".85"/><stop offset="1" stop-color="#fff0c0" stop-opacity=".95"/></linearGradient>
+<radialGradient id="tableSheen" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffb060" stop-opacity=".55"/><stop offset="1" stop-color="#ff7040" stop-opacity="0"/></radialGradient>
+<linearGradient id="refl" x1="0" y1="800" x2="0" y2="1010" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff" stop-opacity=".5"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+<mask id="reflMask" maskUnits="userSpaceOnUse" x="0" y="0" width="1600" height="1000"><rect x="900" y="800" width="500" height="260" fill="url(#refl)"/></mask>
+<radialGradient id="wine" cx=".5" cy=".6" r=".62"><stop offset="0" stop-color="#d11d45"/><stop offset=".45" stop-color="#9a0f33"/><stop offset=".85" stop-color="#5a0620"/><stop offset="1" stop-color="#2c0212"/></radialGradient>
+<linearGradient id="wineSide" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#1a0108" stop-opacity=".55"/><stop offset=".22" stop-color="#1a0108" stop-opacity="0"/><stop offset=".7" stop-color="#ff3050" stop-opacity="0"/><stop offset=".92" stop-color="#ff5a70" stop-opacity=".28"/><stop offset="1" stop-color="#1a0108" stop-opacity=".5"/></linearGradient>
+<radialGradient id="wineLit" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ff6a6a" stop-opacity=".75"/><stop offset=".5" stop-color="#ff2a50" stop-opacity=".3"/><stop offset="1" stop-color="#ff2a50" stop-opacity="0"/></radialGradient>
+<radialGradient id="surfGrad" cx=".42" cy=".5" r=".6"><stop offset="0" stop-color="#e83a58"/><stop offset=".6" stop-color="#a8183c"/><stop offset="1" stop-color="#6a0a26"/></radialGradient>
+<linearGradient id="glassFill" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity=".34"/><stop offset=".12" stop-color="#ffd6e8" stop-opacity=".08"/><stop offset=".5" stop-color="#fff" stop-opacity=".02"/><stop offset=".85" stop-color="#bff6ff" stop-opacity=".1"/><stop offset="1" stop-color="#fff" stop-opacity=".38"/></linearGradient>
+<linearGradient id="glassEdge" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity=".85"/><stop offset=".3" stop-color="#fff" stop-opacity=".25"/><stop offset=".7" stop-color="#cff" stop-opacity=".3"/><stop offset="1" stop-color="#fff" stop-opacity=".9"/></linearGradient>
+<linearGradient id="streak" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".25" stop-color="#fff" stop-opacity=".95"/><stop offset=".75" stop-color="#fff" stop-opacity=".7"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+<linearGradient id="stemG" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff" stop-opacity=".25"/><stop offset=".25" stop-color="#fff" stop-opacity=".9"/><stop offset=".45" stop-color="#d8e8ff" stop-opacity=".2"/><stop offset=".8" stop-color="#ffd0e0" stop-opacity=".25"/><stop offset="1" stop-color="#fff" stop-opacity=".7"/></linearGradient>
+<radialGradient id="footG" cx=".35" cy=".4" r=".7"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset=".6" stop-color="#ffd0e0" stop-opacity=".2"/><stop offset="1" stop-color="#fff" stop-opacity=".45"/></radialGradient>
+<radialGradient id="caustic" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffe0a0" stop-opacity=".95"/><stop offset=".25" stop-color="#ff4a60" stop-opacity=".7"/><stop offset=".7" stop-color="#c0104a" stop-opacity=".25"/><stop offset="1" stop-color="#c0104a" stop-opacity="0"/></radialGradient>
+<radialGradient id="cherryG" cx=".35" cy=".3" r=".8"><stop offset="0" stop-color="#ff6a74"/><stop offset=".35" stop-color="#e01834"/><stop offset=".8" stop-color="#8a0720"/><stop offset="1" stop-color="#4a0212"/></radialGradient>
+<radialGradient id="flash" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset=".4" stop-color="#ffd0d8" stop-opacity=".5"/><stop offset="1" stop-color="#ff90a0" stop-opacity="0"/></radialGradient>
+<radialGradient id="dropG" cx=".35" cy=".3" r=".8"><stop offset="0" stop-color="#ff8a90"/><stop offset=".5" stop-color="#d01838"/><stop offset="1" stop-color="#7a0824"/></radialGradient>
+<linearGradient id="tailG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff3050" stop-opacity="0"/><stop offset="1" stop-color="#ff3050" stop-opacity=".55"/></linearGradient>
+<radialGradient id="vig" cx=".55" cy=".45" r=".8"><stop offset=".6" stop-color="#0a0218" stop-opacity="0"/><stop offset="1" stop-color="#0a0218" stop-opacity=".5"/></radialGradient>
+<clipPath id="bowlClip"><path d="M1018,300 C1006,410 1044,538 1150,556 C1256,538 1294,410 1282,300 A132,24 0 0 1 1018,300 Z"/></clipPath>
+<clipPath id="wineClip"><path d="M1018,300 C1006,410 1044,538 1150,556 C1256,538 1294,410 1282,300 A132,24 0 0 1 1018,300 Z"/><rect x="0" y="0" width="0" height="0"/></clipPath>
+<clipPath id="underClip"><rect x="900" y="395" width="500" height="300"/></clipPath>
+<clipPath id="belowClip"><rect x="900" y="400" width="500" height="300"/></clipPath>
+<clipPath id="wineBody"><rect x="900" y="395" width="500" height="300"/></clipPath>
+<clipPath id="surfClip"><ellipse cx="1150" cy="395" rx="129" ry="21"/></clipPath>
+<filter id="bl8" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="8"/></filter>
+<filter id="bl3" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="3"/></filter>
+<filter id="bl18" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="18"/></filter>
+</defs>
+<g id="bg"><rect width="1600" height="1000" fill="url(#sky)"/>
+<g filter="url(#bl3)" style="mix-blend-mode:screen"><circle cx="435.6" cy="84.6" r="70.7" fill="#18d6c4" opacity="0.077"/><circle cx="1044.5" cy="375.7" r="27.9" fill="#ffb0dc" opacity="0.198"/><circle cx="864" cy="152.3" r="58.3" fill="#ff9a1f" opacity="0.152"/><circle cx="1000.8" cy="251.1" r="45" fill="#3ee0ff" opacity="0.134"/><circle cx="850.4" cy="672" r="25.1" fill="#ff9a1f" opacity="0.084"/><circle cx="906.7" cy="434.5" r="58.2" fill="#3ee0ff" opacity="0.077"/><circle cx="1206.4" cy="487.6" r="53.4" fill="#ff5a2a" opacity="0.34299999999999997"/><circle cx="1560.2" cy="635.9" r="16.3" fill="#ffd54a" opacity="0.152"/><circle cx="1067.1" cy="54.5" r="19.1" fill="#ffd54a" opacity="0.253"/><circle cx="1068.7" cy="377.4" r="68.9" fill="#ff5a2a" opacity="0.23800000000000002"/><circle cx="956.1" cy="296.6" r="22" fill="#3ee0ff" opacity="0.094"/><circle cx="946" cy="177.1" r="50.7" fill="#ff3d8b" opacity="0.133"/><circle cx="1338.4" cy="703.4" r="45.8" fill="#ff5a2a" opacity="0.345"/><circle cx="1559" cy="124.3" r="44.7" fill="#3ee0ff" opacity="0.295"/><circle cx="1595.2" cy="643.3" r="48.5" fill="#3ee0ff" opacity="0.389"/><circle cx="1201.1" cy="629.3" r="14.3" fill="#ffd54a" opacity="0.223"/><circle cx="1377.3" cy="435.6" r="57.8" fill="#18d6c4" opacity="0.39299999999999996"/><circle cx="1470.8" cy="349.6" r="51.3" fill="#18d6c4" opacity="0.322"/><circle cx="933.6" cy="210.5" r="14.5" fill="#3ee0ff" opacity="0.07"/><circle cx="1480.3" cy="494" r="14.8" fill="#ff5a2a" opacity="0.28600000000000003"/><circle cx="1370.2" cy="756.3" r="30.1" fill="#ff5a2a" opacity="0.396"/><circle cx="1453.8" cy="489.6" r="62.1" fill="#3ee0ff" opacity="0.142"/><circle cx="1156.9" cy="448.2" r="23.3" fill="#ff9a1f" opacity="0.184"/><circle cx="1461.9" cy="660.3" r="56.7" fill="#3ee0ff" opacity="0.298"/><circle cx="1263.7" cy="570.2" r="69.4" fill="#ff9a1f" opacity="0.22899999999999998"/><circle cx="1237.8" cy="612.9" r="63.5" fill="#18d6c4" opacity="0.142"/><circle cx="1125.3" cy="418.5" r="24.5" fill="#18d6c4" opacity="0.142"/><circle cx="1125.1" cy="163" r="14.2" fill="#ff3d8b" opacity="0.12300000000000001"/><circle cx="641.9" cy="670.9" r="71" fill="#ff9a1f" opacity="0.048"/><circle cx="1044" cy="399.3" r="56.5" fill="#ffd54a" opacity="0.157"/><circle cx="1441.3" cy="551.7" r="60.4" fill="#ffb0dc" opacity="0.259"/><circle cx="1052.1" cy="445.1" r="31" fill="#ffb0dc" opacity="0.19399999999999998"/><circle cx="593.4" cy="221.6" r="62" fill="#ffb0dc" opacity="0.129"/><circle cx="1072.2" cy="297" r="67.4" fill="#ffd54a" opacity="0.135"/><circle cx="1124.5" cy="637.8" r="37.4" fill="#18d6c4" opacity="0.319"/><circle cx="1079.5" cy="283.8" r="45.1" fill="#3ee0ff" opacity="0.146"/><circle cx="1225.7" cy="749.9" r="62.8" fill="#18d6c4" opacity="0.223"/><circle cx="1351.6" cy="710.4" r="45.9" fill="#ff9a1f" opacity="0.297"/><circle cx="1347.3" cy="321.4" r="49.4" fill="#ffd54a" opacity="0.35600000000000004"/><circle cx="912.3" cy="105.2" r="53.6" fill="#3ee0ff" opacity="0.203"/><circle cx="939.8" cy="226.9" r="17.9" fill="#3ee0ff" opacity="0.20800000000000002"/><circle cx="1434.4" cy="636.7" r="69.8" fill="#3ee0ff" opacity="0.168"/><circle cx="896.1" cy="427.7" r="36.7" fill="#ffb0dc" opacity="0.195"/><circle cx="1278.3" cy="562.4" r="50" fill="#ff9a1f" opacity="0.262"/><circle cx="1478.9" cy="387.5" r="22.1" fill="#18d6c4" opacity="0.317"/><circle cx="1212.5" cy="436.9" r="65.5" fill="#ff9a1f" opacity="0.342"/></g>
+<rect width="1600" height="1000" fill="url(#sunGlow)" style="mix-blend-mode:screen"/>
+<circle cx="1390" cy="170" r="52" fill="#fffbe8"/><circle cx="1390" cy="170" r="90" fill="#fff0b0" opacity=".45" filter="url(#bl18)"/>
+<rect width="1600" height="1000" fill="url(#leftDark)"/><rect width="1600" height="1000" fill="url(#topDark)"/></g>
+<g id="gRays" style="mix-blend-mode:screen"><g id="ray0" style="transform-origin:0 0;opacity:0.373"><polygon points="1390,170 1107.8,2150 976.4,2126.8" fill="url(#rayg)"/></g><g id="ray1" style="transform-origin:0 0;opacity:0.201"><polygon points="1390,170 934.3,2117.4 804.2,2082.3" fill="url(#rayg)"/></g><g id="ray2" style="transform-origin:0 0;opacity:0.331"><polygon points="1390,170 796.3,2079.8 681.1,2040.1" fill="url(#rayg)"/></g><g id="ray3" style="transform-origin:0 0;opacity:0.396"><polygon points="1390,170 678.7,2039.2 536.9,1978.9" fill="url(#rayg)"/></g><g id="ray4" style="transform-origin:0 0;opacity:0.304"><polygon points="1390,170 526.5,1974 440.7,1930.3" fill="url(#rayg)"/></g><g id="ray5" style="transform-origin:0 0;opacity:0.369"><polygon points="1390,170 357,1882.6 293.9,1842.9" fill="url(#rayg)"/></g><g id="ray6" style="transform-origin:0 0;opacity:0.437"><polygon points="1390,170 281.4,1834.6 136.5,1728.5" fill="url(#rayg)"/></g><g id="ray7" style="transform-origin:0 0;opacity:0.257"><polygon points="1390,170 149.7,1739 37.7,1643.5" fill="url(#rayg)"/></g><g id="ray8" style="transform-origin:0 0;opacity:0.271"><polygon points="1390,170 30.4,1636.8 -108.7,1494.3" fill="url(#rayg)"/></g><g id="ray9" style="transform-origin:0 0;opacity:0.355"><polygon points="1390,170 -109.3,1493.7 -177.7,1411.9" fill="url(#rayg)"/></g><g id="ray10" style="transform-origin:0 0;opacity:0.451"><polygon points="1390,170 -219.6,1357.1 -264,1294.4" fill="url(#rayg)"/></g><g id="ray11" style="transform-origin:0 0;opacity:0.2"><polygon points="1390,170 -293.3,1250 -324.7,1199.4" fill="url(#rayg)"/></g><g id="ray12" style="transform-origin:0 0;opacity:0.263"><polygon points="1390,170 -357.4,1143 -418.2,1024.7" fill="url(#rayg)"/></g><g id="ray13" style="transform-origin:0 0;opacity:0.384"><polygon points="1390,170 -446.6,961.7 -472.8,898" fill="url(#rayg)"/></g><g id="ray14" style="transform-origin:0 0;opacity:0.495"><polygon points="1390,170 -481.6,875.1 -528.8,733.9" fill="url(#rayg)"/></g></g>
+<g id="table"><rect x="0" y="770" width="1600" height="230" fill="url(#table)"/>
+<ellipse cx="1390" cy="860" rx="190" ry="95" fill="url(#tableSheen)" style="mix-blend-mode:screen"/>
+<ellipse cx="1390" cy="900" rx="50" ry="130" fill="#ffd890" opacity=".28" filter="url(#bl18)"/>
+<rect x="0" y="769" width="1600" height="3" fill="url(#tableEdge)"/>
+<rect x="0" y="772" width="1600" height="26" fill="#ffb060" opacity=".14" filter="url(#bl8)"/><ellipse cx="1060" cy="822" rx="210" ry="30" fill="#0a0210" opacity=".6" filter="url(#bl18)"/>
+<ellipse cx="1150" cy="806" rx="112" ry="14" fill="#05010a" opacity=".7" filter="url(#bl8)"/>
+<g style="mix-blend-mode:screen"><ellipse cx="930" cy="858" rx="150" ry="36" fill="url(#caustic)" transform="rotate(-6 930 858)"/>
+<ellipse cx="900" cy="854" rx="46" ry="9" fill="#ffe8b0" opacity=".85" filter="url(#bl3)" transform="rotate(-6 900 854)"/>
+<ellipse cx="1010" cy="850" rx="70" ry="12" fill="#ff7a90" opacity=".5" filter="url(#bl8)"/></g><g mask="url(#reflMask)" opacity=".85"><g transform="translate(0 1594) scale(1 -1)">
+<ellipse cx="1150" cy="300" rx="132" ry="24" fill="#2a0a30" opacity=".25"/>
+<path d="M1018,300 C1006,410 1044,538 1150,556 C1256,538 1294,410 1282,300 A132,24 0 0 1 1018,300 Z" fill="url(#glassFill)"/>
+<ellipse cx="1150" cy="300" rx="132" ry="24" fill="none" stroke="#fff" stroke-opacity=".45" stroke-width="2"/><g clip-path="url(#bowlClip)"><g clip-path="url(#wineBody)">
+<rect x="1000" y="365" width="300" height="200" fill="url(#wine)"/>
+<rect x="1000" y="365" width="300" height="200" fill="url(#wineSide)"/>
+<ellipse cx="1120" cy="505" rx="62" ry="38" fill="url(#wineLit)" style="mix-blend-mode:screen" transform="rotate(-24 1120 505)"/>
+<ellipse cx="1150" cy="548" rx="40" ry="10" fill="#ff3a50" opacity=".45" filter="url(#bl8)"/>
+<ellipse cx="1150" cy="416" rx="129" ry="14" fill="#14020a" opacity=".5" filter="url(#bl8)"/>
+</g></g><ellipse cx="1150" cy="395" rx="129" ry="21" fill="url(#surfGrad)"/><g clip-path="url(#bowlClip)">
+<path d="M1075,318 C1052,380 1058,452 1082,505" stroke="url(#streak)" stroke-width="10" fill="none" stroke-linecap="round" opacity=".9"/>
+<path d="M1060,322 C1034,390 1044,470 1076,520" stroke="#fff" stroke-opacity=".28" stroke-width="3" fill="none" stroke-linecap="round"/>
+<path d="M1255,330 C1272,392 1262,452 1236,500" stroke="url(#streak)" stroke-width="6" fill="none" stroke-linecap="round" opacity=".75"/>
+<path d="M1230,520 C1196,548 1150,552 1120,546" stroke="#ffd0b0" stroke-opacity=".55" stroke-width="3" fill="none" stroke-linecap="round"/>
+<g transform="rotate(-9 1105 380)" opacity=".2" style="mix-blend-mode:screen"><rect x="1088" y="338" width="32" height="46" rx="3" fill="#fff"/><rect x="1124" y="338" width="32" height="46" rx="3" fill="#fff"/><rect x="1088" y="388" width="32" height="46" rx="3" fill="#fff"/><rect x="1124" y="388" width="32" height="46" rx="3" fill="#fff"/></g>
+<ellipse cx="1218" cy="352" rx="22" ry="38" fill="#ffe0a0" opacity=".28" filter="url(#bl8)"/>
+</g>
+<path d="M1018,300 C1006,410 1044,538 1150,556 C1256,538 1294,410 1282,300" fill="none" stroke="url(#glassEdge)" stroke-width="2.6"/>
+<path d="M1018,300 A132,24 0 0 0 1282,300" fill="none" stroke="#fff" stroke-opacity=".9" stroke-width="2.4"/>
+<path d="M1060,322 A132,24 0 0 0 1130,324" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" opacity=".9"/>
+<g style="mix-blend-mode:screen"><circle cx="1282" cy="302" r="4" fill="#fff"/><path d="M1282,284V320M1264,302H1300" stroke="#fff" stroke-width="1.6" opacity=".9"/><circle cx="1018" cy="300" r="3" fill="#fff"/><path d="M1018,288V312M1006,300H1030" stroke="#fff" stroke-width="1.2" opacity=".8"/></g>
+<path d="M1141,549 C1146,600 1146,700 1141,772 L1159,772 C1154,700 1154,600 1159,549 Z" fill="url(#stemG)"/>
+<path d="M1144,560 C1146,620 1146,700 1144,768" stroke="#fff" stroke-width="2" opacity=".9" fill="none"/>
+<path d="M1141,770 C1138,788 1090,788 1048,799 L1252,799 C1210,788 1162,788 1159,770 Z" fill="url(#footG)"/>
+<ellipse cx="1150" cy="799" rx="104" ry="16" fill="url(#footG)"/>
+<ellipse cx="1150" cy="799" rx="104" ry="16" fill="none" stroke="#fff" stroke-opacity=".75" stroke-width="2"/>
+<ellipse cx="1150" cy="793" rx="62" ry="9" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="2"/>
+<path d="M1064,806 A104,16 0 0 0 1130,814" stroke="#fff" stroke-width="3.5" fill="none" stroke-linecap="round" opacity=".85"/>
+<ellipse cx="1150" cy="552" rx="26" ry="9" fill="#fff" opacity=".18" filter="url(#bl3)"/></g></g></g>
+<g id="glass"><ellipse cx="1150" cy="300" rx="132" ry="24" fill="#2a0a30" opacity=".25"/>
+<path d="M1018,300 C1006,410 1044,538 1150,556 C1256,538 1294,410 1282,300 A132,24 0 0 1 1018,300 Z" fill="url(#glassFill)"/>
+<ellipse cx="1150" cy="300" rx="132" ry="24" fill="none" stroke="#fff" stroke-opacity=".45" stroke-width="2"/><g clip-path="url(#bowlClip)"><g clip-path="url(#wineBody)">
+<rect x="1000" y="365" width="300" height="200" fill="url(#wine)"/>
+<rect x="1000" y="365" width="300" height="200" fill="url(#wineSide)"/>
+<ellipse cx="1120" cy="505" rx="62" ry="38" fill="url(#wineLit)" style="mix-blend-mode:screen" transform="rotate(-24 1120 505)"/>
+<ellipse cx="1150" cy="548" rx="40" ry="10" fill="#ff3a50" opacity=".45" filter="url(#bl8)"/>
+<ellipse cx="1150" cy="416" rx="129" ry="14" fill="#14020a" opacity=".5" filter="url(#bl8)"/>
+</g></g></g>
+<g id="wob" style="transform-origin:0 0;transform:translate(1150px,395px) rotate(0deg) translate(-1150px,-395px);opacity:1"><g clip-path="url(#bowlClip)"><ellipse cx="1150" cy="395" rx="129" ry="21" fill="url(#surfGrad)"/>
+<ellipse cx="1112" cy="392" rx="60" ry="9" fill="#ff8a98" opacity=".28" filter="url(#bl3)"/>
+<ellipse cx="1212" cy="398" rx="30" ry="5" fill="#ffd0b0" opacity=".25" filter="url(#bl3)"/><g id="gRipple" clip-path="url(#surfClip)"></g><g id="gBub" clip-path="url(#underClip)"></g></g></g>
+<g id="gCherry"></g><g clip-path="url(#belowClip)"><g id="gTint"></g></g><g id="gRing"></g>
+<path d="M1021,395 A129,21 0 0 0 1279,395" fill="none" stroke="#ffc0c8" stroke-opacity=".75" stroke-width="2"/><path d="M1021,393 A129,21 0 0 0 1279,393" fill="none" stroke="#fff" stroke-opacity=".3" stroke-width="5" filter="url(#bl3)"/>
+<g id="glassFront"><g clip-path="url(#bowlClip)">
+<path d="M1075,318 C1052,380 1058,452 1082,505" stroke="url(#streak)" stroke-width="10" fill="none" stroke-linecap="round" opacity=".9"/>
+<path d="M1060,322 C1034,390 1044,470 1076,520" stroke="#fff" stroke-opacity=".28" stroke-width="3" fill="none" stroke-linecap="round"/>
+<path d="M1255,330 C1272,392 1262,452 1236,500" stroke="url(#streak)" stroke-width="6" fill="none" stroke-linecap="round" opacity=".75"/>
+<path d="M1230,520 C1196,548 1150,552 1120,546" stroke="#ffd0b0" stroke-opacity=".55" stroke-width="3" fill="none" stroke-linecap="round"/>
+<g transform="rotate(-9 1105 380)" opacity=".2" style="mix-blend-mode:screen"><rect x="1088" y="338" width="32" height="46" rx="3" fill="#fff"/><rect x="1124" y="338" width="32" height="46" rx="3" fill="#fff"/><rect x="1088" y="388" width="32" height="46" rx="3" fill="#fff"/><rect x="1124" y="388" width="32" height="46" rx="3" fill="#fff"/></g>
+<ellipse cx="1218" cy="352" rx="22" ry="38" fill="#ffe0a0" opacity=".28" filter="url(#bl8)"/>
+</g>
+<path d="M1018,300 C1006,410 1044,538 1150,556 C1256,538 1294,410 1282,300" fill="none" stroke="url(#glassEdge)" stroke-width="2.6"/>
+<path d="M1018,300 A132,24 0 0 0 1282,300" fill="none" stroke="#fff" stroke-opacity=".9" stroke-width="2.4"/>
+<path d="M1060,322 A132,24 0 0 0 1130,324" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" opacity=".9"/>
+<g style="mix-blend-mode:screen"><circle cx="1282" cy="302" r="4" fill="#fff"/><path d="M1282,284V320M1264,302H1300" stroke="#fff" stroke-width="1.6" opacity=".9"/><circle cx="1018" cy="300" r="3" fill="#fff"/><path d="M1018,288V312M1006,300H1030" stroke="#fff" stroke-width="1.2" opacity=".8"/></g>
+<path d="M1141,549 C1146,600 1146,700 1141,772 L1159,772 C1154,700 1154,600 1159,549 Z" fill="url(#stemG)"/>
+<path d="M1144,560 C1146,620 1146,700 1144,768" stroke="#fff" stroke-width="2" opacity=".9" fill="none"/>
+<path d="M1141,770 C1138,788 1090,788 1048,799 L1252,799 C1210,788 1162,788 1159,770 Z" fill="url(#footG)"/>
+<ellipse cx="1150" cy="799" rx="104" ry="16" fill="url(#footG)"/>
+<ellipse cx="1150" cy="799" rx="104" ry="16" fill="none" stroke="#fff" stroke-opacity=".75" stroke-width="2"/>
+<ellipse cx="1150" cy="793" rx="62" ry="9" fill="none" stroke="#fff" stroke-opacity=".4" stroke-width="2"/>
+<path d="M1064,806 A104,16 0 0 0 1130,814" stroke="#fff" stroke-width="3.5" fill="none" stroke-linecap="round" opacity=".85"/>
+<ellipse cx="1150" cy="552" rx="26" ry="9" fill="#fff" opacity=".18" filter="url(#bl3)"/></g>
+<g id="gFx"></g>
+<g id="gSpark" style="mix-blend-mode:screen"><g id="sp0" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.241"><circle cx="834.2" cy="110.6" r="2.6" fill="#fff4d0"/></g><g id="sp1" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.706"><g transform="translate(1522.7 671.3)"><path d="M0,-6.5L1,0L0,6.5L-1,0Z M-6.5,0L0,1L6.5,0L0,-1Z" fill="#fff"/></g></g><g id="sp2" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.706"><circle cx="1431.6" cy="409.5" r="2.9" fill="#fff4d0"/></g><g id="sp3" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.353"><circle cx="930.4" cy="686" r="1.6" fill="#fff4d0"/></g><g id="sp4" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.418"><circle cx="1057.1" cy="436.4" r="3.4" fill="#fff4d0"/></g><g id="sp5" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.691"><circle cx="1409.3" cy="584.4" r="1.5" fill="#fff4d0"/></g><g id="sp6" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.624"><g transform="translate(1407.8 537.5)"><path d="M0,-11.5L1.8,0L0,11.5L-1.8,0Z M-11.5,0L0,1.8L11.5,0L0,-1.8Z" fill="#fff"/></g></g><g id="sp7" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.278"><g transform="translate(888.9 563.2)"><path d="M0,-20.7L3.2,0L0,20.7L-3.2,0Z M-20.7,0L0,3.2L20.7,0L0,-3.2Z" fill="#fff"/></g></g><g id="sp8" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.554"><g transform="translate(1361 327.9)"><path d="M0,-11.1L1.7,0L0,11.1L-1.7,0Z M-11.1,0L0,1.7L11.1,0L0,-1.7Z" fill="#fff"/></g></g><g id="sp9" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.285"><g transform="translate(828.2 485.6)"><path d="M0,-21.4L3.3,0L0,21.4L-3.3,0Z M-21.4,0L0,3.3L21.4,0L0,-3.3Z" fill="#fff"/></g></g><g id="sp10" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.54"><circle cx="1201.1" cy="287.3" r="1.2" fill="#fff4d0"/></g><g id="sp11" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.156"><g transform="translate(778.6 183.1)"><path d="M0,-17L2.7,0L0,17L-2.7,0Z M-17,0L0,2.7L17,0L0,-2.7Z" fill="#fff"/></g></g><g id="sp12" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.196"><circle cx="949.1" cy="471.3" r="3.5" fill="#fff4d0"/></g><g id="sp13" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.347"><circle cx="1532.2" cy="489" r="2.7" fill="#fff4d0"/></g><g id="sp14" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.244"><circle cx="809.8" cy="640.3" r="2.6" fill="#fff4d0"/></g><g id="sp15" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.294"><circle cx="1235.3" cy="225.4" r="2.9" fill="#fff4d0"/></g><g id="sp16" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.144"><g transform="translate(876 743.3)"><path d="M0,-8.9L1.4,0L0,8.9L-1.4,0Z M-8.9,0L0,1.4L8.9,0L0,-1.4Z" fill="#fff"/></g></g><g id="sp17" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.369"><circle cx="1425.2" cy="467.9" r="1.6" fill="#fff4d0"/></g><g id="sp18" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.247"><circle cx="1187.3" cy="120.7" r="2.2" fill="#fff4d0"/></g><g id="sp19" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.321"><circle cx="850.9" cy="525.4" r="2" fill="#fff4d0"/></g><g id="sp20" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.47"><circle cx="1490.9" cy="242" r="3" fill="#fff4d0"/></g><g id="sp21" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.334"><g transform="translate(1129.9 456.5)"><path d="M0,-9.4L1.5,0L0,9.4L-1.5,0Z M-9.4,0L0,1.5L9.4,0L0,-1.5Z" fill="#fff"/></g></g><g id="sp22" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.56"><circle cx="1338.1" cy="638.7" r="2.9" fill="#fff4d0"/></g><g id="sp23" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.402"><circle cx="1550.5" cy="144.7" r="2.8" fill="#fff4d0"/></g><g id="sp24" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.28"><g transform="translate(1184.5 515.3)"><path d="M0,-17.1L2.7,0L0,17.1L-2.7,0Z M-17.1,0L0,2.7L17.1,0L0,-2.7Z" fill="#fff"/></g></g><g id="sp25" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.383"><g transform="translate(1435.7 571.3)"><path d="M0,-21.7L3.4,0L0,21.7L-3.4,0Z M-21.7,0L0,3.4L21.7,0L0,-3.4Z" fill="#fff"/></g></g><g id="sp26" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.357"><circle cx="862.2" cy="204.2" r="2.5" fill="#fff4d0"/></g><g id="sp27" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.356"><circle cx="1072.5" cy="112.5" r="1.6" fill="#fff4d0"/></g><g id="sp28" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.362"><circle cx="1118.8" cy="301.7" r="2" fill="#fff4d0"/></g><g id="sp29" style="transform-origin:0 0;transform:translate(0px,0px);opacity:0.32"><g transform="translate(1421.3 400.3)"><path d="M0,-11.7L1.8,0L0,11.7L-1.8,0Z M-11.7,0L0,1.8L11.7,0L0,-1.8Z" fill="#fff"/></g></g></g>
+<rect width="1600" height="1000" fill="url(#vig)"/>
+</svg><!--/scene0--><canvas id="screen" width="1024" height="768"></canvas><canvas id="glov" style="position:absolute;display:none;pointer-events:none;margin:0"></canvas></div>
 <div id="log">loading…</div>
 <pre id="out" style="margin:0 12px;color:#bbb"></pre>
 <script type="module">
@@ -28,7 +144,17 @@ const log = (s) => (document.getElementById("log").textContent = s);
 const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
 const enc = new TextEncoder();
 let x, wasm, gpuc = null;
-if (!new URLSearchParams(location.search).has("cpu")) import("./compositor_gpu.mjs").then((m) => { const tg = performance.now(); gpuc = m.createGpuCompositor(1024, 768); console.info(`[timing] GPU compositor ${gpuc ? "ready" : "unavailable"} in ${Math.round(performance.now() - tg)} ms (shader compile)`); window.__gpuc = !!gpuc; if (gpuc && wall) gpuc.setWallpaper(wall); lastGen = -1; }).catch((e) => console.info("GPU compositor unavailable, using CPU", e));
+// GPU compositor: created lazily (its shader compile blocks the main thread), after the intro has had its first frames or when Run is pressed
+let gpucP = null;
+function ensureGpuc() {
+  if (gpucP || new URLSearchParams(location.search).has("cpu")) return gpucP ?? Promise.resolve();
+  return (gpucP = import("./compositor_gpu.mjs").then((m) => {
+    const tg = performance.now();
+    gpuc = m.createGpuCompositor(1024, 768);
+    console.info(`[timing] GPU compositor ${gpuc ? "ready" : "unavailable"} in ${Math.round(performance.now() - tg)} ms (shader compile)`);
+    window.__gpuc = !!gpuc; if (gpuc && wall) gpuc.setWallpaper(wall); lastGen = -1;
+  }).catch((e) => console.info("GPU compositor unavailable, using CPU", e)));
+}
 // ---- boot intro: a glass ball rolls in; its final frame becomes the desktop wallpaper (pre-saved web/wallpaper.png without WebGL2) ----
 let wall = null, introRun = false;
 function applyWallpaper() { // CPU compositor path: hand the image to the host
@@ -38,28 +164,24 @@ function applyWallpaper() { // CPU compositor path: hand the image to the host
   x.plonk_wine_set_wallpaper(put(new Uint8Array(g.getImageData(0, 0, wall.width, wall.height).data.buffer)), wall.width, wall.height);
 }
 function setWall(bmp) { wall = bmp; if (gpuc) gpuc.setWallpaper(bmp); applyWallpaper(); lastGen = -1; ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height); }
-async function savedWallpaper() { try { setWall(await createImageBitmap(await (await fetch("/web/wallpaper.png")).blob())); } catch (e) { console.info("no saved wallpaper", e); } }
+const idle = (f) => (window.requestIdleCallback ?? setTimeout)(f);
+// The intro: scene 0 is inlined in the HTML (paints on first byte); playIntro then starts ~140 transform/opacity WAAPI animations
+// (compositor thread: they keep running while the main thread is busy). The settled scene, rasterized from the same SVG, becomes the wallpaper.
 async function startIntro() {
-  const q = new URLSearchParams(location.search);
-  if (q.has("nointro") || matchMedia("(prefers-reduced-motion: reduce)").matches) return savedWallpaper();
-  let intro = null, m = null;
-  try { m = await import("./intro.mjs"); intro = m.createIntro(canvas.width, canvas.height); } catch (e) { console.info("intro unavailable", e); }
-  if (!intro) return savedWallpaper();
-  introRun = true;
-  const t0 = performance.now();
-  await new Promise((res) => {
-    const f = () => {
-      if (!introRun) return res();
-      const t = (performance.now() - t0) / 1000;
-      intro.draw(Math.min(t, m.DURATION)); ctx.drawImage(intro.canvas, 0, 0);
-      if (t >= m.DURATION) return res();
-      requestAnimationFrame(f);
-    };
-    requestAnimationFrame(f);
-  });
-  if (introRun) { intro.draw(m.DURATION); setWall(await createImageBitmap(intro.canvas)); window.__intro = "played"; } else { await savedWallpaper(); window.__intro = "skipped"; }
+  const q = new URLSearchParams(location.search), stage = document.getElementById("stage");
+  const skip = q.has("nointro") || matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let m = null;
+  try { m = await import("./intro.mjs"); } catch (e) { console.info("intro unavailable", e); }
+  if (m && !skip) {
+    introRun = true;
+    try { await m.playIntro({ stage, w: W, h: H, mute: q.has("mute") }); } catch (e) { console.info("intro failed", e); }
+  }
+  const wasRun = introRun;
   introRun = false;
-  intro.dispose?.();
+  if (m) { try { setWall(await m.rasterize(W, H)); } catch (e) { console.info("wallpaper rasterize failed", e); } }
+  stage.querySelector("#plonkScene")?.remove();
+  window.__intro = skip ? "skipped" : wasRun ? "played" : "interrupted";
+  idle(() => ensureGpuc());
 }
 const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
 
@@ -73,6 +195,7 @@ async function loadAppList() {
 }
 async function boot(app) {
   mark("start");
+  await ensureGpuc();
   const sel = document.getElementById("app");
   app = app ?? sel.value;
   wasm = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
@@ -83,7 +206,7 @@ async function boot(app) {
     x.plonk_wine_add_file(put(n), n.length, put(b), b.length);
   };
   x.plonk_wine_reset();
-  introRun = false; // pressing Run skips a running intro (the saved wallpaper is used)
+  document.getElementById("plonkScene")?.getAnimations?.({ subtree: true }).forEach((a) => a.finish()); // pressing Run fast-forwards a running intro
   applyWallpaper();
   lastGen = -1;
   log("downloading Wine runtime (compressed, cached)...");

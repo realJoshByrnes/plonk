@@ -1,5 +1,5 @@
-// Renders the boot-intro final frame to web/wallpaper.png (1024x768) and checks the intro in headless Chrome (SwiftShader).
-// Usage: node web/make_wallpaper.mjs [stills_dir]   (stills_dir gets intro_t0.00.png, t1.50, t3.00, t4.00)
+// Renders the Plonk wine scene (SVG) in headless Chrome: settled wallpapers at several sizes + animation stills.
+// Usage: node web/make_wallpaper.mjs <out_dir>   -> wall_1024x768.png, wall_1920x1080.png, wall_800x1200.png, intro_t<t>.png
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,12 +13,11 @@ const CHROME = ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Pro
   "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"].find(existsSync);
 if (!CHROME) { console.log("SKIP make_wallpaper: no Chrome/Edge found"); process.exit(0); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const W = 1024, H = 768;
 
 const server = createServer((req, res) => {
   const p = new URL(req.url, "http://x").pathname;
-  if (p === "/") { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><body></body>"); return; }
-  if (p === "/intro.mjs") { res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" }); res.end(readFileSync(join(WEB, "intro.mjs"))); return; }
+  if (p === "/") { res.writeHead(200, { "content-type": "text/html" }); res.end("<!doctype html><body style='margin:0'></body>"); return; }
+  if (p.endsWith(".mjs") && /^\/[\w.]+$/.test(p) && existsSync(join(WEB, p))) { res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" }); res.end(readFileSync(join(WEB, p))); return; }
   res.writeHead(404); res.end();
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -26,31 +25,25 @@ const PORT = server.address().port;
 
 const PAGE = `(async () => {
   const m = await import("/intro.mjs");
-  const it = m.createIntro(${W}, ${H});
-  if (!it) return { error: "no webgl2" };
-  const cx = document.createElement("canvas"); cx.width = ${W}; cx.height = ${H};
-  const x2 = cx.getContext("2d", { willReadFrequently: true });
-  const gl = it.canvas.getContext("webgl2");
-  const grab = (t) => { it.draw(t); x2.drawImage(it.canvas, 0, 0); return x2.getImageData(0, 0, ${W}, ${H}).data; };
-  const out = { png: {}, px: {}, ms: [] };
-  const spots = {}; const b = m.ballState(${W}, ${H}, m.DURATION);
-  const ts = [0, 1.5, 3, m.DURATION];
-  const frames = {};
-  for (const t of ts) { frames[t] = grab(t); out.png[t] = it.canvas.toDataURL("image/png"); }
-  const at = (t, x, y) => { const o = (Math.round(y) * ${W} + Math.round(x)) * 4; return Array.from(frames[t].slice(o, o + 3)); };
-  const b15 = m.ballState(${W}, ${H}, 1.5);
-  out.px = { rest: { final: at(m.DURATION, b.x, b.y), empty: at(0, b.x, b.y), at3: at(3, b.x, b.y) },
-             mid: { mid: at(1.5, b15.x, b15.y), empty: at(0, b15.x, b15.y) }, ball0: m.ballState(${W}, ${H}, 0), b, b15 };
-  // fraction of pixels that differ from the t=0 frame
-  const diff = (t) => { let c = 0; for (let i = 0; i < frames[0].length; i += 4) if (Math.abs(frames[t][i] - frames[0][i]) + Math.abs(frames[t][i+1] - frames[0][i+1]) + Math.abs(frames[t][i+2] - frames[0][i+2]) > 24) c++; return c / (${W} * ${H}); };
-  out.px.diff = { 1.5: diff(1.5), 3: diff(3), 4: diff(m.DURATION) };
-  // timing (draw + sync readback of 1 pixel)
-  const px1 = new Uint8Array(4);
-  for (let i = 0; i < 6; i++) { const t0 = performance.now(); it.draw(0.5 + i * 0.6); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px1); out.ms.push(performance.now() - t0); }
-  // determinism: final frame twice
-  const a = grab(m.DURATION); const a2 = grab(m.DURATION + 10); let same = true; for (let i = 0; i < a.length; i++) if (a[i] !== a2[i]) { same = false; break; }
-  out.deterministic = same;
-  out.png.final = it.canvas.toDataURL("image/png");
+  const out = { wall: {}, stills: {}, ts: [0.5, 1.6, 2.0, 2.4, 3.2, m.DURATION] };
+  const toURL = (c) => c.toDataURL("image/png");
+  const bmpToCanvas = (b) => { const c = document.createElement("canvas"); c.width = b.width; c.height = b.height; c.getContext("2d").drawImage(b, 0, 0); return c; };
+  for (const [w, h] of [[1024, 768], [1920, 1080], [800, 1200]]) out.wall[w + "x" + h] = toURL(bmpToCanvas(await m.rasterize(w, h)));
+  // stage like the page: relative container, canvas with margin 0 12px
+  const stage = document.createElement("div"); stage.style.cssText = "position:relative;width:1048px;height:768px;background:#000";
+  const cv = document.createElement("canvas"); cv.width = 1024; cv.height = 768; cv.style.cssText = "display:block;margin:0 12px;width:1024px;height:768px";
+  stage.appendChild(cv); document.body.appendChild(stage);
+  const tl = m.createTimeline(stage);
+  const get = (c) => c.getContext("2d").getImageData(0, 0, 1024, 768).data;
+  const datas = {};
+  for (const t of out.ts) { tl.seek(t); const c = await m.snapshot(tl.svg, 1024, 768); out.stills[t] = toURL(c); datas[t] = get(c); }
+  const ref = get(await (async () => bmpToCanvas(await m.rasterize(1024, 768)))());
+  const d = datas[m.DURATION]; let sum = 0, mx = 0;
+  for (let i = 0; i < ref.length; i += 4) for (let k = 0; k < 3; k++) { const e = Math.abs(ref[i + k] - d[i + k]); sum += e; if (e > mx) mx = e; }
+  let bad = 0; for (let i = 0; i < ref.length; i += 4) if (Math.abs(ref[i] - d[i]) + Math.abs(ref[i + 1] - d[i + 1]) + Math.abs(ref[i + 2] - d[i + 2]) > 30) bad++;
+  out.meanDiff = sum / (ref.length / 4 * 3); out.maxDiff = mx; out.badFrac = bad / (ref.length / 4);
+  const svg = tl.svg.getBoundingClientRect(); out.svgRect = [svg.left, svg.top, svg.width, svg.height]; out.nAnim = tl.anims.length; out.DURATION = m.DURATION;
+  out.scene0Len = m.scene0SVG().length;
   return out;
 })()`;
 
@@ -85,31 +78,23 @@ async function runPage(flags) {
   } finally { cleanup(); }
 }
 
+
 const BASE = ["--headless=new", "--ignore-gpu-blocklist", "--disable-gpu-sandbox"];
-const SETS = [[...BASE, "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--enable-webgl"],
-  [...BASE, "--use-gl=angle", "--use-angle=swiftshader-webgl", "--enable-unsafe-swiftshader"], [...BASE, "--enable-unsafe-swiftshader"]];
+const SETS = [[...BASE, "--use-angle=swiftshader", "--enable-unsafe-swiftshader"], [...BASE, "--disable-gpu"]];
 let res;
 for (const f of SETS) { res = await runPage(f); if (res && !res.error) break; console.log("flags failed:", res?.error?.split("\n")[0]); }
 server.close();
 if (!res || res.error) { console.log("FAIL make_wallpaper:", res?.error); process.exit(1); }
 
 const png = (d) => Buffer.from(d.split(",")[1], "base64");
-writeFileSync(join(WEB, "wallpaper.png"), png(res.png.final));
 if (outDir) {
   mkdirSync(outDir, { recursive: true });
-  for (const t of ["0", "1.5", "3", "4"]) writeFileSync(join(outDir, `intro_t${Number(t).toFixed(2)}.png`), png(res.png[t]));
+  for (const [k, v] of Object.entries(res.wall)) writeFileSync(join(outDir, `wall_${k}.png`), png(v));
+  for (const [t, v] of Object.entries(res.stills)) writeFileSync(join(outDir, `intro_t${Number(t).toFixed(2)}.png`), png(v));
 }
 let fail = 0;
 const chk = (ok, name, detail = "") => { if (!ok) fail++; console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? " -- " + detail : ""}`); };
-const dist = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
-const p = res.px;
-chk(p.ball0.x + p.ball0.r < 0, "t=0: ball centre/edge off-screen left", `x=${p.ball0.x.toFixed(0)} r=${p.ball0.r.toFixed(0)}`);
-chk(dist(p.rest.final, p.rest.empty) > 30, "final: ball differs from empty backdrop at rest centre", `${p.rest.final} vs ${p.rest.empty}`);
-chk(Math.abs(p.b.x - 0.75 * W) < 1 && Math.abs(p.b.y - 0.71 * H) < 1, "final: ball centre near (0.75w, floor)", `(${p.b.x},${p.b.y})`);
-chk(p.mid.mid && dist(p.mid.mid, p.mid.empty) > 30 && p.b15.x > 0 && p.b15.x < 0.75 * W, "t=1.5: ball partway", `x=${p.b15.x.toFixed(0)}`);
-chk(dist(p.rest.at3, p.rest.final) < 400 && p.diff[3] > 0.02, "t=3: ball nearly settled", `diff vs empty ${(p.diff[3] * 100).toFixed(1)}%`);
-chk(p.diff[4] > 0.05 && p.diff[4] < 0.25, "final frame ball coverage plausible", `${(p.diff[4] * 100).toFixed(1)}% pixels differ from empty`);
-chk(res.deterministic, "draw(DURATION) deterministic / identical for t > DURATION");
-console.log(`frame time on SwiftShader (draw+sync, ${W}x${H}): ${res.ms.map((m) => m.toFixed(0)).join(", ")} ms`);
-console.log(`wrote ${join(WEB, "wallpaper.png")}`);
+chk(res.meanDiff < 0.5 && res.badFrac < 0.005, "t=DURATION animation still matches rasterize()", `mean ${res.meanDiff.toFixed(3)} max ${res.maxDiff} bad ${(res.badFrac * 100).toFixed(3)}%`);
+chk(Math.abs(res.svgRect[0] - 12) < 1 && Math.abs(res.svgRect[2] - 1024) < 1, "svg overlay covers canvas area", res.svgRect.join(","));
+console.log(`animations: ${res.nAnim}, scene0 svg: ${res.scene0Len} bytes, DURATION ${res.DURATION}s`);
 process.exit(fail ? 1 : 0);

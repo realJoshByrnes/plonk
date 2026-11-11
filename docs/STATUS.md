@@ -8,6 +8,7 @@ Browser desktop that runs 32-bit Windows programs: Rust i386 interpreter (wasm) 
 - Threads: cooperative scheduler (CreateThread, events, CS, waits with timeouts, suspend/resume, TLS).
 - Kernel: writable in-memory FS + registry + environment, tokens, timers, handles, volumes, API-set map, KUSER clock.
 - 3D: guest OpenGL 1.x (own generated opengl32.dll stub -> host -> canonical command stream, docs/GL_PROTOCOL.md) replayed by web/gl_*.mjs on WebGPU (preferred) / WebGL2; demo `tests/guests/gl_cube.exe` shows FPS.
+- Boot intro (web/intro.mjs, wine_scene.svg.mjs): a cherry plonks into a glass of wine (SVG, ~140 compositor-thread WAAPI animations, WebAudio plonk); scene 0 is inlined in index.html (`node web/inline_scene0.mjs` after editing the scene) so it paints first; the settled scene rasterized at the screen size is the wallpaper (resolution independent, no GPU needed). `?nointro`, `?mute`.
 - Display pipeline: WebGL2 GPU compositor (web/compositor_gpu.mjs; `?cpu` forces the CPU path with layer cache + dirty-rect upload); the 3D window is shown by an overlay canvas with zero readback while topmost/unobscured (`?nodirect` forces readback).
 - Display: glass compositor (blur/shadow/rounded), glass window chrome, Inter font via fontdue, bitmap/DIB engine, shapes, regions.
 - Browser: single gzip core pack + lazy DLL/NLS download, dependency prefetch (`/deps.json`), own-exe picker/drop, fresh process per Run,
