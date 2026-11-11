@@ -130,6 +130,7 @@ export function createWebGL2Renderer() {
   let fbo = null, rbC = null, rbD = null, W = 1, H = 1;
   function makeTargets(w, h) {
     W = Math.max(1, w); H = Math.max(1, h);
+    canvas.width = W; canvas.height = H;
     if (fbo) { gl.deleteFramebuffer(fbo); gl.deleteRenderbuffer(rbC); gl.deleteRenderbuffer(rbD); }
     fbo = gl.createFramebuffer(); rbC = gl.createRenderbuffer(); rbD = gl.createRenderbuffer();
     gl.bindRenderbuffer(gl.RENDERBUFFER, rbC); gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, W, H);
@@ -196,6 +197,16 @@ export function createWebGL2Renderer() {
       tex.gpu.pv = -1; // re-apply params (and mipmaps) lazily
     },
     texDelete(tex) { if (tex.gpu) { gl.deleteTexture(tex.gpu.t); tex.gpu = null; } },
+    presentDirect(_w, _h, cb) {
+      if (!canvas.transferToImageBitmap) return false;
+      gl.disable(gl.SCISSOR_TEST); gl.colorMask(true, true, true, true);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, fbo); gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST); // canvas is bottom-up like the FBO: no flip
+      const bmp = canvas.transferToImageBitmap();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      cb(W, H, bmp);
+      return true;
+    },
     present(_w, _h, cb) {
       gl.disable(gl.SCISSOR_TEST);
       const buf = new Uint8Array(W * H * 4);

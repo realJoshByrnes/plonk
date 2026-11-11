@@ -75,13 +75,13 @@ async function runPage(flags, prefer, shot) {
     for (const f of Object.values(frames)) f.data = Buffer.from(f.b64, "base64");
     const meta = await ev("T.meta");
     if (shot) { const r = await send("Page.captureScreenshot", { format: "png" }); writeFileSync(shot, Buffer.from(r.result.data, "base64")); }
-    return { kind, frames, meta, logs };
+    return { kind, frames, meta, logs, direct: await ev("T.direct") };
   } finally { cleanup(); }
 }
 
 // ------------------------------------------------------------------ checks
 let failures = 0;
-function suite(label, { frames, meta }) {
+function suite(label, { frames, meta, direct }) {
   const out = (ok, name, detail = "") => { if (!ok) failures++; console.log(`${ok ? "PASS" : "FAIL"} [${label}] ${name}${!ok && detail ? " -- " + detail : ""}`); };
   const px = (n, x, y) => { const f = frames[n]; const o = (y * f.w + x) * 4; return [f.data[o], f.data[o + 1], f.data[o + 2], f.data[o + 3]]; };
   const near = (a, e, tol = 3) => e.every((v, i) => Math.abs(a[i] - v) <= tol);
@@ -159,6 +159,12 @@ function suite(label, { frames, meta }) {
   out(diff("demo0", "demo3") > 2000, "demo frames differ (rotation)");
   const o = px("demo3", 35, 95);
   out(o[0] > 100, "demo translucent overlay present", `got ${fmt(o)}`);
+  const ds = Object.entries(direct?.scenes ?? {});
+  out(direct && direct.kind === label && !direct.fellBack && ds.length === Object.keys(frames).length && ds.every(([, s]) => !s.missing && s.bw === 160 && s.bh === 120),
+    "direct mode: onFrame called for every PRESENT with 160x120 ImageBitmap, no readback", JSON.stringify(direct && { k: direct.kind, c: direct.count, fb: direct.fellBack }));
+  const badScenes = ds.filter(([, s]) => s.bad > 0 || s.missing);
+  out(badScenes.length === 0, "direct bitmap == readback frame (all scenes, tol 3)", badScenes.map(([n, s]) => `${n}:bad=${s.bad},max=${s.max}`).join(" "));
+  out(direct?.scenes?.demo3 && direct.scenes.demo3.max <= 3, "direct bitmap upright, matches demo frame", JSON.stringify(direct?.scenes?.demo3));
   const cols = new Set(); { const D = frames.demo3.data; for (let i = 0; i < D.length; i += 4) cols.add((D[i] >> 3) << 10 | (D[i + 1] >> 3) << 5 | D[i + 2] >> 3); }
   out(cols.size > 40, "demo scene has many distinct colours (texture + lighting + fog)", `${cols.size}`);
 }

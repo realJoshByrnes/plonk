@@ -160,6 +160,30 @@ export async function createWebGPURenderer() {
   if (err) throw new Error("WebGPU validation: " + err.message);
   device.addEventListener("uncapturederror", (e) => console.warn("WebGPU error:", e.error?.message));
 
+  // direct present: blit the colour texture into an OffscreenCanvas webgpu context (preferred format), then transferToImageBitmap
+  let oc = null, octx = null, blitPipe = null, blitBg = null, blitFor = null;
+  try {
+    if (typeof OffscreenCanvas !== "undefined") {
+      oc = new OffscreenCanvas(1, 1); octx = oc.getContext("webgpu");
+      if (octx && oc.transferToImageBitmap) {
+        const fmt = navigator.gpu.getPreferredCanvasFormat();
+        octx.configure({ device, format: fmt, alphaMode: "premultiplied" });
+        const bm = device.createShaderModule({ code: `
+@group(0) @binding(0) var src : texture_2d<f32>;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  return vec4<f32>(p[i], 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = textureLoad(src, vec2<i32>(i32(p.x), i32(p.y)), 0);
+  return vec4<f32>(c.rgb * c.a, c.a);
+}` });
+        blitPipe = device.createRenderPipeline({ layout: "auto", vertex: { module: bm, entryPoint: "vs" },
+          fragment: { module: bm, entryPoint: "fs", targets: [{ format: fmt }] }, primitive: { topology: "triangle-list" } });
+      } else oc = octx = null;
+    }
+  } catch (e) { oc = octx = blitPipe = null; }
+
   const samplers = new Map();
   const getSampler = (t) => {
     const key = [t.min, t.mag, t.wrapS, t.wrapT].join();
@@ -213,7 +237,9 @@ export async function createWebGPURenderer() {
     flush();
     color?.destroy(); depth?.destroy();
     W = Math.max(1, w); H = Math.max(1, h);
-    color = device.createTexture({ size: [W, H], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    color = device.createTexture({ size: [W, H], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING });
+    blitBg = null;
+    if (oc) { oc.width = W; oc.height = H; }
     depth = device.createTexture({ size: [W, H], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
     colorView = color.createView(); depthView = depth.createView();
     pc = { r: 0, g: 0, b: 0, a: 0 }; pd = 1;
@@ -292,6 +318,18 @@ export async function createWebGPURenderer() {
       device.queue.writeTexture({ texture: tex.gpu.texture, origin: [x, y] }, data, { bytesPerRow: w * 4, rowsPerImage: h }, [w, h]);
     },
     texDelete(tex) { if (tex.gpu) { flush(); tex.gpu.texture.destroy(); tex.gpu = null; } },
+    presentDirect(_w, _h, cb) {
+      if (lost || !blitPipe) return false;
+      if (pc || pd != null) ensurePass();
+      endPass();
+      if (!enc) enc = device.createCommandEncoder();
+      blitBg ??= device.createBindGroup({ layout: blitPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: colorView }] });
+      const p = enc.beginRenderPass({ colorAttachments: [{ view: octx.getCurrentTexture().createView(), loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 0 }, storeOp: "store" }] });
+      p.setPipeline(blitPipe); p.setBindGroup(0, blitBg); p.draw(3); p.end();
+      flush();
+      cb(W, H, oc.transferToImageBitmap());
+      return true;
+    },
     present(_w, _h, cb) {
       if (lost) return;
       if (pc || pd != null) ensurePass();

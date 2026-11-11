@@ -460,7 +460,15 @@ impl WineProc {
         let my = self.wm.windows.get(&top).and_then(|t| t.surface);
         let ls = self.wm.backend.layers();
         let topmost = my.is_some() && ls.last().is_some_and(|(id, _)| Some(*id) == my);
-        let (x, y) = (w.rect[0], w.rect[1]);
+        // child rects are relative to the parent's client area: add every ancestor's client origin
+        let (mut x, mut y) = (w.rect[0], w.rect[1]);
+        let mut cur = w.parent;
+        while let Some(p) = self.wm.windows.get(&cur) {
+            if cur == DESKTOP { break; }
+            let (ox, oy) = if p.surface.is_some() { let (a, b) = Wm::client_off(p.style); (a, b + if p.menu != 0 { MENU_H } else { 0 }) } else { (0, 0) };
+            x += p.rect[0] + ox; y += p.rect[1] + oy;
+            cur = p.parent;
+        }
         [x.max(0) as u32, y.max(0) as u32, c[2] as u32, c[3] as u32, (topmost && w.visible && x >= 0 && y >= 0) as u32]
     }
 }

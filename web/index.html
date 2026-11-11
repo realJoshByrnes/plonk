@@ -19,7 +19,7 @@
   <button id="run">Run</button>
   <label>or your own 32-bit .exe <input type="file" id="file" accept=".exe"></label>
 </div>
-<canvas id="screen" width="1024" height="768"></canvas>
+<div id="stage" style="position:relative"><canvas id="screen" width="1024" height="768"></canvas><canvas id="glov" style="position:absolute;display:none;pointer-events:none;margin:0"></canvas></div>
 <div id="log">loading…</div>
 <pre id="out" style="margin:0 12px;color:#bbb"></pre>
 <script type="module">
@@ -27,7 +27,8 @@ const W = 1024, H = 768;
 const log = (s) => (document.getElementById("log").textContent = s);
 const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
 const enc = new TextEncoder();
-let x, wasm;
+let x, wasm, gpuc = null;
+if (!new URLSearchParams(location.search).has("cpu")) import("./compositor_gpu.mjs").then((m) => { gpuc = m.createGpuCompositor(1024, 768); window.__gpuc = !!gpuc; lastGen = -1; }).catch((e) => console.info("GPU compositor unavailable, using CPU", e));
 const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
 
 import { peImports } from "/web/pe_imports.mjs";
@@ -105,12 +106,19 @@ let glb = null, glInit = null;
 function ensureGL() {
   if (glInit) return;
   const prefer = new URLSearchParams(location.search).get("gl") || "webgpu";
-  glInit = import("./gl_backend.mjs").then((m) => m.createGLBackend({ prefer })).then((b) => {
+  glInit = import("./gl_backend.mjs").then((m) => m.createGLBackend({ prefer, direct: !new URLSearchParams(location.search).has("nodirect") })).then((b) => {
     b.onPresent = (w, h, rgba) => { // a finished frame: copy it into the guest window
       const p = x.plonk_gl_frame_buf(w, h) >>> 0;
       new Uint8Array(x.memory.buffer, p, w * h * 4).set(rgba);
       x.plonk_gl_frame_commit(w, h);
       clearTimeout(stepTimer); stepTimer = setTimeout(step, 0);
+    };
+    // direct present: the finished frame goes straight to an overlay canvas over the guest window (no readback, no CPU copies)
+    const ov = document.getElementById("glov"), ovctx = ov.getContext("bitmaprenderer");
+    b.onFrame = (w, h, bmp) => {
+      if (ov.width !== w || ov.height !== h) { ov.width = w; ov.height = h; }
+      ovctx.transferFromImageBitmap(bmp);
+      window.__glDirect = (window.__glDirect || 0) + 1;
     };
     glb = b; window.__glKind = b.kind;
   }).catch((e) => { console.error("3D backend failed", e); glInit = null; x.plonk_gl_clear(); });
@@ -119,6 +127,12 @@ function pumpGL() {
   const n = x.plonk_gl_len();
   if (!n) return;
   if (!glb) { ensureGL(); return; } // commands stay queued in the host until the backend is ready
+  // show the GL canvas directly only while its window is topmost and unobscured; otherwise fall back to readback into the window
+  const r = new Uint32Array(x.memory.buffer, x.plonk_gl_rect() >>> 0, 5);
+  const ov = document.getElementById("glov"), k = canvas.getBoundingClientRect().width / W;
+  glb.direct = r[4] === 1 && r[2] > 0;
+  ov.style.display = glb.direct ? "block" : "none";
+  if (glb.direct) { ov.style.left = 12 + r[0] * k + "px"; ov.style.top = r[1] * k + "px"; ov.style.width = r[2] * k + "px"; ov.style.height = r[3] * k + "px"; }
   const cmds = new Uint32Array(x.memory.buffer, x.plonk_gl_ptr() >>> 0, n).slice();
   x.plonk_gl_clear();
   glb.execute(cmds);
@@ -136,9 +150,21 @@ function step() {
   const g = x.plonk_wine_gen();
   if (g !== lastGen) { // redraw only when something on screen changed
     lastGen = g;
-    const tc = performance.now(); const p = x.plonk_wine_compose(W, H) >>> 0; P.c1 = (P.c1 || 0) + performance.now() - tc;
+    const tc = performance.now();
+    if (gpuc) { // GPU compositor: the host only exposes the layers; the page draws wallpaper, shadows, glass blur and windows
+      const t = new Uint32Array(x.memory.buffer, x.plonk_layers() >>> 0, x.plonk_layers_count() * 12), layers = [];
+      for (let i = 0; i < t.length / 12; i++) {
+        const o = i * 12, w = t[o + 3], h = t[o + 4];
+        layers.push({ id: t[o], x: t[o + 1] | 0, y: t[o + 2] | 0, w, h, radius: t[o + 5] | 0, blur: t[o + 6] | 0, shadow: t[o + 7] | 0, ver: t[o + 8] + t[o + 10] * 4294967296, pix: new Uint32Array(x.memory.buffer, t[o + 9], w * h) });
+      }
+      gpuc.render(layers);
+      ctx.drawImage(gpuc.canvas, 0, 0);
+      P.c1 = (P.c1 || 0) + performance.now() - tc; P.comp += performance.now() - t2;
+    } else {
+    const p = x.plonk_wine_compose(W, H) >>> 0; P.c1 = (P.c1 || 0) + performance.now() - tc;
     { const d = new Uint32Array(x.memory.buffer, x.plonk_wine_dirty() >>> 0, 4); if (d[2]) ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer, p, W * H * 4), W, H), 0, 0, d[0], d[1], d[2], d[3]); }
     P.comp += performance.now() - t2;
+    }
   }
   const stub = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stubbed_ptr() >>> 0, x.plonk_wine_stubbed_len()));
   const out = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stdout_ptr() >>> 0, x.plonk_wine_stdout_len()));

@@ -257,7 +257,34 @@ try {
   }
   const last = T.frames["demo3"], main = document.getElementById("main");
   main.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(last.data.buffer.slice(0)), last.w, last.h), 0, 0);
-  T.dump = () => Object.fromEntries(Object.entries(T.frames).map(([k, v]) => [k, { w: v.w, h: v.h, b64: b64(v.data) }]));
+  // direct (zero-readback) mode: same streams on a second backend, compare bitmaps against the readback frames
+  {
+    const gd = await createGLBackend({ prefer: q.get("prefer") || "webgpu", direct: true });
+    const bmps = {}; let k = 0;
+    gd.onFrame = (w, h, bmp) => { bmps[names[k++]] = { w, h, bmp }; };
+    gd.onPresent = () => { T.directFellBack = true; };
+    const saved = names; names = [];
+    for (const s of scenes) {
+      const b = new B(); b.name = s.name; b.create(); s.fn(b); b.present();
+      gd.execute(b.words());
+    }
+    names = saved; k = 0;
+    const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+    const cx = cv.getContext("2d", { willReadFrequently: true });
+    T.direct = { kind: gd.kind, count: Object.keys(bmps).length, fellBack: !!T.directFellBack, scenes: {} };
+    for (const n of names) {
+      const e = bmps[n]; if (!e) { T.direct.scenes[n] = { missing: true }; continue; }
+      cx.clearRect(0, 0, W, H); cx.drawImage(e.bmp, 0, 0);
+      const d = cx.getImageData(0, 0, W, H).data, r = T.frames[n].data;
+      let max = 0, bad = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        let m = 0; for (let c = 0; c < 4; c++) m = Math.max(m, Math.abs(d[i + c] - r[i + c]));
+        if (m > 3) bad++; if (m > max) max = m;
+      }
+      T.direct.scenes[n] = { w: e.w, h: e.h, bw: e.bmp.width, bh: e.bmp.height, max, bad };
+    }
+  }
+  T.dump =() => Object.fromEntries(Object.entries(T.frames).map(([k, v]) => [k, { w: v.w, h: v.h, b64: b64(v.data) }]));
   document.getElementById("status").textContent = `backend: ${gl.kind}, ${names.length} frames presented`;
 } catch (e) {
   T.error = String(e?.stack ?? e);

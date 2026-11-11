@@ -74,7 +74,8 @@ function defaultState(w, h) {
 const CM_CODE = { 0x1200: 1, 0x1201: 2, 0x1602: 3, 0x1202: 4, 0x1600: 5 };
 const NO_RECORD = new Set([1, 2, 45, 46, 48, 49]); // CREATE RESIZE NEW_LIST END_LIST DELETE_LISTS PRESENT are never compiled into lists
 
-export function createCore(r, presentCb) {
+// Optional renderer method: presentDirect(w,h,cb) -> true if it delivered cb(w,h,imageBitmap) without readback.
+export function createCore(r, presentCb, direct) {
   let W = 0, H = 0, created = false;
   let st = defaultState(1, 1);
   let cur = [IDENT(), IDENT(), IDENT()], stacks = [[], [], []], mmode = 0;
@@ -333,7 +334,7 @@ export function createCore(r, presentCb) {
           break;
         }
         case 48: for (let k = 0; k < words[p + 1]; k++) lists.delete(words[p] + k); break;
-        case 49: if (created) r.present(W, H, presentCb); break;
+        case 49: if (created) { if (!(direct && direct.on() && r.presentDirect && r.presentDirect(W, H, direct.cb))) r.present(W, H, presentCb); } break;
         case 50: attribs.push(structuredClone(st)); break;
         case 51: { const s = attribs.pop(); if (s) st = s; break; }
         default: break; // unknown op: skipped via len
