@@ -11,8 +11,8 @@ fn rust_msvc_hello() {
     }
     let mut p = WineProc::new();
     p.load_dir(dir.to_str().unwrap());
-    p.files.insert("c:\rust.exe".into(), include_bytes!("../../../tests/guests/rust_hello.exe").to_vec());
-    p.boot("c:\rust.exe").unwrap();
+    p.files.insert("c:\\rust.exe".into(), include_bytes!("../../../tests/guests/rust_hello.exe").to_vec());
+    p.boot("c:\\rust.exe").unwrap();
     assert_eq!(p.run(20_000_000), Ok(0));
     assert_eq!(String::from_utf8_lossy(&p.stdout), "Hello from Rust! 55\n");
 }

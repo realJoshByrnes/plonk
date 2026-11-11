@@ -554,6 +554,8 @@ impl WineProc {
                 let title = if a[3] != 0 { match self.class_arg(a[3])? { Err(s) => s, Ok(_) => String::new() } } else { String::new() };
                 let dim = |v: u32, d: i32| if v == CW_USEDEFAULT { d } else { v as i32 };
                 let (x, y, cx, cy) = (dim(a[5], 100), dim(a[6], 100), dim(a[7], 640), dim(a[8], 480));
+                #[cfg(not(target_arch = "wasm32"))]
+                if std::env::var("CREATE_LOG").is_ok() { eprintln!("create {cname:?} title={title:?} style={style:#x} parent={:#x} id={:#x}", a[9], a[10]); }
                 let hwnd = self.wm.next_hwnd;
                 self.wm.next_hwnd += 4;
                 let parent = if a[9] == 0 { DESKTOP } else { a[9] };
@@ -563,7 +565,7 @@ impl WineProc {
                 if toplevel { self.wm.zorder.push(hwnd); }
                 self.wm.windows.insert(hwnd, Window { class: ci, style: style & !WS_VISIBLE, rect: [x, y, x + cx, y + cy], parent: if toplevel { DESKTOP } else { parent }, text: title.clone(), visible: false, invalid: None, needs_erase: false, surface, ex_style, menu: if toplevel && self.wm.menus.contains_key(&a[10]) { a[10] } else { 0 }, id: a[10], inst: a[11], userdata: 0, proc_override: 0, extra: vec![0; self.wm.classes[ci].raw[4] as usize] });
                 // CREATESTRUCTW on the guest stack for WM_NCCREATE / WM_CREATE
-                let cs = (self.cpu.r[ESP].wrapping_sub(0x800)) & !15;
+                let cs = (self.cpu.r[ESP].wrapping_sub(0x200)) & !15;
                 let (name_p, _) = self.put_wstr_at(cs + 0x40, &title);
                 for (i, v) in [a[12], a[11], a[10], a[9], cy as u32, cx as u32, y as u32, x as u32, style, name_p, 0, a[0]].iter().enumerate() {
                     self.w32(cs + i as u32 * 4, *v)?;
