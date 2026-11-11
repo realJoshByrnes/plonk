@@ -131,3 +131,21 @@ pub extern "C" fn plonk_wine_debug() {
     let w = wine();
     unsafe { MSG = format!("windows: {} | invalid: {} | stubbed: {}", w.debug_windows(), w.debug_invalid(), w.stubbed.join(" ")); }
 }
+
+// ---- 3D: command stream out, rendered frames in (docs/GL_PROTOCOL.md) ----
+/// Pointer to the pending GL command words (valid until `plonk_gl_clear`).
+#[no_mangle]
+pub extern "C" fn plonk_gl_ptr() -> *const u32 { wine().wm.gl.cmds.as_ptr() }
+#[no_mangle]
+pub extern "C" fn plonk_gl_len() -> u32 { wine().wm.gl.cmds.len() as u32 }
+#[no_mangle]
+pub extern "C" fn plonk_gl_clear() { wine().wm.gl.cmds.clear(); }
+/// Number of SwapBuffers calls so far.
+#[no_mangle]
+pub extern "C" fn plonk_gl_presents() -> u32 { wine().wm.gl.presents as u32 }
+/// Reserve a buffer for an incoming RGBA frame of `w*h` pixels; returns its address.
+#[no_mangle]
+pub extern "C" fn plonk_gl_frame_buf(w: u32, h: u32) -> *mut u32 { let g = &mut wine().wm.gl; g.frame.clear(); g.frame.resize((w * h) as usize, 0); g.frame.as_mut_ptr() }
+/// Blit the frame previously written into `plonk_gl_frame_buf` into the GL window.
+#[no_mangle]
+pub extern "C" fn plonk_gl_frame_commit(w: u32, h: u32) { wine().gl_frame(w, h); }

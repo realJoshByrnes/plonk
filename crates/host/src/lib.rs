@@ -1,6 +1,7 @@
 //! Host: process (memory + cpu + thunk dispatch) and wasm exports.
 pub mod ntuser_codes;
 pub mod reqnames;
+pub mod glnames;
 pub mod sysnames;
 pub mod wasm_wine;
 pub mod wine;

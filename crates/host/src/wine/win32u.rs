@@ -7,6 +7,7 @@ use plonk_display::{Backend, SoftBackend, SurfaceId};
 use std::collections::{BTreeMap, VecDeque};
 
 mod gdi;
+pub mod gl;
 mod menu;
 mod more;
 use gdi::Bitmap;
@@ -74,6 +75,7 @@ enum Gdi { Brush(u32), NullBrush, Pen(u32, bool), Region(Rect), Font, Bitmap, Ot
 struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32, pen: u32, pos: (i32, i32), font: u32, bitmap: u32 }
 
 pub struct Wm {
+    pub gl: gl::Gl,
     classes: Vec<Class>,
     pub windows: BTreeMap<u32, Window>,
     queue: VecDeque<Msg>,
@@ -113,6 +115,7 @@ impl Wm {
 
     pub fn new() -> Self {
         let mut w = Wm {
+            gl: Default::default(),
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
             gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, default_objs: [0; 3], extra: Default::default(), menus: BTreeMap::new(), next_menu: 0x30020, open: None, track_pending: false, track_done: None, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
         };
@@ -485,6 +488,7 @@ impl WineProc {
     /// Ok(None): not handled here.
     pub(crate) fn win32u_call(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
         if let Some(v) = self.more_call(name, a)? { return Ok(Some(v)); }
+        if let Some(v) = self.gl_nt(name, a)? { return Ok(Some(v)); }
         Ok(Some(match name {
             "NtUserInitializeClientPfnArrays" => {
                 let mut procs = [0u32; 14];

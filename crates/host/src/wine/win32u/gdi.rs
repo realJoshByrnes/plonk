@@ -138,7 +138,7 @@ impl WineProc {
         out
     }
 
-    fn dc_write_rect(&mut self, hdc: u32, x: i32, y: i32, w: i32, h: i32, px: &[u32]) {
+    pub(super) fn dc_write_rect(&mut self, hdc: u32, x: i32, y: i32, w: i32, h: i32, px: &[u32]) {
         let Some(dc) = self.wm.dcs.get(&hdc) else { return };
         let (hwnd, bitmap, clip) = (dc.hwnd, dc.bitmap, dc.clip);
         if bitmap != 0 {

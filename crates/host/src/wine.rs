@@ -665,7 +665,7 @@ impl WineProc {
     fn syscall(&mut self) -> Res<()> {
         let id = self.cpu.r[EAX];
         let (table, num) = ((id >> 12) & 3, (id & 0xfff) as usize);
-        let (name, nbytes) = match if table == 0 { NT.get(num) } else { WIN32U.get(num) } {
+        let (name, nbytes) = match if table == 0 { NT.get(num) } else if table == 2 { crate::glnames::GL.get(num) } else { WIN32U.get(num) } {
             Some(&(n, b)) => (n, b as u32),
             None => return Err(format!("bad syscall id {id:#x}")),
         };
@@ -687,6 +687,7 @@ impl WineProc {
 
     /// Ok(Some(status)) = return to caller; Ok(None) = handler already set the cpu state.
     fn dispatch(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
+        if name.starts_with("gl") || name.starts_with("wgl") { return self.gl_call(name, a); }
         if !name.starts_with("NtUser") && !name.starts_with("NtGdi") {
             match self.thread_call(name, a)? {
                 threads::Tc::Done(v) => return Ok(Some(v)),
