@@ -66,7 +66,25 @@ pub extern "C" fn plonk_wine_click(x: i32, y: i32) { wine().click(x, y); }
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub extern "C" fn plonk_wine_compose(w: u32, h: u32) -> *const u8 {
-    unsafe { OUT = wine().compose_rgba(w, h); OUT.as_ptr() }
+    unsafe {
+        let new = wine().compose_rgba(w, h);
+        // dirty rectangle vs the previous frame, so the page uploads only what changed
+        let (wu, hu) = (w as usize, h as usize);
+        let (mut x0, mut y0, mut x1, mut y1) = (wu, hu, 0usize, 0usize);
+        if OUT.len() != new.len() { (x0, y0, x1, y1) = (0, 0, wu, hu); }
+        else {
+            for y in 0..hu {
+                let (a, b) = (&OUT[y * wu * 4..(y + 1) * wu * 4], &new[y * wu * 4..(y + 1) * wu * 4]);
+                if a == b { continue; }
+                let l = a.chunks_exact(4).zip(b.chunks_exact(4)).position(|(p, q)| p != q).unwrap_or(0);
+                let r = a.chunks_exact(4).zip(b.chunks_exact(4)).rposition(|(p, q)| p != q).unwrap_or(0);
+                x0 = x0.min(l); x1 = x1.max(r + 1); y0 = y0.min(y); y1 = y1.max(y + 1);
+            }
+        }
+        DIRTY = if x1 > x0 && y1 > y0 { [x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32] } else { [0; 4] };
+        OUT = new;
+        OUT.as_ptr()
+    }
 }
 
 #[no_mangle]
@@ -149,3 +167,37 @@ pub extern "C" fn plonk_gl_frame_buf(w: u32, h: u32) -> *mut u32 { let g = &mut 
 /// Blit the frame previously written into `plonk_gl_frame_buf` into the GL window.
 #[no_mangle]
 pub extern "C" fn plonk_gl_frame_commit(w: u32, h: u32) { wine().gl_frame(w, h); }
+
+// ---- GPU compositor feed: the page draws the layers itself (web/compositor_gpu.mjs) ----
+static mut LAYER_INFO: Vec<u32> = Vec::new();
+/// Fill and return a table of the visible surfaces, bottom to top, 12 u32 per layer:
+/// [id, x(i32), y(i32), w, h, radius, blur, shadow, ver_lo, pix_ptr (ARGB u32 pixels, w*h), ver_hi, 0]. Length via `plonk_layers_count`.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_layers() -> *const u32 {
+    unsafe {
+        LAYER_INFO.clear();
+        for (id, s) in wine().wm.backend.layers() {
+            LAYER_INFO.extend_from_slice(&[id, s.x as u32, s.y as u32, s.w, s.h, s.radius as u32, s.blur as u32, s.shadow as u32, s.ver as u32, s.pix.as_ptr() as u32, (s.ver >> 32) as u32, 0]);
+        }
+        LAYER_INFO.as_ptr()
+    }
+}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_layers_count() -> u32 { unsafe { (LAYER_INFO.len() / 12) as u32 } }
+
+/// Screen rectangle (x, y, w, h as 4 u32) of the client area the GL context draws to, and whether nothing is stacked over it
+/// (flag in the 5th u32: 1 = the GL window is topmost and unobscured, so the page may show the GL canvas directly).
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_gl_rect() -> *const u32 {
+    static mut R: [u32; 5] = [0; 5];
+    unsafe { R = wine().gl_screen_rect(); R.as_ptr() }
+}
+
+static mut DIRTY: [u32; 4] = [0; 4];
+/// [x, y, w, h] changed since the previous `plonk_wine_compose` (w == 0: nothing changed).
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_wine_dirty() -> *const u32 { unsafe { DIRTY.as_ptr() } }

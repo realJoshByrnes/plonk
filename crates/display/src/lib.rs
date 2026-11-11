@@ -129,6 +129,11 @@ impl SoftBackend {
         }
     }
 
+    /// Visible surfaces, bottom to top (for GPU compositors that draw the layers themselves).
+    pub fn layers(&self) -> Vec<(SurfaceId, &Surface)> {
+        self.order.iter().filter_map(|id| self.surface(*id).map(|s| (*id, s))).filter(|(_, s)| s.visible).collect()
+    }
+
     fn get(&mut self, id: SurfaceId) -> Option<&mut Surface> { let s = self.surfaces.get_mut((id as usize).checked_sub(1)?)?.as_mut()?; s.ver += 1; Some(s) }
 }
 

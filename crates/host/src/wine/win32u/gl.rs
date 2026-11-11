@@ -447,3 +447,20 @@ impl WineProc {
         let _ = hw;
     }
 }
+
+impl WineProc {
+    /// [x, y, w, h, direct] of the GL window's client area in screen coordinates; `direct` = topmost and not overlapped.
+    pub fn gl_screen_rect(&self) -> [u32; 5] {
+        let hw = self.wm.dcs.get(&self.wm.gl.hdc).map_or(0, |d| d.hwnd);
+        let Some(w) = self.wm.windows.get(&hw) else { return [0; 5] };
+        let c = self.wm.client_rect(hw);
+        // the top-level ancestor owns the surface the compositor draws
+        let mut top = hw;
+        while let Some(t) = self.wm.windows.get(&top) { if t.surface.is_some() || t.parent == 0 || t.parent == DESKTOP { break; } top = t.parent; }
+        let my = self.wm.windows.get(&top).and_then(|t| t.surface);
+        let ls = self.wm.backend.layers();
+        let topmost = my.is_some() && ls.last().is_some_and(|(id, _)| Some(*id) == my);
+        let (x, y) = (w.rect[0], w.rect[1]);
+        [x.max(0) as u32, y.max(0) as u32, c[2] as u32, c[3] as u32, (topmost && w.visible && x >= 0 && y >= 0) as u32]
+    }
+}

@@ -137,7 +137,7 @@ function step() {
   if (g !== lastGen) { // redraw only when something on screen changed
     lastGen = g;
     const tc = performance.now(); const p = x.plonk_wine_compose(W, H) >>> 0; P.c1 = (P.c1 || 0) + performance.now() - tc;
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer, p, W * H * 4), W, H), 0, 0);
+    { const d = new Uint32Array(x.memory.buffer, x.plonk_wine_dirty() >>> 0, 4); if (d[2]) ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer, p, W * H * 4), W, H), 0, 0, d[0], d[1], d[2], d[3]); }
     P.comp += performance.now() - t2;
   }
   const stub = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stubbed_ptr() >>> 0, x.plonk_wine_stubbed_len()));
