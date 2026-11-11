@@ -110,7 +110,7 @@ try {
   console.log("PERF", JSON.stringify(gl), await evalJs("window.__glDirect")); await check("3D cube renders via GPU backend", !!gl.kind, JSON.stringify(gl));
   await shot("gl");
   await send("Page.navigate", { url: URL_.replace("?nointro", "") });
-  for (let i = 0; i < 240 && !(await evalJs("window.__intro || null")); i++) await sleep(500); // SwiftShader compiles the scene shader slowly
+  await sleep(9000);
   const it = await evalJs("window.__intro || null");
   await check("boot intro plays and sets the wallpaper", it === "played", String(it));
   await shot("intro");
