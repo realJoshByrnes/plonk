@@ -870,7 +870,9 @@ impl WineProc {
                 let at = off.unwrap_or(pos) as usize;
                 if at >= data.len() { self.w32(iosb, 0xC000_0011)?; self.w32(iosb + 4, 0)?; return Ok(Some(0xC000_0011)); }
                 let n = (len as usize).min(data.len() - at);
+                let dbg = if self.trace.len() < 3900 { let head: Vec<String> = data[at..at + n.min(8)].iter().map(|x| format!("{x:02x}")).collect(); Some(format!("  (read {path} @{at} len={len} -> {n} bytes [{}])", head.join(" "))) } else { None };
                 self.mem.write_bytes(buf, &data[at..at + n]).map_err(|_| "read buf")?;
+                if let Some(d) = dbg { self.log(d); }
                 if let Some(Obj::File { pos, .. }) = self.handles.get_mut(&h) { *pos = (at + n) as u32; }
                 self.w32(iosb, 0)?; self.w32(iosb + 4, n as u32)?;
                 0

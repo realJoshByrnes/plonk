@@ -97,7 +97,7 @@ impl WineProc {
                 match class {
                     4 | 22 | 12 => {} // basic info (times/attributes), pipe info: ignored
                     13 | 64 => { if self.mem.r8(buf).unwrap_or(0) & 1 != 0 { self.del_on_close.insert(h); } else { self.del_on_close.remove(&h); } }
-                    14 => { let p = self.r32(buf)?; if let Some(Obj::File { pos, .. }) = self.handles.get_mut(&h) { *pos = p; } }
+                    14 => { let p = self.r32(buf)?; self.log(format!("  (seek {path} -> {p})")); if let Some(Obj::File { pos, .. }) = self.handles.get_mut(&h) { *pos = p; } }
                     19 | 20 => { // allocation / end-of-file: truncate or extend
                         let n = self.r32(buf)? as usize;
                         if let Some(f) = self.files.get_mut(&path) { f.resize(n, 0); }

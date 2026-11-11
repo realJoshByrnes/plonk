@@ -1,6 +1,6 @@
 //! cargo run -q --release -p plonk-host --example shot -- <exe> <out.ppm> [mouse events "d,x,y;m,x,y;u,x,y"]
 use plonk_host::wine::WineProc;
-const APP: &str = r"c:pp.exe";
+const APP: &str = "c:\\app.exe";
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut p = WineProc::new();
