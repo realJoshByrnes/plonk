@@ -24,6 +24,10 @@ cd ~/wine-root
 for l in libfreetype.so.6 libz.so.1 libpng16.so.16 libbrotlidec.so.1 libbrotlicommon.so.1 libbz2.so.1.0; do
   cp -L "/usr/lib/i386-linux-gnu/$l" lib/
 done
+# the C library and loader themselves
+for l in ld-linux.so.2 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 libgcc_s.so.1 librt.so.1 libresolv.so.2; do
+  cp -L "/lib32/$l" lib/
+done
 tar cf "$HERE/root.tar" usr lib
 ls -la "$HERE/root.tar"
 ls usr/local/share/wine/fonts | tr '\n' ' '

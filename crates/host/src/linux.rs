@@ -85,6 +85,10 @@ pub struct LinuxProc {
     /// Syscalls answered with ENOSYS, for finding gaps.
     pub unknown: Vec<String>,
     pub trace: Vec<String>,
+    /// Processes that were killed by a CPU fault (description each).
+    pub faults: Vec<String>,
+    /// Maximum number of trace lines kept (0 = tracing off).
+    pub trace_cap: usize,
     pub exit_code: Option<u32>,
     /// The process is waiting (poll/read/accept) for something that only time or another party can provide.
     pub blocked: bool,
@@ -132,7 +136,7 @@ impl LinuxProc {
     pub fn new() -> Self {
         let mut vfs = BTreeMap::new();
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
-        LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), exit_code: None, blocked: false,
+        LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, exit_code: None, blocked: false,
             vfs, aliases: HashMap::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
             exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, wait_all: false }
     }
@@ -166,6 +170,7 @@ impl LinuxProc {
         let c = std::mem::take(&mut self.procs[pi].cache);
         self.cpu.put_cache(c);
     }
+    fn tr(&mut self, s: String) { if self.trace.len() < self.trace_cap { self.trace.push(s); } }
     fn me(&mut self) -> &mut Thread { &mut self.procs[self.cur.0].threads[self.cur.1] }
     fn pid(&self) -> u32 { self.procs[self.cur.0].pid }
     fn new_cpu() -> Cpu { let mut c = Cpu::new(); c.linux = true; c }
@@ -187,6 +192,13 @@ impl LinuxProc {
         let (argv, envp): (Vec<String>, Vec<String>) = (argv.iter().map(|s| s.to_string()).collect(), envp.iter().map(|s| s.to_string()).collect());
         self.exec_image(elf, &argv, &envp)?;
         Ok(pid)
+    }
+
+    /// Start a new process from an executable in the guest file tree (argv[0] is its path).
+    pub fn spawn_path(&mut self, argv: &[&str], envp: &[&str]) -> Result<u32, String> {
+        let path = argv.first().ok_or("empty command")?;
+        let elf = self.file_bytes(path).ok_or(format!("{path}: not found"))?;
+        self.spawn(&elf, argv, envp)
     }
 
     /// Load an ELF executable as the first process.
@@ -275,11 +287,11 @@ impl LinuxProc {
         let raw = self.cstr(path);
         let p = self.resolve(-100i32 as u32, &raw, true);
         let data = self.file_bytes(&p);
-        let Some(data) = data else { self.trace.push(format!("execve {p} -> ENOENT")); return ENOENT };
+        let Some(data) = data else { self.tr(format!("execve {p} -> ENOENT")); return ENOENT };
         if data.len() < 52 || data[0] != 0x7F { return -8i32 as u32; } // ENOEXEC
         let (mut argv, envp) = (self.str_vec(argv), self.str_vec(envp));
         if argv.is_empty() { argv.push(p.clone()); }
-        self.trace.push(format!("pid {} execve {p} {argv:?}", self.pid()));
+        self.tr(format!("pid {} execve {p} {argv:?}", self.pid()));
         let pi = self.cur.0;
         let ti = self.cur.1;
         for (i, t) in self.procs[pi].threads.iter_mut().enumerate() { if i != ti { t.state = St::Dead; } }
@@ -294,7 +306,7 @@ impl LinuxProc {
         self.sigact.clear();
         self.exe = p;
         self.resched = true;
-        if let Err(e) = self.exec_image(&data, &argv, &envp) { self.trace.push(format!("execve failed after the point of no return: {e}")); self.proc_exit(127); }
+        if let Err(e) = self.exec_image(&data, &argv, &envp) { self.tr(format!("execve failed after the point of no return: {e}")); self.proc_exit(127); }
         0
     }
 
@@ -620,10 +632,15 @@ impl LinuxProc {
             match self.cpu.run(&mut self.mem, steps - used) {
                 Exit::Interrupt(0x80) => { self.syscall(); if self.blocked || self.resched { break; } }
                 Exit::StepLimit => break,
-                e => {
+                e => { // no signal delivery yet: a CPU fault ends this process only (as an unhandled SIGSEGV would)
                     let at = self.cpu.insn_start;
                     let bytes: Vec<String> = (0..12).map(|i| format!("{:02x}", self.mem.r8(at + i).unwrap_or(0))).collect();
-                    return Err(format!("pid {} ({}) cpu stopped: {e:?} at eip {:#x} insn {at:#x} [{}] regs {:x?} gs_base {:#x}", self.pid(), self.exe, self.cpu.eip, bytes.join(" "), self.cpu.r, self.cpu.gs_base));
+                    let msg = format!("plonk: pid {} ({}) killed: {e:?} at eip {:#x} insn {at:#x} [{}] regs {:x?}", self.pid(), self.exe, self.cpu.eip, bytes.join(" "), self.cpu.r);
+                    self.stdout.extend_from_slice(msg.as_bytes());
+                    self.stdout.push(10);
+                    self.faults.push(msg);
+                    self.proc_exit(139);
+                    break;
                 }
             }
         }
@@ -765,7 +782,7 @@ impl LinuxProc {
     fn open(&mut self, dirfd: u32, path: u32, flags: u32) -> u32 {
         let raw = self.cstr(path);
         let p = self.resolve(dirfd, &raw, flags & 0x20000 == 0); // O_NOFOLLOW
-        if self.trace.len() < 400_000 { self.trace.push(format!("path open {p} flags {flags:#x}")); }
+        if self.trace_cap > 0 { self.tr(format!("path open {p} flags {flags:#x}")); }
         let kind = match self.vfs.get(&p) {
             Some(Node::File(d)) => {
                 if flags & 0xC0 == 0xC0 { return EEXIST; } // O_CREAT|O_EXCL
@@ -787,7 +804,7 @@ impl LinuxProc {
                         let data: Data = Rc::new(RefCell::new(Vec::new()));
                         self.vfs.insert(p.clone(), Node::File(data.clone()));
                         Kind::File { data, pos: 0 }
-                    } else { self.trace.push(format!("open {p} -> ENOENT")); return ENOENT; }
+                    } else { self.tr(format!("open {p} -> ENOENT")); return ENOENT; }
                 }
             },
         };
@@ -811,7 +828,7 @@ impl LinuxProc {
         put(0, 0x801); put(12, i); put(16, mode); put(20, 1); put(24, 1000); put(28, 1000);
         put(32, match path { "/dev/null" => 0x103, "/dev/tty" => 0x8800, _ => 0 }); // st_rdev: Wine compares stderr against /dev/null
         put(44, size as u32); put(52, 4096); put(56, ((size + 511) / 512) as u32);
-        let t = (self.clock_ns / 1_000_000_000) as u32;
+        let t = 1_600_000_000u32; // fixed timestamps: Wine re-runs its prefix update when wine.inf looks newer than the prefix
         put(64, t); put(72, t); put(80, t); put(88, i);
         if self.mem.write_bytes(buf, &s).is_ok() { 0 } else { EFAULT }
     }
@@ -819,7 +836,7 @@ impl LinuxProc {
     fn stat_path(&mut self, dirfd: u32, path: u32, buf: u32, follow: bool) -> u32 {
         let raw = self.cstr(path);
         let p = self.resolve(dirfd, &raw, follow);
-        if self.trace.len() < 400_000 { self.trace.push(format!("path stat {p} found={}", self.lookup(&p).is_some())); }
+        if self.trace_cap > 0 { self.tr(format!("path stat {p} found={}", self.lookup(&p).is_some())); }
         match self.lookup(&p) { Some((mode, size)) => self.fill_stat(buf, &p, mode, size), None => ENOENT }
     }
 
@@ -1308,7 +1325,7 @@ impl LinuxProc {
             37 => Some(if self.procs.iter().any(|p| p.pid == a && p.exit.is_none()) || (a as i32) <= 0 { 0 } else { ESRCH }), // kill: existence check only
             238 | 270 => { // tkill, tgkill: signals are not delivered yet, but a fatal one aimed at ourselves ends the process
                 let (tid, sig) = if nr == 238 { (a, b) } else { (b, c) };
-                if matches!(sig, 6 | 9 | 15) && self.procs[self.cur.0].threads.iter().any(|t| t.tid == tid) { self.trace.push(format!("pid {} killed by signal {sig}", self.pid())); self.proc_exit(128 + sig); }
+                if matches!(sig, 6 | 9 | 15) && self.procs[self.cur.0].threads.iter().any(|t| t.tid == tid) { self.tr(format!("pid {} killed by signal {sig}", self.pid())); self.proc_exit(128 + sig); }
                 Some(0)
             }
             175 | 186 => Some(0), // rt_sigprocmask, sigaltstack
@@ -1415,7 +1432,7 @@ impl LinuxProc {
         };
         match ret {
             Some(ret) => {
-                if self.trace.len() < 400_000 { let pid = self.pid(); self.trace.push(format!("{pid} sys {nr}({a:#x}, {b:#x}, {c:#x}, {d:#x}) = {ret:#x}")); }
+                if self.trace_cap > 0 { let pid = self.pid(); self.tr(format!("{pid} sys {nr}({a:#x}, {b:#x}, {c:#x}, {d:#x}) = {ret:#x}")); }
                 self.cpu.r[EAX] = ret;
             }
             None => { // would block: re-execute the `int 0x80` when the process is resumed

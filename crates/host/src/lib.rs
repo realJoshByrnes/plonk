@@ -4,6 +4,7 @@ pub mod reqnames;
 pub mod glnames;
 pub mod linux;
 pub mod sysnames;
+pub mod wasm_linux;
 pub mod wasm_wine;
 pub mod wine;
 use plonk_cpu::{Cpu, Exit, EAX, ESP};
