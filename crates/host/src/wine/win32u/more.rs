@@ -415,7 +415,8 @@ impl WineProc {
             "NtGdiGetTextCharsetInfo" => { if a[1] != 0 { for o in (0..24).step_by(4) { self.w32(a[1] + o, 0)?; } } 1 }
             "NtGdiEnumFonts" => { if a[6] != 0 { self.w32(a[6], 0)?; } 1 }
             "NtGdiGetCharWidthInfo" => { for o in (0..12).step_by(4) { self.w32(a[1] + o, 0)?; } 1 }
-            "NtGdiGetOutlineTextMetricsInternalW" => 0,
+            "NtGdiGetOutlineTextMetricsInternalW" | "NtGdiGetKerningPairs" | "NtGdiGetFontUnicodeRanges" | "NtGdiGetCharSet" => 0,
+            "NtGdiGetFontData" => u32::MAX, // GDI_ERROR: no raw font tables
             "NtGdiCreatePaletteInternal" | "NtGdiCreateHalftonePalette" => self.gdi_alloc(0x080000, Gdi::Other),
             "NtGdiSelectPalette" | "NtGdiRealizePalette" | "NtGdiGetNearestPaletteIndex" | "NtGdiSetLayout" => 0,
             "NtGdiGetSystemPaletteUse" => 1,

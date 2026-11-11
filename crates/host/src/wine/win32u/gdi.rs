@@ -530,7 +530,7 @@ impl WineProc {
             }
             "NtGdiGetDCObject" => {
                 let Some(dc) = self.wm.dcs.get(&a[0]) else { return Ok(Some(0)) };
-                match a[1] { 1 => dc.pen, 2 => dc.brush, 6 => dc.font, 7 => dc.bitmap, _ => 0 }
+                match a[1] & 0x7f_0000 { 0x30_0000 | 0x50_0000 => dc.pen, 0x10_0000 => dc.brush, 0x0a_0000 => dc.font, 0x05_0000 | 0x09_0000 => dc.bitmap, _ => 0 }
             }
             "NtGdiSaveDC" => 1,
             "NtGdiRestoreDC" => 1,

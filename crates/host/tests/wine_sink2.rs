@@ -12,8 +12,8 @@ fn dialogs_and_controls() {
     let mut p = WineProc::new();
     p.load_dir(dir.to_str().unwrap());
     p.lenient = true;
-    p.files.insert("c:\sink2.exe".into(), include_bytes!("../../../tests/guests/sink2.exe").to_vec());
-    p.boot("c:\sink2.exe").unwrap();
+    p.files.insert("c:\\sink2.exe".into(), include_bytes!("../../../tests/guests/sink2.exe").to_vec());
+    p.boot("c:\\sink2.exe").unwrap();
     let mut st = p.run_until_idle(5_000_000);
     for _ in 0..200 {
         if matches!(st, Ok(RunState::Exited(_)) | Err(_)) { break; }

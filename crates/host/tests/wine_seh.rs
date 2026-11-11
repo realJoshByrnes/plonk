@@ -11,8 +11,8 @@ fn exceptions_dispatch() {
     }
     let mut p = WineProc::new();
     p.load_dir(dir.to_str().unwrap());
-    p.files.insert("c:\seh.exe".into(), include_bytes!("../../../tests/guests/seh.exe").to_vec());
-    p.boot("c:\seh.exe").unwrap();
+    p.files.insert("c:\\seh.exe".into(), include_bytes!("../../../tests/guests/seh.exe").to_vec());
+    p.boot("c:\\seh.exe").unwrap();
     assert_eq!(p.run(5_000_000), Ok(0));
     assert_eq!(String::from_utf8_lossy(&p.stdout), "av addr=10\r\ndiv=1\r\nraise arg=42\r\nend\r\n");
 }

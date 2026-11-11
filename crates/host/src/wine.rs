@@ -5,6 +5,7 @@ use plonk_cpu::{Cpu, Exit, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP};
 use plonk_mem::Mem;
 
 mod kernel;
+mod threads;
 mod vfs;
 mod win32u;
 pub use win32u::Wm;
@@ -47,6 +48,8 @@ pub enum RunState { Exited(u32), Idle,
 
 #[derive(Clone)]
 pub enum Obj {
+    /// Guest thread (index into `threads`).
+    Thread(usize),
     File { path: String, pos: u32, dir: bool },
     Section { path: String, image: bool, size: u32 },
     Stdout,
@@ -71,6 +74,14 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    threads: Vec<threads::Thread>,
+    cur: usize,
+    cur_deadline: Option<u64>,
+    blocked: bool,
+    no_progress: usize,
+    keyed: std::collections::HashSet<u32>,
+    rtl_user_thread_start: u32,
+    ldr_initialize_thunk: u32,
     ktimers: Vec<(u32, u64, u32)>,
     exc_depth: u32,
     ki_user_exception: u32,
@@ -114,7 +125,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), ktimers: Vec::new(), exc_depth: 0, ki_user_exception: 0, cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), threads: Vec::new(), cur: 0, cur_deadline: None, blocked: false, no_progress: 0, keyed: Default::default(), rtl_user_thread_start: 0, ldr_initialize_thunk: 0, ktimers: Vec::new(), exc_depth: 0, ki_user_exception: 0, cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p.mem.set_guard(0x10000);
@@ -356,6 +367,7 @@ impl WineProc {
         self.w32(PEB + 0x08, exe.base)?;
         self.gdi_table = self.vm_reserve(None, 0x10000 * 24).ok_or("gdi table")?;
         self.w32(PEB + 0x94, self.gdi_table)?; // GdiSharedHandleTable
+        self.init_stock_objects()?;
         self.w32(PEB + 0x64, 1)?; // NumberOfProcessors
         self.w32(PEB + 0xA4, 10)?;
         self.w32(PEB + 0xA8, 0)?;
@@ -413,6 +425,9 @@ impl WineProc {
         self.cpu.r[ESP] = sp;
         self.cpu.eip = ldr_init;
         self.cpu.thunk = (SYSCALL_THUNK, SYSCALL_THUNK + 0x40);
+        self.rtl_user_thread_start = thread_start;
+        self.ldr_initialize_thunk = ldr_init;
+        self.init_main_thread();
         Ok(())
     }
 
@@ -432,8 +447,29 @@ impl WineProc {
             self.pump()?;
             if let Some(k) = self.need_file.take() { return Ok(RunState::Need(k)); }
             if let Some(c) = self.exit { return Ok(RunState::Exited(c)); }
-            if self.idle { return Ok(RunState::Idle); }
-            if std::mem::take(&mut self.busy) { return Ok(RunState::Busy); }
+            if std::mem::take(&mut self.blocked) {
+                self.no_progress += 1;
+                if let threads::Stuck::Idle = self.on_stuck() { self.idle = true; return Ok(RunState::Idle); }
+                self.idle = false;
+                continue;
+            }
+            let multi = self.threads.len() > 1 && self.cb_depth == 0;
+            if self.idle {
+                if multi {
+                    // a polling thread (empty PeekMessage, Sleep(0)): let the others run; if all of them poll, give the shell a turn
+                    self.idle = false;
+                    self.no_progress += 1;
+                    if self.no_progress >= self.threads.iter().filter(|t| !t.done && t.suspend == 0).count().max(1) { self.no_progress = 0; self.idle = true; return Ok(RunState::Idle); }
+                    self.switch_next();
+                    continue;
+                }
+                return Ok(RunState::Idle);
+            }
+            if std::mem::take(&mut self.busy) {
+                if multi { self.no_progress = 0; self.switch_next(); continue; }
+                return Ok(RunState::Busy);
+            }
+            self.no_progress = 0;
         }
         Err("syscall budget exhausted".into())
     }
@@ -455,12 +491,12 @@ impl WineProc {
             loop {
                 if self.cpu.eip >= lo && self.cpu.eip < hi {
                     let r = self.cpu.r;
-                    eprintln!("@{:x} eax={:x} ebx={:x} esi={:x} esp={:x}", self.cpu.eip, r[0], r[3], r[6], r[4]);
+                    eprintln!("@{:x} eax={:x} ecx={:x} edx={:x} ebx={:x} esp={:x}", self.cpu.eip, r[0], r[1], r[2], r[3], r[4]);
                 }
                 if let Err(e) = self.cpu.step(&mut self.mem) { break e; }
             }
         } else {
-            self.cpu.run(&mut self.mem, STEP_SLICE)
+            self.cpu.run(&mut self.mem, if self.threads.len() > 1 { 300_000 } else { STEP_SLICE })
         };
         match exit {
             Exit::Thunk(SYSCALL_THUNK) => self.syscall(),
@@ -633,6 +669,11 @@ impl WineProc {
     /// Ok(Some(status)) = return to caller; Ok(None) = handler already set the cpu state.
     fn dispatch(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
         if !name.starts_with("NtUser") && !name.starts_with("NtGdi") {
+            match self.thread_call(name, a)? {
+                threads::Tc::Done(v) => return Ok(Some(v)),
+                threads::Tc::Retry => return Ok(None),
+                threads::Tc::NotMine => {}
+            }
             if let Some(r) = self.vfs_call(name, a)? { return Ok(Some(r)); }
             if let Some(r) = self.kernel_call(name, a)? { return Ok(Some(r)); }
             if self.need_file.is_some() { return Ok(None); }

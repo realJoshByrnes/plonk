@@ -67,7 +67,7 @@ impl WineProc {
                         if a[4] != 0 { self.w32(a[4], 28)?; }
                         0
                     }
-                    14 | 9 => { if a[3] >= 4 { self.w32(a[2], 0)?; } if a[4] != 0 { self.w32(a[4], 4)?; } 0 } // GetThreadIOPendingFlag / ThreadIsIoPending
+                    14 | 9 | 12 => { if a[3] >= 4 { self.w32(a[2], 0)?; } if a[4] != 0 { self.w32(a[4], 4)?; } 0 } // GetThreadIOPendingFlag / ThreadIsIoPending
                     _ => { self.note(format!("QueryInformationThread class {}", a[1])); STATUS_INVALID_INFO_CLASS }
                 }
             }

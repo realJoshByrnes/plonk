@@ -11,8 +11,14 @@ fn main() {
     println!("{:?} first run {:?}", p.run_until_idle(1_000_000), t0.elapsed());
     for ev in a.get(3).map(|s| s.as_str()).unwrap_or("").split(';').filter(|s| !s.is_empty()) {
         let f: Vec<&str> = ev.split(',').collect();
-        let k = match f[0] { "d" => 0, "m" => 1, _ => 2 };
-        p.mouse(k, f[1].parse().unwrap(), f[2].parse().unwrap());
+        if f[0] == "k" { // key vk,char: down + up
+            let (vk, ch): (u32, u32) = (f[1].parse().unwrap(), f[2].parse().unwrap());
+            p.key(0, vk, ch);
+            p.key(1, vk, 0);
+        } else {
+            let k = match f[0] { "d" => 0, "m" => 1, _ => 2 };
+            p.mouse(k, f[1].parse().unwrap(), f[2].parse().unwrap());
+        }
         println!("{:?}", p.run_until_idle(1_000_000));
     }
     let n: usize = std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(0);

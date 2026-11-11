@@ -90,6 +90,7 @@ pub struct Wm {
     drag: Option<(u32, i32, i32)>, // hwnd, grab offset
     capture: u32,
     focus: u32,
+    default_objs: [u32; 3],
     extra: more::Extra,
     menus: BTreeMap<u32, Menu>,
     next_menu: u32,
@@ -113,7 +114,7 @@ impl Wm {
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
-            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, extra: Default::default(), menus: BTreeMap::new(), next_menu: 0x30020, open: None, track_pending: false, track_done: None, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
+            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, default_objs: [0; 3], extra: Default::default(), menus: BTreeMap::new(), next_menu: 0x30020, open: None, track_pending: false, track_done: None, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
         };
         w.classes.push(Class { atom: 0xC000, name: "#32769".into(), wndproc: 0, bg: 0, raw: [0; 12], ansi: false });
         w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None, ex_style: 0, menu: 0, id: 0, inst: 0, userdata: 0, proc_override: 0, extra: Vec::new() });
@@ -566,7 +567,12 @@ impl WineProc {
             "NtUserGetMessage" => {
                 let m = match self.next_message(true) {
                     Some(m) => m,
-                    None => { self.idle = true; self.parked = true; self.took_over = true; return Ok(Some(0)); } // park at the syscall; resumed when input arrives
+                    None => {
+                        // park at the syscall; resumed when input arrives. With several threads, just block so the others run.
+                        if self.threads_len() > 1 { self.blocked = true; } else { self.idle = true; self.parked = true; }
+                        self.took_over = true;
+                        return Ok(Some(0));
+                    }
                 };
                 self.put_msg(a[0], m)?;
                 (m.msg != WM_QUIT) as u32
@@ -887,6 +893,48 @@ impl WineProc {
         out
     }
 
+    pub(crate) fn threads_len(&self) -> usize { self.threads.len() }
+
+    pub(crate) fn next_wm_timer(&self) -> Option<u64> { self.wm.timers.iter().map(|t| t.3).min() }
+
+    /// gdi32's GetStockObject reads the shared handle table directly, so win32u must pre-populate the stock
+    /// objects at fixed slots (FIRST_GDI_HANDLE = 32, in Wine's init_stock_objects order).
+    pub(crate) fn init_stock_objects(&mut self) -> Res<()> {
+        self.wm.next_gdi = 64;
+        let brush = |c: u32| (0x10u32, Gdi::Brush(c));
+        for i in 0..24u32 {
+            let (ext, obj): (u32, Gdi) = match i {
+                0 => { let (e, g) = brush(0xFFFF_FFFF); (e, g) }
+                1 => { let (e, g) = brush(0xFFC0_C0C0); (e, g) }
+                2 => { let (e, g) = brush(0xFF80_8080); (e, g) }
+                3 => { let (e, g) = brush(0xFF40_4040); (e, g) }
+                4 => { let (e, g) = brush(0xFF00_0000); (e, g) }
+                5 => (0x10, Gdi::NullBrush),
+                6 => (0x30, Gdi::Pen(0xFFFF_FFFF, false)),
+                7 => (0x30, Gdi::Pen(0xFF00_0000, false)),
+                8 => (0x30, Gdi::Pen(0, true)),
+                10..=14 | 16 | 17 | 20..=23 => (0x0a, Gdi::Font),
+                15 => (0x08, Gdi::Other),
+                18 => { let (e, g) = brush(0xFFFF_FFFF); (e, g) }
+                19 => (0x30, Gdi::Pen(0xFF00_0000, false)),
+                _ => continue,
+            };
+            let idx = 32 + i;
+            let unique = ext | 0x80; // ExtType | StockFlag
+            let e = self.gdi_table + idx * 24;
+            self.w32(e, idx)?;          // Object: non-zero cookie
+            self.w16(e + 8, 0x20)?;     // Owner.ProcessId
+            self.w16(e + 12, unique as u16)?;
+            self.mem.w8(e + 14, (ext & 0x1f) as u8).map_err(|_| "stock")?;
+            let h = idx | (unique << 16);
+            if matches!(obj, Gdi::Font) { self.wm.fonts.insert(h, FontSpec { px: 12.0, bold: false, face: "Inter".into(), raw: Vec::new() }); }
+            self.wm.gdi.insert(h, obj);
+        }
+        let h = |i: u32, ext: u32| (32 + i) | ((ext | 0x80) << 16);
+        self.wm.default_objs = [h(0, 0x10), h(7, 0x30), h(13, 0x0a)];
+        Ok(())
+    }
+
     pub(crate) fn wm_now_ms(&self) -> u64 { self.wm.now_ms }
 
     pub(crate) fn post_quit(&mut self, code: u32) { self.wm.quit = Some(code); }
@@ -911,6 +959,8 @@ impl WineProc {
     }
 
     fn new_dc(&mut self, hwnd: u32, clip: Option<Rect>) -> u32 {
+        // every DC starts with the default stock objects selected (WHITE_BRUSH, BLACK_PEN, SYSTEM_FONT) like on Windows
+        let [db, dp, df] = self.wm.default_objs;
         let h = self.gdi_alloc(0x010000, Gdi::Other);
         // DC_ATTR lives in guest memory: gdi32 (PE) reads/writes it directly via the handle table.
         if self.dcattr_next == 0 { self.dcattr_next = self.vm_reserve(None, 0x40000).unwrap_or(0); }
@@ -930,7 +980,7 @@ impl WineProc {
         w(self, 132, 1024); w(self, 136, 768); w(self, 140, 320); w(self, 144, 240);
         w(self, 148, 1252);
         let _ = self.mem.w32(self.gdi_table + (h & 0xffff) * 24 + 16, at);
-        self.wm.dcs.insert(h, Dc { hwnd, clip, brush: 0, pen: 0, pos: (0, 0), font: 0, bitmap: 0 });
+        self.wm.dcs.insert(h, Dc { hwnd, clip, brush: db, pen: dp, pos: (0, 0), font: df, bitmap: 0 });
         h
     }
 

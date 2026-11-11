@@ -11,8 +11,8 @@ fn drag_and_raise() {
     }
     let mut p = WineProc::new();
     p.load_dir(dir.to_str().unwrap());
-    p.files.insert("c:\two.exe".into(), include_bytes!("../../../tests/guests/gui_two.exe").to_vec());
-    p.boot("c:\two.exe").unwrap();
+    p.files.insert("c:\\two.exe".into(), include_bytes!("../../../tests/guests/gui_two.exe").to_vec());
+    p.boot("c:\\two.exe").unwrap();
     assert_eq!(p.run_until_idle(1_000_000), Ok(RunState::Idle));
     let px = |p: &WineProc, x: usize, y: usize| { let f = p.compose_rgba(1024, 768); let o = (y * 1024 + x) * 4; (f[o], f[o + 1], f[o + 2]) };
     // B (created last) is on top: in the overlap B's client face shows, not A's white

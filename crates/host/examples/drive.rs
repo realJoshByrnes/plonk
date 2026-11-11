@@ -16,7 +16,7 @@ fn main() {
         st = p.run_until_idle(5_000_000);
     }
     println!("state: {:?}", st);
-    if st.is_err() { for l in p.trace.iter().rev().take(14).collect::<Vec<_>>().into_iter().rev() { println!("  {l}"); } println!("  regs {:x?} eip {:#x}", p.cpu.r, p.cpu.eip); }
+    if st.is_err() { for l in p.trace.iter().rev().take(std::env::var("N").ok().and_then(|v| v.parse().ok()).unwrap_or(14)).collect::<Vec<_>>().into_iter().rev() { println!("  {l}"); } println!("  regs {:x?} eip {:#x}", p.cpu.r, p.cpu.eip); }
     println!("stdout: {:?}", String::from_utf8_lossy(&p.stdout));
     println!("stubbed: {}", p.stubbed.join(" "));
 }
