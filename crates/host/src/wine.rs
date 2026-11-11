@@ -260,6 +260,13 @@ impl WineProc {
     }
 
     fn map_image_data(&mut self, path: &str, data: &[u8]) -> Res<plonk_pe::Image> {
+        if data.len() < 0x200 || &data[0..2] != b"MZ" { return Err(format!("{path}: not a Windows executable (no MZ header)")); }
+        let pe0 = u32::from_le_bytes(data[0x3C..0x40].try_into().unwrap()) as usize;
+        if data.len() < pe0 + 0x60 || &data[pe0..pe0 + 4] != b"PE  " { return Err(format!("{path}: not a PE file")); }
+        let machine = u16::from_le_bytes([data[pe0 + 4], data[pe0 + 5]]);
+        let magic = u16::from_le_bytes([data[pe0 + 24], data[pe0 + 25]]);
+        if machine == 0x8664 || magic == 0x20b { return Err(format!("{path}: 64-bit executables are not supported (only 32-bit x86)")); }
+        if machine != 0x14c { return Err(format!("{path}: unsupported CPU type {machine:#x} (need 32-bit x86)")); }
         let pref = {
             let pe = u32::from_le_bytes(data[0x3C..0x40].try_into().unwrap()) as usize;
             u32::from_le_bytes(data[pe + 24 + 28..pe + 24 + 32].try_into().unwrap())
@@ -268,7 +275,11 @@ impl WineProc {
             let pe = u32::from_le_bytes(data[0x3C..0x40].try_into().unwrap()) as usize;
             u32::from_le_bytes(data[pe + 24 + 56..pe + 24 + 60].try_into().unwrap())
         };
-        let base = match self.vm_reserve(Some(pref), size) { Some(b) => b, None => self.vm_reserve(None, size).ok_or("no VM for image")? };
+        let fits = (pref as u64 + size as u64) < VM_HI as u64 && pref >= VM_LO;
+        let base = match if fits { self.vm_reserve(Some(pref), size) } else { None } {
+            Some(b) => b,
+            None => self.vm_reserve(None, size).ok_or_else(|| format!("{path}: no address space for image (size {size:#x}, preferred base {pref:#x})"))?,
+        };
         self.images.push((base, path.to_string()));
         plonk_pe::map_ex(data, &mut self.mem, Some(base), false)
     }
