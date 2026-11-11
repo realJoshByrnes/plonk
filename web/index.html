@@ -82,6 +82,7 @@ async function boot(app) {
     x.plonk_wine_add_file(put(n), n.length, put(b), b.length);
   };
   x.plonk_wine_reset();
+  document.getElementById("glov").style.display = "none";
   x.plonk_wine_set_screen(W, H);
   applyWallpaper();
   lastGen = -1;
@@ -164,16 +165,22 @@ function ensureGL() {
     glb = b; window.__glKind = b.kind;
   }).catch((e) => { console.error("3D backend failed", e); glInit = null; x.plonk_gl_clear(); });
 }
+// The overlay canvas shows the GL frame directly only while the GL window exists, is topmost and unobscured; every step re-checks
+// (so it disappears when the app exits, its window is destroyed or something is stacked over it).
+function syncOverlay() {
+  const ov = document.getElementById("glov");
+  if (!glb || !x) { ov.style.display = "none"; return false; }
+  const r = new Uint32Array(x.memory.buffer, x.plonk_gl_rect() >>> 0, 5), k = canvas.getBoundingClientRect().width / W;
+  glb.direct = r[4] === 1 && r[2] > 0;
+  ov.style.display = glb.direct ? "block" : "none";
+  if (glb.direct) { ov.style.left = r[0] * k + "px"; ov.style.top = r[1] * k + "px"; ov.style.width = r[2] * k + "px"; ov.style.height = r[3] * k + "px"; }
+  return glb.direct;
+}
 function pumpGL() {
   const n = x.plonk_gl_len();
   if (!n) return;
   if (!glb) { ensureGL(); return; } // commands stay queued in the host until the backend is ready
-  // show the GL canvas directly only while its window is topmost and unobscured; otherwise fall back to readback into the window
-  const r = new Uint32Array(x.memory.buffer, x.plonk_gl_rect() >>> 0, 5);
-  const ov = document.getElementById("glov"), k = canvas.getBoundingClientRect().width / W;
-  glb.direct = r[4] === 1 && r[2] > 0;
-  ov.style.display = glb.direct ? "block" : "none";
-  if (glb.direct) { ov.style.left = r[0] * k + "px"; ov.style.top = r[1] * k + "px"; ov.style.width = r[2] * k + "px"; ov.style.height = r[3] * k + "px"; }
+  syncOverlay();
   const cmds = new Uint32Array(x.memory.buffer, x.plonk_gl_ptr() >>> 0, n).slice();
   x.plonk_gl_clear();
   glb.execute(cmds);
@@ -188,6 +195,7 @@ function step() {
   let t1 = performance.now(); P.run += t1 - t0;
   (P.st ||= {})[st] = (P.st[st] || 0) + 1; P.pres = x.plonk_gl_presents();
   pumpGL();
+  syncOverlay();
   let t2 = performance.now(); P.gl += t2 - t1; P.n++;
   if (st === 3) { supplyFile(msg()); return; }
   if (x.plonk_gl_presents() !== pr0) presStep = P.n;

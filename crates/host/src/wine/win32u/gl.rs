@@ -452,6 +452,7 @@ impl WineProc {
 impl WineProc {
     /// [x, y, w, h, direct] of the GL window's client area in screen coordinates; `direct` = topmost and not overlapped.
     pub fn gl_screen_rect(&self) -> [u32; 5] {
+        if self.wm.gl.cur == 0 || self.exit.is_some() { return [0; 5]; } // no current context (or the program exited): nothing to show
         let hw = self.wm.dcs.get(&self.wm.gl.hdc).map_or(0, |d| d.hwnd);
         let Some(w) = self.wm.windows.get(&hw) else { return [0; 5] };
         let c = self.wm.client_rect(hw);

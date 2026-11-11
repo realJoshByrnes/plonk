@@ -109,6 +109,11 @@ try {
   const gl = await evalJs("({ kind: window.__glKind || null, perf: window.__perf })");
   console.log("PERF", JSON.stringify(gl), await evalJs("window.__glDirect")); await check("3D cube renders via GPU backend", !!gl.kind, JSON.stringify(gl));
   await shot("gl");
+  await click(666, 48);                                             // close the cube window
+  await sleep(1500);
+  const ovHidden = await evalJs("getComputedStyle(document.getElementById('glov')).display === 'none'");
+  await check("GL overlay is removed when the app closes", ovHidden === true, String(ovHidden));
+  await shot("gl_closed");
   await send("Page.navigate", { url: URL_ });
   await sleep(1500);
   for (let i = 0; i < 20 && !(await evalJs("window.__wall === true")); i++) await sleep(250);
