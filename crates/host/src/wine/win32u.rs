@@ -108,6 +108,8 @@ pub struct Wm {
 }
 
 impl Wm {
+    pub(crate) fn extra_scroll(&self, hwnd: u32, bar: u32) -> [i32; 5] { self.extra.scroll.get(&(hwnd, bar)).copied().unwrap_or([0, 100, 0, 0, 0]) }
+
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
@@ -187,10 +189,19 @@ impl WineProc {
         self.cpu.r[ESP] = sp;
         self.cpu.eip = func;
         self.guest_returned = false;
+        self.cb_depth += 1;
         while !self.guest_returned {
-            self.pump()?;
-            if self.exit.is_some() { return Err("process exited inside window procedure".into()); }
+            if let Err(e) = self.pump() { self.cb_depth -= 1; return Err(e); }
+            if self.exit.is_some() { self.cb_depth -= 1; return Err("process exited inside window procedure".into()); }
+            if self.idle && self.parked && !self.guest_returned {
+                // the callback started a modal loop and now waits for input: unwind the Rust frames but keep the
+                // guest mid-callback. When the procedure finally returns, the original syscall completes with its result.
+                self.cb_depth -= 1;
+                self.orphans.push(saved);
+                return Err(super::YIELD.into());
+            }
         }
+        self.cb_depth -= 1;
         let r = self.cpu.r[EAX];
         self.guest_returned = false; // nested calls must not leak the flag to an outer call_guest
         self.cpu = saved;
@@ -399,6 +410,26 @@ impl WineProc {
         }
     }
 
+    /// Built-in scroll bar control: paint track + thumb from the stored scroll info; no tracking yet.
+    fn scrollbar_proc(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) -> Res<u32> {
+        match msg {
+            WM_PAINT | WM_ERASEBKGND => {
+                let cr = self.wm.client_rect(hwnd);
+                let vert = self.wm.windows.get(&hwnd).is_some_and(|w| w.style & 1 != 0);
+                let e = self.wm.extra_scroll(hwnd, 2);
+                self.fill_client(hwnd, cr, 0xFFE9_ECF0);
+                let (len, span) = if vert { (cr[3], (e[1] - e[0] + 1).max(1)) } else { (cr[2], (e[1] - e[0] + 1).max(1)) };
+                let (page, pos) = (e[2].max(1), e[3] - e[0]);
+                let th = (len * page / span).clamp(16, len.max(16)); let off = ((len - th).max(0) as i64 * pos as i64 / (span - page).max(1) as i64) as i32;
+                let r = if vert { [2, off, cr[2] - 2, off + th] } else { [off, 2, off + th, cr[3] - 2] };
+                self.fill_client(hwnd, r, 0xFFB5_BCC6);
+                if msg == WM_PAINT { if let Some(w) = self.wm.windows.get_mut(&hwnd) { w.invalid = None; } }
+                Ok(1)
+            }
+            _ => self.def_window_proc(hwnd, msg, wp, lp),
+        }
+    }
+
     fn def_window_proc(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) -> Res<u32> {
         Ok(match msg {
             WM_CLOSE => { self.destroy_window(hwnd)?; 0 }
@@ -435,7 +466,7 @@ impl WineProc {
                 self.wm.client_procs_w = procs;
                 // win32u registers the built-in control classes with user32's window procedures
                 for (name, idx) in [("Button", 0), ("ComboBox", 1), ("#32770", 3), ("Edit", 4), ("ListBox", 5), ("MDIClient", 6), ("ScrollBar", 7), ("Static", 8), ("IME", 9)] {
-                    let atom = 0xC001 + self.wm.classes.len() as u32;
+                    let atom = if name == "#32770" { 0x8002 } else { 0xC001 + self.wm.classes.len() as u32 };
                     self.wm.classes.push(Class { atom, name: name.into(), wndproc: procs[idx], bg: 0, raw: [48, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0], ansi: false });
                 }
                 0
@@ -557,8 +588,12 @@ impl WineProc {
                 let (hwnd, msg, wp, lp, ty) = (a[0], a[1], a[2], a[3], a[5]);
                 match ty {
                     0x029e => self.def_window_proc(hwnd, msg, wp, lp)?,
-                    0x3002 | 0x0303 | 0x0304 => 0, // spy hooks
-                    0x02b1 | 0x3001 => { // SendMessage / GetDispatchParams: user32 dispatches via win_proc_params
+                    0x3002 | 0x0303 | 0x0304 | 0x0305 | 0x0306 | 0x0300 => 0, // spy hooks, IME, tray, clipboard window
+                    0x029c | 0x029d => self.def_window_proc(hwnd, msg, wp, lp)?,
+                    0x029a => self.scrollbar_proc(hwnd, msg, wp, lp)?,
+                    0x02b3 => { let r = self.send(hwnd, msg, wp, lp)?; if a[4] != 0 { self.w32(a[4] + 8, r)?; } 1 }
+                    0x02b7 | 0x02b8 => { self.send(hwnd, msg, wp, lp)?; 1 }
+                    0x02b1 | 0x3001 | 0x02ab => { // SendMessage / GetDispatchParams: user32 dispatches via win_proc_params
                         let Some(w) = self.wm.windows.get(&hwnd) else { return Ok(Some(0)) };
                         let (func, class_ansi) = (self.wm.classes[w.class].wndproc, self.wm.classes[w.class].ansi);
                         if a[4] != 0 {
@@ -695,7 +730,7 @@ impl WineProc {
             "NtUserCallNoParam" => match codes::CALL_NO_PARAM.get(a[0] as usize).copied() {
                 Some("GetDesktopWindow") => DESKTOP,
                 Some("ReleaseCapture") => { self.wm.capture = 0; 1 }
-                n => return Err(format!("NtUserCallNoParam {n:?}")),
+                n => { self.note(format!("NtUserCallNoParam {n:?}")); return Ok(Some(0)); },
             },
             "NtUserCallOneParam" => match codes::CALL_ONE_PARAM.get(a[1] as usize).copied() {
                 Some("GetSystemMetrics") => system_metric(a[0]),
@@ -705,13 +740,13 @@ impl WineProc {
                 Some("GetSysColor") => argb_to_colorref(sys_color(a[0])),
                 Some("GetSysColorBrush") => self.gdi_alloc(0x100000 | 0x80_0000, Gdi::Brush(sys_color(a[0]))),
                 Some("GetSysColorPen") => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(sys_color(a[0]), false)),
-                n => return Err(format!("NtUserCallOneParam {n:?} arg={:#x}", a[0])),
+                n => { self.note(format!("NtUserCallOneParam {n:?} arg={:#x}", a[0])); return Ok(Some(0)); },
             },
             "NtUserCallTwoParam" => match codes::CALL_TWO_PARAM.get(a[2] as usize).copied() {
                 Some("SetCaretPos") => 1,
                 Some("GetMenuInfo") => { if self.wm.menus.contains_key(&a[0]) { for o in (4..28).step_by(4) { self.w32(a[1] + o, 0)?; } 1 } else { 0 } }
                 Some("SetMenuInfo") => 1,
-                n => return Err(format!("NtUserCallTwoParam {n:?} a={:#x} b={:#x}", a[0], a[1])),
+                n => { self.note(format!("NtUserCallTwoParam {n:?} a={:#x} b={:#x}", a[0], a[1])); return Ok(Some(0)); },
             },
             "NtUserCallHwndParam" => match codes::CALL_HWND_PARAM.get(a[2] as usize).copied() {
                 Some("GetClientRect") => { let r = self.wm.client_rect(a[0]); self.put_rect(a[1], r)?; 1 }
@@ -725,7 +760,7 @@ impl WineProc {
                     1
                 }
                 Some(n) if n.starts_with("GetWindowLong") => self.get_window_long(a[0], a[1] as i32),
-                n => return Err(format!("NtUserCallHwndParam {n:?} hwnd={:#x} param={:#x}", a[0], a[1])),
+                n => { self.note(format!("NtUserCallHwndParam {n:?} hwnd={:#x} param={:#x}", a[0], a[1])); return Ok(Some(0)); },
             },
             "NtUserCallHwnd" => match codes::CALL_HWND.get(a[1] as usize).copied() {
                 Some("IsWindow") => self.wm.windows.contains_key(&a[0]) as u32,
@@ -738,7 +773,7 @@ impl WineProc {
                 Some("GetDialogInfo" | "GetWindowContextHelpId" | "GetWindowInputContext" | "GetDefaultImeWindow" | "GetMDIClientInfo") => 0,
                 Some("IsWindowEnabled" | "IsWindowUnicode") => 1,
                 Some("GetParent") => self.wm.windows.get(&a[0]).map_or(0, |w| if w.parent == DESKTOP { 0 } else { w.parent }),
-                n => return Err(format!("NtUserCallHwnd {n:?}")),
+                n => { self.note(format!("NtUserCallHwnd {n:?}")); return Ok(Some(0)); },
             },
             _ => match self.menu_call(name, a)? { Some(v) => v, None => return self.gdi_call(name, a) },
         }))

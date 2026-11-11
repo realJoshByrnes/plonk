@@ -18,6 +18,8 @@ const STEP_SLICE: u64 = 500_000_000;
 pub const GUEST_SIZE: u32 = 0x7ffe_1000;
 const SYSCALL_THUNK: u32 = 0xF000_0000;
 const UNIXCALL_THUNK: u32 = 0xF000_0010;
+/// Sentinel error: a callback yielded to the shell mid-flight (see `call_guest`).
+pub(crate) const YIELD: &str = "\u{1}yield";
 pub(crate) const CALL_RETURN_THUNK: u32 = 0xF000_0020;
 const KUSER: u32 = 0x7ffe_0000;
 const PEB: u32 = 0x7ffd_f000;
@@ -67,6 +69,8 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    cb_depth: u32,
+    orphans: Vec<Cpu>,
     dirs: std::collections::HashSet<String>,
     del_on_close: std::collections::HashSet<u32>,
     /// Basenames (lowercase) of files the shell can supply on demand.
@@ -105,7 +109,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
@@ -450,6 +454,12 @@ impl WineProc {
         match exit {
             Exit::Thunk(SYSCALL_THUNK) => self.syscall(),
             Exit::Thunk(UNIXCALL_THUNK) => self.unixcall(),
+            Exit::Thunk(CALL_RETURN_THUNK) if self.cb_depth == 0 && !self.orphans.is_empty() => {
+                // an abandoned callback finished: restore the syscall it interrupted and complete it with the result
+                let eax = self.cpu.r[EAX];
+                self.cpu = self.orphans.pop().unwrap();
+                self.ret_stdcall(eax)
+            }
             Exit::Thunk(CALL_RETURN_THUNK) => { self.guest_returned = true; Ok(()) }
             Exit::StepLimit => { self.busy = true; Ok(()) }
             e => Err(format!("cpu stopped: {:?} eip={:#x}", e, self.cpu.eip)),
@@ -484,9 +494,10 @@ impl WineProc {
         let id = self.r32(req)? as usize;
         let name = crate::reqnames::REQUESTS.get(id).copied().unwrap_or("?");
         self.log(format!("  (server request {name})"));
+        if self.server_window_request(name, req)? { return Ok(()); }
         match name {
             "post_quit_message" => { let c = self.r32(req + 12)?; self.post_quit(c); }
-            _ => return Err(format!("unimplemented server request {name}")),
+            _ => { self.note(format!("server request {name}")); self.w32(req, 0xC000_0002)?; self.w32(req + 4, 0)?; return Ok(()); }
         }
         self.w32(req, 0)?; // reply.error = STATUS_SUCCESS
         self.w32(req + 4, 0)?;
@@ -562,6 +573,7 @@ impl WineProc {
         };
         let args: Vec<u32> = (0..nbytes / 4).map(|i| self.sarg(i)).collect();
         let r = self.dispatch(name, &args);
+        if matches!(&r, Err(e) if e == YIELD) { return Ok(()); }
         let st = match &r { Ok(Some(s)) => *s, Ok(None) => return Ok(()), Err(_) => 0xDEAD_0000 };
         let a: Vec<String> = args.iter().map(|a| format!("{a:x}")).collect();
         self.log(format!("{name}({}) = {st:#x}", a.join(",")));

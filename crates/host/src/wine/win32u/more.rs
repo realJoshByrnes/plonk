@@ -97,6 +97,35 @@ impl WineProc {
         for i in 0..pts.len() { let (a, b) = (pts[i], pts[(i + 1) % pts.len()]); self.dc_line(hdc, a, b, pen); }
     }
 
+    /// wineserver requests that user32/comctl32 (PE side) issue directly. Reply fields overlap the
+    /// request, so every request field is read before anything is written. Returns false if not ours.
+    pub(crate) fn server_window_request(&mut self, name: &str, req: u32) -> Res<bool> {
+        match name {
+            "get_window_children" => {
+                let parent = self.r32(req + 16)?;
+                let rdata = self.r32(req + 68)?;
+                let cap = self.r32(req + 8)? / 4;
+                let list: Vec<u32> = if parent == 0 || parent == DESKTOP { self.wm.zorder.iter().rev().copied().collect() }
+                    else { self.wm.windows.iter().rev().filter(|(_, w)| w.parent == parent && w.surface.is_none()).map(|(h, _)| *h).collect() };
+                let n = list.len().min(cap as usize);
+                for (i, h) in list.iter().take(n).enumerate() { self.w32(rdata + i as u32 * 4, *h)?; }
+                self.w32(req + 8, n as u32)?;
+                self.w32(req + 4, n as u32 * 4)?;
+            }
+            "get_window_info" => {
+                let h = self.r32(req + 12)?;
+                let atom = self.wm.windows.get(&h).map_or(0, |w| self.wm.classes[w.class].atom);
+                for (o, v) in [(8u32, h), (12, h), (16, 0x20), (20, 0x24), (24, atom), (28, 1)] { self.w32(req + o, v)?; }
+                self.w32(req + 4, 0)?;
+            }
+            "is_window_hung" | "get_window_properties" | "enum_winstation" | "enum_desktop" | "send_message" => { for o in [8u32, 12] { self.w32(req + o, 0)?; } self.w32(req + 4, 0)?; }
+            "get_last_input_time" => { let t = self.wm_now_ms() as u32; self.w32(req + 8, t)?; self.w32(req + 4, 0)?; }
+            _ => return Ok(false),
+        }
+        self.w32(req, 0)?; // error = STATUS_SUCCESS
+        Ok(true)
+    }
+
     pub(super) fn more_call(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
         Ok(Some(match name {
             // ---- windows: geometry, hierarchy, queries ----
@@ -241,6 +270,10 @@ impl WineProc {
                 }
             }
             // ---- NtUserCall* families ----
+            "NtUserCallNoParam" if matches!(codes::CALL_NO_PARAM.get(a[0] as usize).copied(), Some("GetDialogBaseUnits" | "GetInputState" | "GetProcessDefaultLayout" | "GetProgmanWindow" | "GetShellWindow" | "GetTaskmanWindow" | "DestroyCaret")) => {
+                match codes::CALL_NO_PARAM[a[0] as usize] { "GetDialogBaseUnits" => 0x000F_0007, "DestroyCaret" => 1, _ => 0 }
+            }
+            "NtGdiRectVisible" | "NtGdiPtVisible" => 1,
             "NtUserCallOneParam" if matches!(codes::CALL_ONE_PARAM.get(a[1] as usize).copied(), Some("GetCursorPos" | "GetClipCursor" | "GetPrimaryMonitorRect" | "GetVirtualScreenRect" | "MessageBeep" | "RealizePalette" | "ReplyMessage" | "SetKeyboardAutoRepeat" | "EnumClipboardFormats" | "EnableDC" | "EnableThunkLock" | "BeginDeferWindowPos" | "SetProcessDefaultLayout" | "IsWindowRectFullScreen" | "GetIconParam")) => {
                 match codes::CALL_ONE_PARAM[a[1] as usize] {
                     "GetCursorPos" => { let (x, y) = self.wm.extra.mouse; self.w32(a[0], x as u32)?; self.w32(a[0] + 4, y as u32)?; 1 }
@@ -249,7 +282,7 @@ impl WineProc {
                     _ => 1,
                 }
             }
-            "NtUserCallTwoParam" if matches!(codes::CALL_TWO_PARAM.get(a[2] as usize).copied(), Some("GetMonitorInfo" | "GetSystemMetricsForDpi" | "MonitorFromRect" | "UnhookWindowsHook" | "SetIconParam" | "GetDialogProc")) => {
+            "NtUserCallTwoParam" if matches!(codes::CALL_TWO_PARAM.get(a[2] as usize).copied(), Some("NtUserAllocWinProc" | "GetMonitorInfo" | "GetSystemMetricsForDpi" | "MonitorFromRect" | "UnhookWindowsHook" | "SetIconParam" | "GetDialogProc")) => {
                 match codes::CALL_TWO_PARAM[a[2] as usize] {
                     "GetMonitorInfo" => { // MONITORINFO: cbSize, rcMonitor, rcWork, dwFlags
                         let sz = self.r32(a[1])?;
@@ -258,16 +291,20 @@ impl WineProc {
                     }
                     "GetSystemMetricsForDpi" => system_metric(a[0]),
                     "MonitorFromRect" => 0x20001,
+                    "NtUserAllocWinProc" | "GetDialogProc" => a[0], // window procedure "handle" = the function pointer itself
                     _ => 1,
                 }
             }
-            "NtUserCallHwnd" if matches!(codes::CALL_HWND.get(a[1] as usize).copied(), Some("GetWindowTextLength" | "SetForegroundWindow")) => {
+            "NtUserCallHwnd" if matches!(codes::CALL_HWND.get(a[1] as usize).copied(), Some("GetWindowTextLength" | "SetForegroundWindow" | "GetDialogInfo" | "GetMDIClientInfo" | "NtUserGetFullWindowHandle" | "NtUserIsCurrentProcessWindow" | "NtUserIsCurrentThreadWindow")) => {
                 match codes::CALL_HWND[a[1] as usize] {
+                    "NtUserGetFullWindowHandle" | "NtUserIsCurrentProcessWindow" | "NtUserIsCurrentThreadWindow" => if self.wm.windows.contains_key(&a[0]) { a[0] } else { 0 },
+                    "GetDialogInfo" => self.wm.extra.props.get(&(a[0], "#dlginfo".into())).copied().unwrap_or(0),
+                    "GetMDIClientInfo" => self.wm.extra.props.get(&(a[0], "#mdiinfo".into())).copied().unwrap_or(0),
                     "GetWindowTextLength" => self.wm.windows.get(&a[0]).map_or(0, |w| w.text.encode_utf16().count() as u32),
                     _ => { let old = std::mem::replace(&mut self.wm.active, a[0]); if old != a[0] { self.repaint_frame(old); self.repaint_frame(a[0]); } 1 }
                 }
             }
-            "NtUserCallHwndParam" if matches!(codes::CALL_HWND_PARAM.get(a[2] as usize).copied(), Some("ClientToScreen" | "ScreenToClient" | "MapWindowPoints" | "GetScrollInfo" | "EnableWindow" | "GetClassLongA" | "GetClassLongW" | "GetClassLongPtrA" | "GetClassLongPtrW" | "IsChild" | "GetWindowThread" | "GetWindowWord" | "GetWindowRelative" | "GetWindowInfo" | "MonitorFromWindow" | "SetWindowContextHelpId" | "ShowOwnedPopups" | "GetChildRect" | "KillSystemTimer" | "NtUserSetWindowStyle")) => {
+            "NtUserCallHwndParam" if matches!(codes::CALL_HWND_PARAM.get(a[2] as usize).copied(), Some("SetDialogInfo" | "SetMDIClientInfo" | "ClientToScreen" | "ScreenToClient" | "MapWindowPoints" | "GetScrollInfo" | "EnableWindow" | "GetClassLongA" | "GetClassLongW" | "GetClassLongPtrA" | "GetClassLongPtrW" | "IsChild" | "GetWindowThread" | "GetWindowWord" | "GetWindowRelative" | "GetWindowInfo" | "MonitorFromWindow" | "SetWindowContextHelpId" | "ShowOwnedPopups" | "GetChildRect" | "KillSystemTimer" | "NtUserSetWindowStyle")) => {
                 match codes::CALL_HWND_PARAM[a[2] as usize] {
                     "ClientToScreen" | "ScreenToClient" => {
                         let (ox, oy) = self.client_origin_screen(a[0]);
@@ -283,15 +320,18 @@ impl WineProc {
                         for i in 0..n { let (x, y) = (self.r32(pts + i * 8)? as i32, self.r32(pts + i * 8 + 4)? as i32); self.w32(pts + i * 8, (x + fx - tx) as u32)?; self.w32(pts + i * 8 + 4, (y + fy - ty) as u32)?; }
                         (((fy - ty) as u32) << 16) | ((fx - tx) as u32 & 0xffff)
                     }
-                    "GetScrollInfo" => { // param -> SCROLLINFO*, bar in the high half? Wine passes SCROLLINFO* and bar via hwnd param struct: be lenient
-                        let bar = self.r32(a[1] + 28).unwrap_or(0);
+                    "GetScrollInfo" => { // param -> { INT bar; SCROLLINFO *info }
+                        let (bar, info) = (self.r32(a[1])?, self.r32(a[1] + 4)?);
                         let e = self.wm.extra.scroll.get(&(a[0], bar)).copied().unwrap_or([0, 100, 0, 0, 0]);
-                        let mask = self.r32(a[1] + 4)?;
-                        if mask & 1 != 0 { self.w32(a[1] + 8, e[0] as u32)?; self.w32(a[1] + 12, e[1] as u32)?; }
-                        if mask & 2 != 0 { self.w32(a[1] + 16, e[2] as u32)?; }
-                        if mask & 4 != 0 { self.w32(a[1] + 20, e[3] as u32)?; }
+                        let mask = self.r32(info + 4)?;
+                        if mask & 1 != 0 { self.w32(info + 8, e[0] as u32)?; self.w32(info + 12, e[1] as u32)?; }
+                        if mask & 2 != 0 { self.w32(info + 16, e[2] as u32)?; }
+                        if mask & 4 != 0 { self.w32(info + 20, e[3] as u32)?; }
+                        if mask & 8 != 0 { self.w32(info + 24, e[4] as u32)?; }
                         1
                     }
+                    "SetDialogInfo" => { self.wm.extra.props.insert((a[0], "#dlginfo".into()), a[1]); 1 }
+                    "SetMDIClientInfo" => { self.wm.extra.props.insert((a[0], "#mdiinfo".into()), a[1]); 1 }
                     "EnableWindow" => 0,
                     "IsChild" => self.wm.windows.get(&a[1]).is_some_and(|w| w.parent == a[0]) as u32,
                     "GetWindowThread" => 0x24,
