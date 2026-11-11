@@ -100,9 +100,33 @@ async function supplyFile(key) { // lazy download: the guest asked for a file we
   } finally { fetching = false; }
   step();
 }
+// ---- 3D: the host emits a canonical GL command stream (docs/GL_PROTOCOL.md); the backend replays it on WebGPU/WebGL2 ----
+let glb = null, glInit = null;
+function ensureGL() {
+  if (glInit) return;
+  const prefer = new URLSearchParams(location.search).get("gl") || "webgpu";
+  glInit = import("./gl_backend.mjs").then((m) => m.createGLBackend({ prefer })).then((b) => {
+    b.onPresent = (w, h, rgba) => { // a finished frame: copy it into the guest window
+      const p = x.plonk_gl_frame_buf(w, h) >>> 0;
+      new Uint8Array(x.memory.buffer, p, w * h * 4).set(rgba);
+      x.plonk_gl_frame_commit(w, h);
+      clearTimeout(stepTimer); stepTimer = setTimeout(step, 0);
+    };
+    glb = b; window.__glKind = b.kind;
+  }).catch((e) => { console.error("3D backend failed", e); glInit = null; x.plonk_gl_clear(); });
+}
+function pumpGL() {
+  const n = x.plonk_gl_len();
+  if (!n) return;
+  if (!glb) { ensureGL(); return; } // commands stay queued in the host until the backend is ready
+  const cmds = new Uint32Array(x.memory.buffer, x.plonk_gl_ptr() >>> 0, n).slice();
+  x.plonk_gl_clear();
+  glb.execute(cmds);
+}
 function step() {
   if (fetching) return;
   const st = x.plonk_wine_run();
+  pumpGL();
   if (st === 3) { supplyFile(msg()); return; }
   if (st === 2) { clearTimeout(stepTimer); stepTimer = setTimeout(step, 0); } // busy: yield to the page, then continue
   const g = x.plonk_wine_gen();
@@ -129,7 +153,8 @@ const vkOf = (e) => ({ Backspace: 8, Tab: 9, Enter: 13, Escape: 27, " ": 32, Arr
 const chOf = (e) => (e.ctrlKey || e.altKey || e.metaKey ? 0 : e.key.length === 1 ? e.key.charCodeAt(0) : { Backspace: 8, Enter: 13, Tab: 9 }[e.key] ?? 0);
 window.addEventListener("keydown", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(0, vkOf(e), chOf(e)); step(); });
 window.addEventListener("keyup", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(1, vkOf(e), 0); step(); });
-setInterval(() => { if (x) { x.plonk_wine_tick(50); step(); } }, 100);
+let lastT = performance.now();
+setInterval(() => { if (x) { const t = performance.now(); x.plonk_wine_tick(Math.min(200, Math.max(1, Math.round(t - lastT)))); lastT = t; step(); } }, 16);
 let customExe = null;
 document.getElementById("file").onchange = (e) => { customExe = e.target.files[0] ?? null; if (customExe) log("Loaded " + customExe.name + " - press Run."); };
 document.getElementById("app").onchange = () => { customExe = null; document.getElementById("file").value = ""; };

@@ -7,13 +7,14 @@ Browser desktop that runs 32-bit Windows programs: Rust i386 interpreter (wasm) 
   (button/edit/combo/list/listview/treeview/tab/progress/trackbar/updown/statusbar/date/ip/hotkey), clipboard, timers, keyboard, mouse.
 - Threads: cooperative scheduler (CreateThread, events, CS, waits with timeouts, suspend/resume, TLS).
 - Kernel: writable in-memory FS + registry + environment, tokens, timers, handles, volumes, API-set map, KUSER clock.
+- 3D: guest OpenGL 1.x (own generated opengl32.dll stub -> host -> canonical command stream, docs/GL_PROTOCOL.md) replayed by web/gl_*.mjs on WebGPU (preferred) / WebGL2; demo `tests/guests/gl_cube.exe` shows FPS.
 - Display: glass compositor (blur/shadow/rounded), glass window chrome, Inter font via fontdue, bitmap/DIB engine, shapes, regions.
 - Browser: single gzip core pack + lazy DLL/NLS download, dependency prefetch (`/deps.json`), own-exe picker/drop, fresh process per Run,
   banner lists unimplemented NtUser/NtGdi calls (answered 0 so apps keep going).
 
 ## Known gaps
 - Roughly half of the ~400 NtUser/NtGdi calls have no real handler (stubs return 0); menus lack submenus/keyboard nav; no drag-and-drop, hooks, printing.
-- One shared message queue across threads; mutex ownership not tracked; no real processes (CreateProcess), no sockets/audio/D3D.
+- One shared message queue across threads; mutex ownership not tracked; no real processes (CreateProcess), no sockets/audio/D3D (OpenGL 1.x only: no shaders/VBOs/glReadPixels/stencil).
 - Controls are classic GDI-drawn (not themed); Plonk Glass theme (uxtheme/msstyles) is only designed (docs/DESIGN.md), not wired: comctl32 v6 side-by-side works but theming is inactive.
 - x87 is f64; no MMX registers; no 16-bit (NE) or 64-bit programs.
 - Single font family (Inter + SemiBold); no font enumeration/mono.
