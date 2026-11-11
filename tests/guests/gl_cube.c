@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <GL/gl.h>
 #include <stdio.h>
+#include <string.h>
 
 #define GLW 640
 #define GLH 420
@@ -75,19 +76,20 @@ static void draw(void) {
     SwapBuffers(hdc);
 }
 
+static int free_run = 1;
 static void tick(void) {
     DWORD now = GetTickCount();
-    ms = (float)(now - t_last);
     t_last = now;
     angle += 1.2f;
     draw();
     frames++; frames_total++;
-    if (now - t_fps >= 1000) {
+    if (now - t_fps >= 500) {
         fps = frames * 1000.0f / (now - t_fps);
+        ms = 1000.0f / fps;
         frames = 0; t_fps = now;
         char buf[200];
         const char *r = (const char *)glGetString(GL_RENDERER);
-        sprintf(buf, "FPS: %.1f   frame: %.1f ms   frames: %d   %s", fps, ms, frames_total, r ? r : "?");
+        sprintf(buf, "FPS: %.0f   frame: %.2f ms   frames: %d   %s   [%s]", fps, ms, frames_total, r ? r : "?", free_run ? "uncapped" : "timer");
         SetWindowTextA(hstat, buf);
         sprintf(buf, "GL cube - %.0f FPS", fps);
         SetWindowTextA(hmain, buf);
@@ -116,9 +118,16 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
     hstat = CreateWindowA("STATIC", "starting...", WS_CHILD | WS_VISIBLE, 6, GLH + 5, GLW - 12, 20, hmain, 0, hi, 0);
     init_gl();
     t_last = t_fps = GetTickCount();
-    SetTimer(hmain, 1, 10, 0);
+    free_run = !(cmd && strstr(cmd, "-timer"));
+    if (!free_run) SetTimer(hmain, 1, 10, 0);
     MSG msg;
-    while (GetMessageA(&msg, 0, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+    for (;;) {
+        if (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) break;
+            TranslateMessage(&msg); DispatchMessageA(&msg);
+        } else if (free_run) tick();
+        else WaitMessage();
+    }
     wglMakeCurrent(0, 0);
     wglDeleteContext(rc);
     return 0;

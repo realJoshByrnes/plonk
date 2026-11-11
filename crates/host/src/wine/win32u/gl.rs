@@ -110,6 +110,7 @@ impl WineProc {
         if sz != g.size { g.size = sz; g.e(2, &[sz.0, sz.1]); }
         g.e(49, &[sz.0, sz.1]);
         g.presents += 1;
+        self.busy = true; // hand the frame to the page now (one frame per slice) instead of batching a whole instruction budget
     }
 
     fn gl_tex(&self, a: &[u32], sub: bool) -> Option<(Vec<u32>, u32)> {

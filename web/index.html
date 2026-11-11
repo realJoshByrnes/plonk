@@ -87,8 +87,14 @@ async function boot(app) {
 }
 const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len()));
 
+let lastT = performance.now(), presStep = -9;
 let lastGen = -1, lastLog = "";
 let stepTimer = 0;
+// zero-delay re-entry (setTimeout is clamped to >= 4 ms once nested): a MessageChannel hop yields to input/paint but nothing more
+const mc = new MessageChannel();
+let soonPending = false;
+mc.port1.onmessage = () => { soonPending = false; step(); };
+function soon() { if (!soonPending) { soonPending = true; mc.port2.postMessage(0); } }
 let fetching = false;
 async function supplyFile(key) { // lazy download: the guest asked for a file we did not ship up front
   fetching = true;
@@ -111,7 +117,7 @@ function ensureGL() {
       const p = x.plonk_gl_frame_buf(w, h) >>> 0;
       new Uint8Array(x.memory.buffer, p, w * h * 4).set(rgba);
       x.plonk_gl_frame_commit(w, h);
-      clearTimeout(stepTimer); stepTimer = setTimeout(step, 0);
+      soon();
     };
     // direct present: the finished frame goes straight to an overlay canvas over the guest window (no readback, no CPU copies)
     const ov = document.getElementById("glov"), ovctx = ov.getContext("bitmaprenderer");
@@ -139,14 +145,18 @@ function pumpGL() {
 }
 function step() {
   if (fetching) return;
+  { const t = performance.now(), dt = Math.round(t - lastT); if (dt >= 1) { x.plonk_wine_tick(Math.min(200, dt)); lastT = t; } } // guest clock follows real time every step
   const P = window.__perf ||= { run: 0, gl: 0, comp: 0, n: 0 };
   let t0 = performance.now();
+  const pr0 = x.plonk_gl_presents();
   const st = x.plonk_wine_run();
   let t1 = performance.now(); P.run += t1 - t0;
+  (P.st ||= {})[st] = (P.st[st] || 0) + 1; P.pres = x.plonk_gl_presents();
   pumpGL();
   let t2 = performance.now(); P.gl += t2 - t1; P.n++;
   if (st === 3) { supplyFile(msg()); return; }
-  if (st === 2) { clearTimeout(stepTimer); stepTimer = setTimeout(step, 0); } // busy: yield to the page, then continue
+  if (x.plonk_gl_presents() !== pr0) presStep = P.n;
+  if (st === 2 || (st === 0 && P.n - presStep <= 2)) soon(); // busy, or a polling render loop that just presented: go again immediately // busy: yield to the page, then continue
   const g = x.plonk_wine_gen();
   if (g !== lastGen) { // redraw only when something on screen changed
     lastGen = g;
@@ -184,8 +194,7 @@ const vkOf = (e) => ({ Backspace: 8, Tab: 9, Enter: 13, Escape: 27, " ": 32, Arr
 const chOf = (e) => (e.ctrlKey || e.altKey || e.metaKey ? 0 : e.key.length === 1 ? e.key.charCodeAt(0) : { Backspace: 8, Enter: 13, Tab: 9 }[e.key] ?? 0);
 window.addEventListener("keydown", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(0, vkOf(e), chOf(e)); step(); });
 window.addEventListener("keyup", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(1, vkOf(e), 0); step(); });
-let lastT = performance.now();
-setInterval(() => { if (x) { const t = performance.now(); x.plonk_wine_tick(Math.min(200, Math.max(1, Math.round(t - lastT)))); lastT = t; step(); } }, 16);
+setInterval(() => { if (x) step(); }, 16);
 let customExe = null;
 document.getElementById("file").onchange = (e) => { customExe = e.target.files[0] ?? null; if (customExe) log("Loaded " + customExe.name + " - press Run."); };
 document.getElementById("app").onchange = () => { customExe = null; document.getElementById("file").value = ""; };
