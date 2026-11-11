@@ -920,8 +920,8 @@ impl WineProc {
     /// Composite all visible windows onto the desktop as RGBA bytes (for ImageData).
     pub fn compose_rgba(&self, w: u32, h: u32) -> Vec<u8> {
         let px = self.wm.backend.compose_desktop(w, h);
-        let mut out = Vec::with_capacity(px.len() * 4);
-        for p in px { out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 0xFF]); }
+        let mut out = vec![0xFFu8; px.len() * 4];
+        for (o, p) in out.chunks_exact_mut(4).zip(px) { o[0] = (p >> 16) as u8; o[1] = (p >> 8) as u8; o[2] = p as u8; }
         out
     }
 

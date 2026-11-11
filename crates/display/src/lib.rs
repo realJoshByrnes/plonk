@@ -30,6 +30,8 @@ pub trait Backend {
 }
 
 pub struct Surface {
+    /// Bumped on every mutation (compositor cache key).
+    pub ver: u64,
     pub w: u32,
     pub h: u32,
     pub pix: Vec<u32>,
@@ -49,6 +51,7 @@ pub struct SoftBackend {
     wall: std::cell::RefCell<Option<(u32, u32, Vec<u32>)>>,
     /// Bumped by every mutation; lets a shell skip composing/drawing unchanged frames.
     pub gen: u64,
+    top_cache: std::cell::RefCell<Option<TopCache>>,
     /// Count of present() calls, handy in tests.
     pub presents: u32,
 }
@@ -68,70 +71,71 @@ impl SoftBackend {
     }
 
     /// Compose over the default wallpaper (gives glass surfaces something to blur).
+    /// Everything below the top window (plus its shadow and blurred backdrop) is cached, so a frame that only changed the top
+    /// window's pixels costs one copy and one blit.
     pub fn compose_desktop(&self, w: u32, h: u32) -> Vec<u32> {
         let mut cache = self.wall.borrow_mut();
         if !matches!(&*cache, Some((cw, ch_, _)) if *cw == w && *ch_ == h) {
             *cache = Some((w, h, (0..h).flat_map(|y| (0..w).map(move |x| wallpaper(x, y, w, h))).collect()));
         }
-        let mut out = cache.as_ref().unwrap().2.clone();
-        drop(cache);
-        self.compose_into(&mut out, w, h);
+        let wall_px = &cache.as_ref().unwrap().2;
+        let vis: Vec<&Surface> = self.order.iter().filter_map(|id| self.surface(*id)).filter(|s| s.visible).collect();
+        let Some((top, lower)) = vis.split_last() else { return wall_px.clone() };
+        let mut key = vec![w as u64, h as u64, top.x as u32 as u64, top.y as u32 as u64, top.w as u64, top.h as u64, top.blur as u64, top.shadow as u64, top.radius as u64];
+        for s in lower { key.extend([s.ver, s.x as u32 as u64, s.y as u32 as u64, s.w as u64, s.h as u64, s.blur as u64, s.shadow as u64, s.radius as u64]); }
+        key.extend(self.order.iter().map(|i| *i as u64));
+        let mut tc = self.top_cache.borrow_mut();
+        if !matches!(&*tc, Some(c) if c.key == key) {
+            let mut base = wall_px.clone();
+            for s in lower { self.draw_surface(&mut base, w, h, s); }
+            if top.shadow > 0 { draw_shadow(&mut base, w, h, top); }
+            let blur = if top.blur > 0 { Some(blur_region(&base, w, h, top, (0, 0, top.w as i32, top.h as i32))) } else { None };
+            *tc = Some(TopCache { key, base, blur });
+        }
+        let c = tc.as_ref().unwrap();
+        let mut out = c.base.clone();
+        self.blit_surface(&mut out, w, h, top, c.blur.as_ref());
         out
     }
 
     fn compose_into(&self, out: &mut [u32], w: u32, h: u32) {
-        for s in self.order.iter().filter_map(|id| self.surface(*id)).filter(|s| s.visible) {
-            if s.shadow > 0 { draw_shadow(out, w, h, s); }
-            // only translucent pixels show the blurred backdrop: blur each contiguous band of rows that has any (+ kernel margin)
-            let mut blurred: Vec<((i32, i32, i32, i32), Blurred)> = Vec::new();
-            if s.blur > 0 {
-                let m = s.blur as i32;
-                let spans: Vec<Option<(i32, i32)>> = (0..s.h as i32).map(|sy| {
-                    let row = &s.pix[(sy as u32 * s.w) as usize..((sy as u32 + 1) * s.w) as usize];
-                    let lo = row.iter().position(|p| p >> 24 < 255)?;
-                    let hi = row.iter().rposition(|p| p >> 24 < 255)?;
-                    Some((lo as i32, hi as i32))
-                }).collect();
-                let mut y = 0usize;
-                while y < spans.len() {
-                    if spans[y].is_none() { y += 1; continue; }
-                    let (mut x0, mut x1, y0) = (i32::MAX, -1, y);
-                    while y < spans.len() { match spans[y] { Some((l, h)) => { x0 = x0.min(l); x1 = x1.max(h); y += 1; } None => break } }
-                    let rect = ((x0 - m).max(0), (y0 as i32 - m).max(0), (x1 + m + 1).min(s.w as i32), (y as i32 + m).min(s.h as i32));
-                    blurred.push((rect, blur_region(out, w, h, s, rect)));
-                }
-            }
-            for sy in 0..s.h as i32 {
-                let dy = sy + s.y;
-                if dy < 0 || dy >= h as i32 { continue; }
-                for sx in 0..s.w as i32 {
-                    let dx = sx + s.x;
-                    if dx < 0 || dx >= w as i32 { continue; }
-                    let src = s.pix[(sy as u32 * s.w + sx as u32) as usize];
-                    let cov = if s.radius > 0 && in_corner(sx, sy, s.w as i32, s.h as i32, s.radius) { corner_cov(sx, sy, s.w as i32, s.h as i32, s.radius) } else { 1.0 };
-                    let a = (src >> 24) as f32 / 255.0;
-                    let di = (dy as u32 * w + dx as u32) as usize;
-                    if cov >= 1.0 && a >= 1.0 { out[di] = src | 0xFF00_0000; continue; }
-                    if cov <= 0.0 { continue; }
-                    let base = out[di];
-                    let back = match blurred.iter().find(|(r, _)| sx >= r.0 && sx < r.2 && sy >= r.1 && sy < r.3) {
-                        Some((r, b)) => glass_adjust(b.at(sx - r.0, sy - r.1), dx, dy),
-                        None => base,
-                    };
-                    let color = mix(back, src, a);
-                    out[di] = mix(base, color, cov);
-                }
+        for s in self.order.iter().filter_map(|id| self.surface(*id)).filter(|s| s.visible) { self.draw_surface(out, w, h, s); }
+    }
+
+    fn draw_surface(&self, out: &mut [u32], w: u32, h: u32, s: &Surface) {
+        if s.shadow > 0 { draw_shadow(out, w, h, s); }
+        let blurred = if s.blur > 0 { Some(blur_region(out, w, h, s, (0, 0, s.w as i32, s.h as i32))) } else { None };
+        self.blit_surface(out, w, h, s, blurred.as_ref());
+    }
+
+    fn blit_surface(&self, out: &mut [u32], w: u32, h: u32, s: &Surface, blurred: Option<&Blurred>) {
+        for sy in 0..s.h as i32 {
+            let dy = sy + s.y;
+            if dy < 0 || dy >= h as i32 { continue; }
+            for sx in 0..s.w as i32 {
+                let dx = sx + s.x;
+                if dx < 0 || dx >= w as i32 { continue; }
+                let src = s.pix[(sy as u32 * s.w + sx as u32) as usize];
+                let cov = if s.radius > 0 && in_corner(sx, sy, s.w as i32, s.h as i32, s.radius) { corner_cov(sx, sy, s.w as i32, s.h as i32, s.radius) } else { 1.0 };
+                let a = (src >> 24) as f32 / 255.0;
+                let di = (dy as u32 * w + dx as u32) as usize;
+                if cov >= 1.0 && a >= 1.0 { out[di] = src | 0xFF00_0000; continue; }
+                if cov <= 0.0 { continue; }
+                let base = out[di];
+                let back = match blurred { Some(b) => glass_adjust(b.at(sx, sy), dx, dy), None => base };
+                let color = mix(back, src, a);
+                out[di] = mix(base, color, cov);
             }
         }
     }
 
-    fn get(&mut self, id: SurfaceId) -> Option<&mut Surface> { self.surfaces.get_mut((id as usize).checked_sub(1)?)?.as_mut() }
+    fn get(&mut self, id: SurfaceId) -> Option<&mut Surface> { let s = self.surfaces.get_mut((id as usize).checked_sub(1)?)?.as_mut()?; s.ver += 1; Some(s) }
 }
 
 impl Backend for SoftBackend {
     fn create_surface(&mut self, w: u32, h: u32) -> SurfaceId {
         self.gen += 1;
-        self.surfaces.push(Some(Surface { w, h, pix: vec![0xFF00_0000; (w * h) as usize], x: 0, y: 0, visible: false, radius: 0, blur: 0, shadow: 0 }));
+        self.surfaces.push(Some(Surface { ver: 0, w, h, pix: vec![0xFF00_0000; (w * h) as usize], x: 0, y: 0, visible: false, radius: 0, blur: 0, shadow: 0 }));
         let id = self.surfaces.len() as SurfaceId;
         self.order.push(id);
         id
@@ -260,6 +264,8 @@ fn draw_shadow(out: &mut [u32], w: u32, h: u32, s: &Surface) {
 }
 
 /// Backdrop under a surface, box-blurred (3 passes ~ gaussian). Indexed like the surface pixels.
+struct TopCache { key: Vec<u64>, base: Vec<u32>, blur: Option<Blurred> }
+
 struct Blurred { px: Vec<[f32; 3]>, dw: usize, dh: usize, f: usize }
 impl Blurred {
     /// Bilinear sample at region-local pixel (x, y).
