@@ -2,6 +2,7 @@
 use plonk_mem::{Fault, Mem};
 
 mod fpu;
+mod sse;
 
 pub const EAX: usize = 0;
 pub const ECX: usize = 1;
@@ -57,6 +58,8 @@ pub struct Cpu {
     pub ftop: u32,
     pub fsw: u32,
     pub fcw: u32,
+    pub xmm: [u128; 8],
+    pub mxcsr: u32,
     seg: u32,
     ow: u32,
 }
@@ -69,7 +72,7 @@ fn sx(v: u32, w: u32) -> i64 {
 }
 
 impl Cpu {
-    pub fn new() -> Self { Cpu { eflags: 0x202, ow: 32, fcw: 0x37F, ..Default::default() } }
+    pub fn new() -> Self { Cpu { eflags: 0x202, ow: 32, fcw: 0x37F, mxcsr: 0x1F80, ..Default::default() } }
 
     pub fn run(&mut self, mem: &mut Mem, max_steps: u64) -> Exit {
         for _ in 0..max_steps {
@@ -549,7 +552,7 @@ impl Cpu {
                         let leaf = self.r[EAX];
                         let (a, b, c, d) = match leaf {
                             0 => (1, 0x756e_6547, 0x6c65_746e, 0x4965_6e69), // "GenuineIntel"
-                            1 => (0x0000_0633, 0, 0, 0x0000_8111),            // FPU TSC CX8 CMOV
+                            1 => (0x0000_0633, 0, 0, 0x0700_8111),            // FPU TSC CX8 CMOV FXSR SSE SSE2
                             _ => (0, 0, 0, 0),
                         };
                         self.r[EAX] = a; self.r[EBX] = b; self.r[ECX] = c; self.r[EDX] = d;
@@ -599,7 +602,7 @@ impl Cpu {
                     }
                     0xAE => {
                         let b = m.r8(self.eip)?;
-                        if b >> 6 != 3 { return unimpl(op2); }
+                        if b >> 6 != 3 { return self.sse(m, op2, start, rep); }
                         self.eip += 1; // fences
                     }
                     0xAF => {
@@ -643,7 +646,7 @@ impl Cpu {
                         }
                     }
                     0xC8..=0xCF => { let i = (op2 & 7) as usize; self.r[i] = self.r[i].swap_bytes(); }
-                    _ => return unimpl(op2),
+                    _ => return self.sse(m, op2, start, rep),
                 }
             }
             _ => return unimpl(op),

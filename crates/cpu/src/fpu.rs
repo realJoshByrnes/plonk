@@ -2,7 +2,7 @@
 use super::{Cpu, Exit, Op, CF, PF, R, ZF};
 use plonk_mem::Mem;
 
-fn ext_to_f64(lo: u64, se: u16) -> f64 {
+pub(crate) fn ext_to_f64(lo: u64, se: u16) -> f64 {
     let sign = if se & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exp = (se & 0x7fff) as i32;
     if exp == 0 && lo == 0 { return sign * 0.0; }
@@ -12,7 +12,7 @@ fn ext_to_f64(lo: u64, se: u16) -> f64 {
     sign * (lo as f64) * 2f64.powi(h) * 2f64.powi(r)
 }
 
-fn f64_to_ext(v: f64) -> (u64, u16) {
+pub(crate) fn f64_to_ext(v: f64) -> (u64, u16) {
     let sign: u16 = if v.is_sign_negative() { 0x8000 } else { 0 };
     if v == 0.0 { return (0, sign); }
     if v.is_infinite() { return (1 << 63, sign | 0x7fff); }
@@ -29,8 +29,8 @@ fn f64_to_ext(v: f64) -> (u64, u16) {
 }
 
 impl Cpu {
-    fn st(&self, i: u32) -> f64 { self.fst[((self.ftop + i) & 7) as usize] }
-    fn set_st(&mut self, i: u32, v: f64) { self.fst[((self.ftop + i) & 7) as usize] = v; }
+    pub(crate) fn st(&self, i: u32) -> f64 { self.fst[((self.ftop + i) & 7) as usize] }
+    pub(crate) fn set_st(&mut self, i: u32, v: f64) { self.fst[((self.ftop + i) & 7) as usize] = v; }
     fn fpush(&mut self, v: f64) { self.ftop = (self.ftop.wrapping_sub(1)) & 7; self.set_st(0, v); }
     fn fpop(&mut self) { self.ftop = (self.ftop + 1) & 7; }
     pub(crate) fn fsw_get(&self) -> u32 { (self.fsw & !0x3800) | (self.ftop << 11) }

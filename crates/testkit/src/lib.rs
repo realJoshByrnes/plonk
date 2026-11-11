@@ -14,12 +14,15 @@ pub struct Case {
     pub mem_exp: &'static [(u32, &'static [u8])],
     /// (mask, expected value) over eflags; mask 0 = unchecked
     pub flags: (u32, u32),
+    pub xmm_init: &'static [(usize, u128)],
+    pub xmm_exp: &'static [(usize, u128)],
 }
 
 impl Case {
     pub fn new(name: &'static str, code: &'static [u8], init: &'static [(usize, u32)], exp: &'static [(usize, u32)]) -> Self {
-        Case { name, code, init, exp, mem_init: &[], mem_exp: &[], flags: (0, 0) }
+        Case { name, code, init, exp, mem_init: &[], mem_exp: &[], flags: (0, 0), xmm_init: &[], xmm_exp: &[] }
     }
+    pub fn xmm(mut self, init: &'static [(usize, u128)], exp: &'static [(usize, u128)]) -> Self { self.xmm_init = init; self.xmm_exp = exp; self }
     pub fn flags(mut self, mask: u32, val: u32) -> Self { self.flags = (mask, val); self }
     pub fn mem_init(mut self, m: &'static [(u32, &'static [u8])]) -> Self { self.mem_init = m; self }
     pub fn mem_exp(mut self, m: &'static [(u32, &'static [u8])]) -> Self { self.mem_exp = m; self }
@@ -35,10 +38,14 @@ pub fn run_case(c: &Case) -> Result<(), String> {
     cpu.eip = CODE;
     cpu.r[ESP] = STACK;
     for (r, v) in c.init { cpu.r[*r] = *v; }
+    for (r, v) in c.xmm_init { cpu.xmm[*r] = *v; }
     let e = cpu.run(&mut m, 10_000);
     if e != Exit::Halt { return Err(format!("{}: exit {:?}", c.name, e)); }
     for (r, v) in c.exp {
         if cpu.r[*r] != *v { return Err(format!("{}: reg{} = {:#x}, want {:#x}", c.name, r, cpu.r[*r], v)); }
+    }
+    for (r, v) in c.xmm_exp {
+        if cpu.xmm[*r] != *v { return Err(format!("{}: xmm{} = {:#x}, want {:#x}", c.name, r, cpu.xmm[*r], v)); }
     }
     let (mask, val) = c.flags;
     if cpu.eflags & mask != val { return Err(format!("{}: flags {:#x}&{:#x} = {:#x}, want {:#x}", c.name, cpu.eflags, mask, cpu.eflags & mask, val)); }

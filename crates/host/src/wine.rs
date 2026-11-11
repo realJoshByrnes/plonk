@@ -325,6 +325,7 @@ impl WineProc {
         self.w32(KUSER + 0x4, 0x0100_0000)?;
         let root: Vec<u16> = "C:\\windows".encode_utf16().collect();
         for (i, c) in root.iter().enumerate() { self.w16(KUSER + 0x30 + i as u32 * 2, *c)?; }
+        for f in [2u32, 6, 8, 10] { self.mem.w8(KUSER + 0x274 + f, 1).map_err(|_| "kuser features")?; } // ProcessorFeatures: CX8, SSE, RDTSC, SSE2
         self.w32(KUSER + 0x264, 1)?; // NtProductType
         self.w32(KUSER + 0x268, 1)?; // ProductTypeIsValid (BOOLEAN) low byte
         self.w32(KUSER + 0x26C, 10)?; // NtMajorVersion
@@ -895,7 +896,7 @@ impl WineProc {
                     None => STATUS_INVALID_HANDLE,
                 }
             }
-            "NtWow64IsProcessorFeaturePresent" => 0, // no SSE/x87-extension features advertised
+            "NtWow64IsProcessorFeaturePresent" => matches!(a[0], 2 | 3 | 6 | 8 | 10) as u32, // CMPXCHG8B, (MMX n/a), SSE, RDTSC, SSE2 // no SSE/x87-extension features advertised
             "NtAddAtom" | "NtFindAtom" => {
                 // (WCHAR *name, ULONG length_bytes, RTL_ATOM *atom)
                 let adding = name == "NtAddAtom";
