@@ -532,14 +532,14 @@ impl WineProc {
             "NtUserGetMessage" => {
                 let m = match self.next_message(true) {
                     Some(m) => m,
-                    None => { self.idle = true; self.took_over = true; return Ok(Some(0)); } // park at the syscall; resumed when input arrives
+                    None => { self.idle = true; self.parked = true; self.took_over = true; return Ok(Some(0)); } // park at the syscall; resumed when input arrives
                 };
                 self.put_msg(a[0], m)?;
                 (m.msg != WM_QUIT) as u32
             }
             "NtUserPeekMessage" => match self.next_message(a[4] & 1 != 0) {
                 Some(m) => { self.put_msg(a[0], m)?; 1 }
-                None => 0,
+                None => { self.idle = true; 0 } // polling loop: hand control back to the shell
             },
             "NtUserTranslateMessage" => 0,
             "NtUserDispatchMessage" => {
@@ -759,6 +759,7 @@ impl WineProc {
     /// Advance the shell clock; due timers post WM_TIMER to their windows.
     pub fn tick(&mut self, dt_ms: u32) {
         self.wm.now_ms += dt_ms as u64;
+        self.update_kuser();
         let now = self.wm.now_ms;
         let mut due = Vec::new();
         for t in self.wm.timers.iter_mut() {
@@ -845,6 +846,8 @@ impl WineProc {
         for p in px { out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 0xFF]); }
         out
     }
+
+    pub(crate) fn wm_now_ms(&self) -> u64 { self.wm.now_ms }
 
     pub(crate) fn post_quit(&mut self, code: u32) { self.wm.quit = Some(code); }
 

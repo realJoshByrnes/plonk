@@ -44,6 +44,8 @@ pub enum Obj {
     Section { path: String, image: bool, size: u32 },
     Stdout,
     Key(String),
+    /// Event / mutex / semaphore: (signaled, auto_reset, count). One guest thread, so waits never block.
+    Sync { signaled: bool, auto: bool, count: i32 },
 }
 
 pub struct WineProc {
@@ -62,6 +64,10 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    /// Guest is blocked in GetMessage/TrackPopupMenu (waiting for input), as opposed to just yielding.
+    parked: bool,
+    /// Total ms the guest asked to sleep (the shell may use it to pace ticks).
+    pub sleep_ms: u32,
     busy: bool,
     atoms: Vec<(String, u32)>,
     took_over: bool,
@@ -91,7 +97,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
@@ -297,7 +303,7 @@ impl WineProc {
 
         // KUSER_SHARED_DATA
         self.vm_reserve(Some(KUSER), 0x1000).ok_or("kuser")?;
-        self.w32(KUSER + 0x4, 0x0fa0_0000)?;
+        self.w32(KUSER + 0x4, 0x0100_0000)?;
         let root: Vec<u16> = "C:\\windows".encode_utf16().collect();
         for (i, c) in root.iter().enumerate() { self.w16(KUSER + 0x30 + i as u32 * 2, *c)?; }
         self.w32(KUSER + 0x264, 1)?; // NtProductType
@@ -379,6 +385,7 @@ impl WineProc {
     /// Run the guest until it exits or parks waiting for input (GetMessage on an empty queue).
     pub fn run_until_idle(&mut self, max_traps: u64) -> Res<RunState> {
         self.idle = false;
+        self.parked = false;
         for _ in 0..max_traps {
             self.pump()?;
             if let Some(c) = self.exit { return Ok(RunState::Exited(c)); }
@@ -392,7 +399,8 @@ impl WineProc {
     pub fn run(&mut self, max_syscalls: u64) -> Res<u32> {
         match self.run_until_idle(max_syscalls)? {
             RunState::Exited(c) => Ok(c),
-            RunState::Idle => Err("idle: waiting for input".into()),
+            RunState::Idle if self.parked => Err("idle: waiting for input".into()),
+            RunState::Idle => self.run(max_syscalls),
             RunState::Busy => self.run(max_syscalls),
         }
     }
@@ -454,6 +462,29 @@ impl WineProc {
         self.w32(req, 0)?; // reply.error = STATUS_SUCCESS
         self.w32(req + 4, 0)?;
         Ok(())
+    }
+
+    /// Single-threaded wait: signaled -> 0 (auto-reset clears it), otherwise STATUS_TIMEOUT and yield.
+    fn wait_one(&mut self, h: u32) -> u32 {
+        match self.handles.get_mut(&h) {
+            Some(Obj::Sync { signaled, auto, count }) => {
+                if *signaled { if *auto { *signaled = false; } else if *count > 0 { *count -= 1; if *count == 0 { *signaled = false; } } 0 } else { self.idle = true; 0x102 }
+            }
+            Some(_) => 0,
+            None => STATUS_INVALID_HANDLE,
+        }
+    }
+
+    /// Publish the guest clock in KUSER_SHARED_DATA (TickCount, InterruptTime, SystemTime).
+    pub(crate) fn update_kuser(&mut self) {
+        let ms = self.ticks / 10_000 + self.wm_now_ms();
+        let tc = ms; // Wine uses TickCountMultiplier = 1<<24, i.e. TickCount is in ms
+        let (it, st) = (self.ticks + self.wm_now_ms() * 10_000, 133_500_000_000_000_000u64 + self.ticks + self.wm_now_ms() * 10_000);
+        for (off, v) in [(0x320u32, tc), (0x8, it), (0x14, st)] {
+            let _ = self.mem.w32(KUSER + off, v as u32);
+            let _ = self.mem.w32(KUSER + off + 4, (v >> 32) as u32);
+            let _ = self.mem.w32(KUSER + off + 8, (v >> 32) as u32);
+        }
     }
 
     pub(crate) fn ret_stdcall(&mut self, status: u32) -> Res<()> {
@@ -887,6 +918,48 @@ impl WineProc {
                 0
             }
             "NtUnmapViewOfSection" | "NtUnmapViewOfSectionEx" => { self.images.retain(|(b, _)| *b != a[1]); self.vm_release(a[1]); 0 }
+            "NtCreateEvent" => { // (PHANDLE, access, oa, type(1=auto), initial)
+                let h = self.new_handle(Obj::Sync { signaled: a[4] & 0xff != 0, auto: a[3] == 1, count: 0 });
+                self.w32(a[0], h)?;
+                0
+            }
+            "NtCreateMutant" => { let h = self.new_handle(Obj::Sync { signaled: true, auto: true, count: 0 }); self.w32(a[0], h)?; 0 }
+            "NtCreateSemaphore" => { let h = self.new_handle(Obj::Sync { signaled: a[3] as i32 > 0, auto: false, count: a[3] as i32 }); self.w32(a[0], h)?; 0 }
+            "NtSetEvent" | "NtResetEvent" | "NtClearEvent" | "NtPulseEvent" | "NtReleaseMutant" => {
+                let set = name == "NtSetEvent" || name == "NtReleaseMutant";
+                match self.handles.get_mut(&a[0]) {
+                    Some(Obj::Sync { signaled, .. }) => { let old = *signaled; if name != "NtPulseEvent" { *signaled = set; } if name != "NtClearEvent" && a[1] != 0 { self.w32(a[1], old as u32)?; } 0 }
+                    _ => STATUS_INVALID_HANDLE,
+                }
+            }
+            "NtReleaseSemaphore" => {
+                match self.handles.get_mut(&a[0]) {
+                    Some(Obj::Sync { signaled, count, .. }) => { let old = *count; *count += a[1] as i32; *signaled = true; if a[2] != 0 { self.w32(a[2], old as u32)?; } 0 }
+                    _ => STATUS_INVALID_HANDLE,
+                }
+            }
+            "NtWaitForSingleObject" => self.wait_one(a[0]),
+            "NtWaitForMultipleObjects" => { // (count, handles*, wait_type(0=all,1=any), alertable, timeout*)
+                let mut res = 0x102u32; // STATUS_TIMEOUT
+                for i in 0..a[0] {
+                    let h = self.r32(a[1] + i * 4)?;
+                    if self.wait_one(h) == 0 { res = i; if a[2] == 1 { break; } }
+                    else if a[2] == 0 { res = 0x102; break; }
+                }
+                if res == 0x102 { self.idle = true; }
+                res
+            }
+            "NtDelayExecution" | "NtYieldExecution" => {
+                if name == "NtDelayExecution" && a[1] != 0 {
+                    let t = self.r32(a[1])? as u64 | (self.r32(a[1] + 4)? as u64) << 32;
+                    let ms = if (t as i64) < 0 { (-(t as i64)) as u64 / 10_000 } else { 0 };
+                    self.ticks += ms * 10_000;
+                    self.sleep_ms = self.sleep_ms.saturating_add(ms as u32);
+                }
+                self.idle = true; // yield to the shell; the guest resumes on the next tick
+                self.update_kuser();
+                0
+            }
             "NtCallbackReturn" => { self.callback_ret = Some((a[0], a[1], a[2])); return Ok(None); }
             "NtTerminateProcess" => { self.exit = Some(a[1]); return Ok(None); }
             "NtClose" => if self.handles.remove(&a[0]).is_some() { 0 } else { STATUS_INVALID_HANDLE },
