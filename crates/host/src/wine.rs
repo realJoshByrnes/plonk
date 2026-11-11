@@ -636,6 +636,17 @@ impl WineProc {
 
     /// Build EXCEPTION_RECORD + CONTEXT on the guest stack and enter KiUserExceptionDispatcher(rec, ctx).
     fn raise_cpu_exception(&mut self, code: u32, params: &[u32], addr: u32) -> Res<()> {
+        if self.cpu.debug_ring && self.exc_depth == 0 {
+            let n = self.cpu.ring_pos;
+            let tail: Vec<String> = (n.saturating_sub(24)..n).filter_map(|i| self.cpu.ring.get(i & 63).map(|e| format!("{e:#x}"))).collect();
+            self.log(format!("  (ring before first exception: {})", tail.join(" ")));
+            self.log(format!("  (regs at first exception: {:x?})", self.cpu.r));
+            let sp = self.cpu.r[ESP];
+            let raw: Vec<u32> = (0..16u32).filter_map(|i| self.mem.r32(sp + i * 4).ok()).collect();
+            self.log(format!("  (stack words: {:x?})", raw));
+            let stack: Vec<String> = (0..24u32).filter_map(|i| self.mem.r32(sp + i * 4).ok()).filter_map(|v| self.module_at(v).filter(|(base, _)| v - base < 0x400000).map(|(base, n)| format!("{}+{:#x}", n.rsplit('\\').next().unwrap_or(n), v - base))).collect();
+            self.log(format!("  (stack return candidates: {})", stack.join(" ")));
+        }
         self.log(format!("  (exception {code:#x} at {addr:#x} params {params:x?})"));
         if self.exc_depth > 8 { return Err(format!("exception storm: {code:#x} at {addr:#x}")); }
         let sp = self.cpu.r[ESP];

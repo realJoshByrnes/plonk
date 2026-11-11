@@ -75,6 +75,9 @@ enum Gdi { Brush(u32), NullBrush, Pen(u32, bool), Region(Rect), Font, Bitmap, Ot
 struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32, pen: u32, pos: (i32, i32), font: u32, bitmap: u32 }
 
 pub struct Wm {
+    /// Recycled GDI handle-table indexes and DC_ATTR blocks (programs create and release thousands of DCs while painting).
+    free_gdi: Vec<u32>,
+    dcattr_free: Vec<u32>,
     /// Screen size in pixels (set by the page from the available area).
     pub screen: (i32, i32),
     pub gl: gl::Gl,
@@ -123,6 +126,7 @@ impl Wm {
 
     pub fn new() -> Self {
         let mut w = Wm {
+            free_gdi: Vec::new(), dcattr_free: Vec::new(),
             screen: (1024, 768),
             gl: Default::default(),
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
@@ -133,8 +137,8 @@ impl Wm {
         w
     }
     fn new_gdi(&mut self, kind: u32, g: Gdi) -> u32 {
-        let h = kind | self.next_gdi;
-        self.next_gdi += 1;
+        let idx = match self.free_gdi.pop() { Some(i) => i, None => { let n = self.next_gdi; self.next_gdi += 1; n } };
+        let h = kind | idx;
         self.gdi.insert(h, g);
         h
     }
@@ -712,7 +716,14 @@ impl WineProc {
             }
             "NtUserGetDC" => self.new_dc(a[0], None),
             "NtUserGetDCEx" => self.new_dc(a[0], None),
-            "NtUserReleaseDC" => { self.wm.dcs.remove(&a[1]); 1 }
+            "NtUserReleaseDC" => {
+                let h = a[1];
+                if self.wm.dcs.contains_key(&h) {
+                    self.free_dc(h);
+                    if self.wm.gdi.remove(&h).is_some() && (h & 0xffff) >= 64 { self.wm.free_gdi.push(h & 0xffff); let _ = self.mem.w8(self.gdi_table + (h & 0xffff) * 24 + 14, 0); }
+                }
+                1
+            }
             "NtUserFillRect" => {
                 let (hdc, r, brush) = (a[0], self.lp_rect(a[0], self.rect_at(a[1])?), a[2]);
                 let c = self.brush_argb(brush);
@@ -725,20 +736,22 @@ impl WineProc {
                 std::mem::replace(&mut dc.brush, a[1])
             }
             "NtGdiDeleteObjectApp" => {
+                if a[0] & 0x80_0000 != 0 { return Ok(Some(1)); } // stock objects cannot be deleted (apps try anyway)
                 let ok = self.wm.gdi.remove(&a[0]).is_some();
-                self.wm.dcs.remove(&a[0]);
+                self.free_dc(a[0]);
+                if ok && a[0] & 0x80_0000 == 0 && (a[0] & 0xffff) >= 64 { self.wm.free_gdi.push(a[0] & 0xffff); }
                 if let Some(b) = self.wm.bitmaps.remove(&a[0]) { if a[0] & 0x80_0000 == 0 { self.vm_release(b.addr()); } }
                 if ok { let _ = self.mem.w8(self.gdi_table + (a[0] & 0xffff) * 24 + 14, 0); }
                 ok as u32
             }
-            "NtGdiGetStockObject" => match a[0] {
-                0..=4 => self.gdi_alloc(0x100000 | 0x80_0000, Gdi::Brush([0xFFFF_FFFF, 0xFFC0_C0C0, 0xFF80_8080, 0xFF40_4040, 0xFF00_0000][a[0] as usize])),
-                5 => self.gdi_alloc(0x100000 | 0x80_0000, Gdi::NullBrush),
-                6 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0xFFFF_FFFF, false)),
-                7 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0xFF00_0000, false)),
-                8 => self.gdi_alloc(0x300000 | 0x80_0000, Gdi::Pen(0, true)),
-                _ => { let h = self.gdi_alloc(0x0a0000 | 0x80_0000, Gdi::Font); self.wm.fonts.insert(h, FontSpec { px: 12.0, bold: false, face: "Inter".into(), raw: Vec::new() }); h }
-            },
+            "NtGdiGetStockObject" => {
+                // the stock objects live at fixed slots of the shared handle table (init_stock_objects): return those, always the same handles
+                let idx = 32 + a[0];
+                if a[0] > 23 { 0 } else {
+                    let e = self.gdi_table + idx * 24;
+                    if self.mem.r8(e + 14).unwrap_or(0) == 0 { 0 } else { idx | ((self.mem.r16(e + 12).unwrap_or(0) as u32) << 16) }
+                }
+            }
             "NtUserInternalGetWindowText" => {
                 let t = self.wm.windows.get(&a[0]).map(|w| w.text.clone()).unwrap_or_default();
                 let u: Vec<u16> = t.encode_utf16().take((a[2] as usize).saturating_sub(1)).collect();
@@ -1001,7 +1014,8 @@ impl WineProc {
                 6 => (0x30, Gdi::Pen(0xFFFF_FFFF, false)),
                 7 => (0x30, Gdi::Pen(0xFF00_0000, false)),
                 8 => (0x30, Gdi::Pen(0, true)),
-                10..=14 | 16 | 17 | 20..=23 => (0x0a, Gdi::Font),
+                10..=14 | 16 | 17 | 21..=23 => (0x0a, Gdi::Font),
+                20 => (0x05, Gdi::Bitmap), // DEFAULT_BITMAP: what CreateCompatibleBitmap(dc, 0, 0) and a fresh memory DC select
                 15 => (0x08, Gdi::Other),
                 18 => { let (e, g) = brush(0xFFFF_FFFF); (e, g) }
                 19 => (0x30, Gdi::Pen(0xFF00_0000, false)),
@@ -1018,6 +1032,12 @@ impl WineProc {
             if matches!(obj, Gdi::Font) { self.wm.fonts.insert(h, FontSpec { px: 12.0, bold: false, face: "Inter".into(), raw: Vec::new() }); }
             self.wm.gdi.insert(h, obj);
         }
+        // the stock bitmap needs pixel storage too (1x1), keyed by its stock handle
+        let hb = 52 | (0x85u32 << 16);
+        let (tmp, _) = self.bmp_alloc(1, 1, 32, true, false)?;
+        if let Some(b) = self.wm.bitmaps.remove(&tmp) { self.wm.bitmaps.insert(hb, b); }
+        self.wm.gdi.remove(&tmp);
+        self.wm.stock_bitmap = hb;
         let h = |i: u32, ext: u32| (32 + i) | ((ext | 0x80) << 16);
         self.wm.default_objs = [h(0, 0x10), h(7, 0x30), h(13, 0x0a)];
         Ok(())
@@ -1028,6 +1048,14 @@ impl WineProc {
     pub(crate) fn post_quit(&mut self, code: u32) { self.wm.quit = Some(code); }
 
     /// Allocate a GDI handle and publish it in the shared handle table that gdi32 (PE) reads.
+    /// Forget a DC: its DC_ATTR block goes back to the pool (the handle index is recycled by the caller when the object is deleted).
+    fn free_dc(&mut self, h: u32) {
+        if self.wm.dcs.remove(&h).is_none() { return; }
+        let slot = self.gdi_table + (h & 0xffff) * 24;
+        let at = self.r32(slot + 16).unwrap_or(0);
+        if at != 0 { self.wm.dcattr_free.push(at); let _ = self.mem.w32(slot + 16, 0); }
+    }
+
     fn gdi_alloc(&mut self, kind: u32, g: Gdi) -> u32 {
         let h = self.wm.new_gdi(kind, g);
         let e = self.gdi_table + (h & 0xffff) * 24;
@@ -1052,8 +1080,8 @@ impl WineProc {
         let h = self.gdi_alloc(0x010000, Gdi::Other);
         // DC_ATTR lives in guest memory: gdi32 (PE) reads/writes it directly via the handle table.
         if self.dcattr_next == 0 { self.dcattr_next = self.vm_reserve(None, 0x40000).unwrap_or(0); }
-        let at = self.dcattr_next;
-        self.dcattr_next += 192;
+        let at = match self.wm.dcattr_free.pop() { Some(a) => a, None => { let a = self.dcattr_next; self.dcattr_next += 192; a } };
+        for o in (0..192).step_by(4) { let _ = self.mem.w32(at + o, 0); }
         let cr = self.wm.client_rect(hwnd);
         let w = |p: &mut Self, off: u32, v: u32| { let _ = p.mem.w32(at + off, v); };
         w(self, 0, h);

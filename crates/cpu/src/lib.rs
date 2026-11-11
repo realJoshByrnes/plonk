@@ -55,6 +55,12 @@ pub struct Cpu {
     /// Half-open eip range [lo, hi) that traps out as Exit::Thunk. Empty by default.
     pub thunk: (u32, u32),
     pub fs_base: u32,
+    /// 0x67 address-size prefix seen on the current instruction (16-bit ModRM addressing).
+    addr16: bool,
+    /// Debugging: run the plain interpreter (no block cache) and remember the last 64 instruction addresses.
+    pub debug_ring: bool,
+    pub ring: Vec<u32>,
+    pub ring_pos: usize,
     pub gs_base: u32,
     pub tsc: u64,
     /// Address of the instruction being executed (for exception records).
@@ -130,6 +136,20 @@ impl Cpu {
         let b = self.f8(m)?;
         let (md, reg, rm) = (b >> 6, ((b >> 3) & 7) as usize, (b & 7) as usize);
         if md == 3 { return Ok((reg, Op::R(rm))); }
+        if self.addr16 {
+            // 16-bit addressing: [bx+si] [bx+di] [bp+si] [bp+di] [si] [di] [bp]/disp16 [bx], wrapped to 16 bits
+            let g = |i: usize| self.r[i] & 0xffff;
+            let mut a = match rm {
+                0 => g(EBX) + g(ESI), 1 => g(EBX) + g(EDI), 2 => g(EBP) + g(ESI), 3 => g(EBP) + g(EDI),
+                4 => g(ESI), 5 => g(EDI), 6 => if md == 0 { self.f16(m)? as u32 } else { g(EBP) }, _ => g(EBX),
+            };
+            match md {
+                1 => a = a.wrapping_add(self.f8(m)? as i8 as i16 as u16 as u32),
+                2 => a = a.wrapping_add(self.f16(m)? as u32),
+                _ => {}
+            }
+            return Ok((reg, Op::M((a & 0xffff).wrapping_add(self.seg))));
+        }
         let mut a: u32;
         if rm == 4 {
             let s = self.f8(m)?;
@@ -330,6 +350,8 @@ impl Cpu {
         if start >= self.thunk.0 && start < self.thunk.1 { return Err(Exit::Thunk(start)); }
         self.seg = 0;
         self.ow = 32;
+        self.addr16 = false;
+        if self.debug_ring { if self.ring.len() < 64 { self.ring.push(start); } else { let i = self.ring_pos & 63; self.ring[i] = start; } self.ring_pos += 1; }
         let mut rep = 0u8;
         let op = loop {
             let b = self.f8(m)?;
@@ -338,6 +360,7 @@ impl Cpu {
                 0x64 => self.seg = self.fs_base,
                 0x65 => self.seg = self.gs_base,
                 0xF2 | 0xF3 => rep = b,
+                0x67 => self.addr16 = true,
                 0xF0 | 0x2E | 0x36 | 0x3E | 0x26 => {}
                 _ => break b,
             }
@@ -464,7 +487,9 @@ impl Cpu {
             0x9E => { let ah = self.reg8(4); self.eflags = (self.eflags & !(SF | ZF | AF | PF | CF)) | (ah & (SF | ZF | AF | PF | CF)); }
             0x9F => { let v = (self.eflags & (SF | ZF | AF | PF | CF)) | 2; self.set_reg8(4, v); }
             0xA0..=0xA3 => {
-                let a = self.f32(m)?.wrapping_add(self.seg);
+                // moffs is 16 bits wide under the 0x67 address-size prefix (MSVC's `mov fs:[0], eax` SEH frames use it)
+                let off = if self.addr16 { self.f16(m)? as u32 } else { self.f32(m)? };
+                let a = off.wrapping_add(self.seg);
                 let w = if op & 1 == 0 { 8 } else { vw };
                 if op < 0xA2 { let v = self.rd(m, Op::M(a), w)?; self.setr(EAX, w, v); } else { let v = self.getr(EAX, w); self.wr(m, Op::M(a), w, v)?; }
             }

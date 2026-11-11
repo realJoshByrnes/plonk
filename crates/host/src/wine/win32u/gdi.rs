@@ -37,7 +37,7 @@ struct Dib { w: i32, h: i32, pix: Vec<u32>, top_down: bool }
 
 impl WineProc {
     // ---- bitmap storage ----
-    fn bmp_alloc(&mut self, w: i32, h: i32, bpp: u32, top_down: bool, dib: bool) -> Res<(u32, u32)> {
+    pub(super) fn bmp_alloc(&mut self, w: i32, h: i32, bpp: u32, top_down: bool, dib: bool) -> Res<(u32, u32)> {
         let (w, h) = (w.max(1), h.max(1));
         let stride = align4((w as u32 * bpp + 7) / 8);
         let addr = self.vm_reserve(None, stride * h as u32).ok_or("bitmap: out of guest memory")?;

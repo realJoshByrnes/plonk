@@ -653,6 +653,7 @@ impl Cpu {
 
     /// Run up to `max_steps` instructions. Exactly equivalent to calling `step` that many times.
     pub fn run(&mut self, mem: &mut Mem, max_steps: u64) -> Exit {
+        if self.debug_ring { return self.run_slow(mem, max_steps); }
         let mut cache = self.cache.0.take().unwrap_or_default();
         if cache.thunk != self.thunk {
             cache.thunk = self.thunk;

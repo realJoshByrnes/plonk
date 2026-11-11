@@ -32,6 +32,8 @@ pub(super) struct OpenMenu {
 }
 
 impl Item {
+    fn clone_basic(&self) -> Item { Item { id: self.id, flags: self.flags, text: self.text.clone(), sub: self.sub } }
+
     fn enabled(&self) -> bool { self.flags & (MF_GRAYED | MF_DISABLED | MF_SEPARATOR) == 0 }
 }
 
@@ -189,6 +191,38 @@ impl WineProc {
                         let mask = self.r32(info + 4)?;
                         if mask & 1 != 0 { let st = self.r32(info + 12)?; let it = &mut self.wm.menus.get_mut(&menu).unwrap().items[i]; it.flags = (it.flags & !(MF_GRAYED | MF_DISABLED)) | (st & (MF_GRAYED | MF_DISABLED)); }
                         1
+                    }
+                    2 => 1, // CheckMenuRadioItem: the radio mark is not drawn yet
+                    3 => u32::MAX, // GetMenuDefaultItem: no default item
+                    4 | 7 | 8 | 5 | 6 => { // GetMenuItemID / GetMenuState / GetSubMenu / GetMenuItemInfoA|W
+                        let Some(i) = self.menu_find(menu, pos, flags) else { return Ok(Some(if method == 8 { 0 } else { u32::MAX })) };
+                        let it = self.wm.menus[&menu].items[i].clone_basic();
+                        match method {
+                            4 => if it.sub != 0 || it.flags & MF_SEPARATOR != 0 { u32::MAX } else { it.id },
+                            8 => it.sub,
+                            7 => if it.sub != 0 { (it.flags & (MF_GRAYED | MF_DISABLED)) | MF_POPUP | ((self.wm.menus.get(&it.sub).map_or(0, |m| m.items.len()) as u32) << 8) } else { it.flags & (MF_GRAYED | MF_DISABLED | MF_SEPARATOR) },
+                            _ => { // MENUITEMINFO: cbSize, fMask, fType, fState, wID, hSubMenu, hbmpChecked, hbmpUnchecked, dwItemData, dwTypeData, cch, hbmpItem
+                                if info == 0 { return Ok(Some(0)); }
+                                let mask = self.r32(info + 4)?;
+                                if mask & 0x100 != 0 || mask & 0x10 != 0 { self.w32(info + 8, it.flags & MF_SEPARATOR)?; }
+                                if mask & 1 != 0 { self.w32(info + 12, it.flags & (MF_GRAYED | MF_DISABLED))?; }
+                                if mask & 2 != 0 { self.w32(info + 16, it.id)?; }
+                                if mask & 4 != 0 { self.w32(info + 20, it.sub)?; }
+                                if mask & 0x40 != 0 || mask & 0x10 != 0 {
+                                    let (buf, cch) = (self.r32(info + 36)?, self.r32(info + 40)?);
+                                    let ansi = method == 5;
+                                    if buf != 0 && cch > 0 {
+                                        let chars: Vec<char> = it.text.chars().take(cch as usize - 1).collect();
+                                        for (k, c) in chars.iter().enumerate() {
+                                            if ansi { self.mem.w8(buf + k as u32, if (*c as u32) < 256 { *c as u8 } else { b'?' }).map_err(|_| "menu text")?; } else { self.w16(buf + k as u32 * 2, *c as u16)?; }
+                                        }
+                                        if ansi { self.mem.w8(buf + chars.len() as u32, 0).map_err(|_| "menu text")?; } else { self.w16(buf + chars.len() as u32 * 2, 0)?; }
+                                        self.w32(info + 40, chars.len() as u32)?;
+                                    } else { self.w32(info + 40, it.text.chars().count() as u32)?; }
+                                }
+                                1
+                            }
+                        }
                     }
                     _ => return Err(format!("NtUserThunkedMenuItemInfo method {method}")),
                 }
