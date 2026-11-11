@@ -25,6 +25,11 @@ fn main() {
         p.add_tar(&std::fs::read(format!("{root}wine/root.tar")).expect("wine/root.tar"));
     }
     p.mkdir("/home/user/.wine");
+    // DIR="hostdir=/guest/dir": add a host directory (not recursive) to the guest file tree
+    if let Ok(d) = std::env::var("DIR") {
+        let (h, g) = d.split_once('=').expect("DIR=host=guest");
+        for e in std::fs::read_dir(h).expect("DIR host dir").flatten().filter(|e| e.path().is_file()) { p.files.insert(format!("{g}/{}", e.file_name().to_string_lossy()), std::fs::read(e.path()).unwrap()); }
+    }
     // PREFIX=file.tar: start from a saved Wine prefix; SAVE=file.tar: save the prefix afterwards (waits for all processes to end)
     if let Ok(f) = std::env::var("PREFIX") { p.add_tar(&std::fs::read(f).expect("prefix tar")); }
     p.wait_all = std::env::var("SAVE").is_ok();
@@ -41,6 +46,20 @@ fn main() {
     let mut r = p.run(steps);
     let mut rounds = 0;
     while matches!(r, Ok(None)) && p.blocked && rounds < idle { p.advance(1000); rounds += 1; r = p.run(2_000_000_000); }
+    // EVENTS="t,ms;d,x,y;u,x,y;m,x,y;k,vk": scripted input after startup (t = let guest time pass), each followed by a run
+    for e in std::env::var("EVENTS").unwrap_or_default().split(';').filter(|s| !s.is_empty()) {
+        let f: Vec<i32> = e.split(',').skip(1).map(|v| v.parse().unwrap()).collect();
+        match &e[..1] {
+            "t" => p.advance(f[0] as u64),
+            "d" => p.mouse(0, f[0], f[1]),
+            "u" => p.mouse(2, f[0], f[1]),
+            "m" => p.mouse(1, f[0], f[1]),
+            "k" => { p.push_event(5, 0, 0, 0, f[0] as u32, 0); p.push_event(6, 0, 0, 0, f[0] as u32, 0); }
+            _ => {}
+        }
+        r = p.run(steps);
+        for _ in 0..3 { if matches!(r, Ok(None)) && p.blocked { p.advance(200); r = p.run(steps); } }
+    }
     println!("result {r:?} blocked={} after {rounds} idle seconds", p.blocked);
     println!("stdout: {}", String::from_utf8_lossy(&p.stdout));
     println!("unknown: {:?}", p.unknown);

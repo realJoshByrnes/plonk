@@ -398,10 +398,13 @@ impl LinuxProc {
         }
     }
 
-    /// Highest free gap of `len` bytes below the stack.
+    /// Highest free gap of `len` bytes below the stack (the heap counts as in use).
     fn find_gap(&self, len: u32) -> Option<u32> {
+        let mut used: Vec<(u32, u32)> = self.maps.range(..STACK_LOW).map(|(&s, &e)| (s, e)).collect();
+        if self.brk_start != 0 { used.push((self.brk_start, (self.brk + 0xFFF) & !0xFFF)); }
+        used.sort_unstable();
         let mut top = STACK_LOW;
-        for (&s, &e) in self.maps.range(..STACK_LOW).rev() {
+        for &(s, e) in used.iter().rev() {
             if top >= e && top - e >= len { break; }
             top = top.min(s);
         }
@@ -572,7 +575,11 @@ impl LinuxProc {
             match self.cpu.run(&mut self.mem, steps - used) {
                 Exit::Interrupt(0x80) => { self.syscall(); if self.blocked || self.resched { break; } }
                 Exit::StepLimit => break,
-                e => return Err(format!("pid {} ({}) cpu stopped: {e:?} at eip {:#x}", self.pid(), self.exe, self.cpu.eip)),
+                e => {
+                    let at = self.cpu.insn_start;
+                    let bytes: Vec<String> = (0..12).map(|i| format!("{:02x}", self.mem.r8(at + i).unwrap_or(0))).collect();
+                    return Err(format!("pid {} ({}) cpu stopped: {e:?} at eip {:#x} insn {at:#x} [{}] regs {:x?} gs_base {:#x}", self.pid(), self.exe, self.cpu.eip, bytes.join(" "), self.cpu.r, self.cpu.gs_base));
+                }
             }
         }
         Ok((self.cpu.retired.saturating_sub(start), self.blocked))
