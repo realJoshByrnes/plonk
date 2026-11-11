@@ -483,6 +483,8 @@ impl WineProc {
             WM_NCHITTEST => 1,
             WM_NCCREATE => 1,
             0x0C => { // WM_SETTEXT (wide)
+                #[cfg(not(target_arch = "wasm32"))]
+                if std::env::var("SETTEXT_LOG").is_ok() { let b: Vec<u8> = (0..24).map(|i| self.mem.r8(lp + i).unwrap_or(0)).collect(); eprintln!("settext(wide path) hwnd={hwnd:#x} bytes={b:02x?}"); }
                 let mut n = 0;
                 while self.mem.r16(lp + n * 2).unwrap_or(0) != 0 && n < 512 { n += 1; }
                 let t = self.wstr(lp, n)?;
@@ -564,13 +566,17 @@ impl WineProc {
                 let cname = self.class_arg(a[1])?;
                 let ci = self.wm.classes.iter().position(|c| match &cname { Ok(at) => c.atom == *at, Err(n) => c.name.eq_ignore_ascii_case(n) });
                 let Some(ci) = ci else { self.log(format!("  (CreateWindowEx: unknown class {cname:?})")); return Ok(Some(0)); };
-                let title = if a[3] != 0 { match self.class_arg(a[3])? { Err(s) => s, Ok(_) => String::new() } } else { String::new() };
+                let title = if a[3] != 0 && a.get(16).copied().unwrap_or(0) != 0 {
+                    // CreateWindowExA: the window name is 8-bit text in a UNICODE_STRING { Length(bytes), MaximumLength, Buffer }
+                    let (len, buf) = (self.mem.r16(a[3]).unwrap_or(0) as u32, self.r32(a[3] + 4)?);
+                    (0..len.min(512)).map(|i| self.mem.r8(buf + i).unwrap_or(0) as char).collect::<String>()
+                } else if a[3] != 0 { match self.class_arg(a[3])? { Err(s) => s, Ok(_) => String::new() } } else { String::new() };
                 let dim = |v: u32, d: i32| if v == CW_USEDEFAULT { d } else { v as i32 };
                 // Windows: with x == CW_USEDEFAULT the y argument is ignored (it is a show command), likewise cy when cx == CW_USEDEFAULT
                 let (x, y) = if a[5] == CW_USEDEFAULT { (100, 100) } else { (dim(a[5], 100), dim(a[6], 100)) };
                 let (cx, cy) = if a[7] == CW_USEDEFAULT { (640, 480) } else { (dim(a[7], 640), dim(a[8], 480)) };
                 #[cfg(not(target_arch = "wasm32"))]
-                if std::env::var("CREATE_LOG").is_ok() { eprintln!("create {cname:?} title={title:?} style={style:#x} parent={:#x} id={:#x}", a[9], a[10]); }
+                if std::env::var("CREATE_LOG").is_ok() { eprintln!("create {cname:?} title={title:?} codes={:?} ansi_arg={:#x} style={style:#x} parent={:#x} id={:#x}", title.chars().map(|c| c as u32).collect::<Vec<_>>(), a.get(16).copied().unwrap_or(99), a[9], a[10]); }
                 let hwnd = self.wm.next_hwnd;
                 self.wm.next_hwnd += 4;
                 let parent = if a[9] == 0 { DESKTOP } else { a[9] };
@@ -635,11 +641,17 @@ impl WineProc {
             "NtUserMessageCall" => {
                 let (hwnd, msg, wp, lp, ty) = (a[0], a[1], a[2], a[3], a[5]);
                 match ty {
+                    0x029e if msg == 0x0C && a[6] != 0 && lp != 0 => { // DefWindowProcA(WM_SETTEXT): the string is ANSI
+                        let mut bytes = Vec::new();
+                        while let Ok(b) = self.mem.r8(lp + bytes.len() as u32) { if b == 0 || bytes.len() >= 512 { break; } bytes.push(b); }
+                        if let Some(w) = self.wm.windows.get_mut(&hwnd) { w.text = bytes.iter().map(|&b| b as char).collect(); }
+                        1
+                    }
                     0x029e => self.def_window_proc(hwnd, msg, wp, lp)?,
                     0x3002 | 0x0303 | 0x0304 | 0x0305 | 0x0306 | 0x0300 => 0, // spy hooks, IME, tray, clipboard window
                     0x029c | 0x029d => self.def_window_proc(hwnd, msg, wp, lp)?,
                     0x029a => self.scrollbar_proc(hwnd, msg, wp, lp)?,
-                    0x02b3 => { let r = self.send(hwnd, msg, wp, lp)?; if a[4] != 0 { self.w32(a[4] + 8, r)?; } 1 }
+                    0x02b3 => { let r = if a[6] != 0 { self.send_ansi(hwnd, msg, wp, lp)? } else { self.send(hwnd, msg, wp, lp)? }; if a[4] != 0 { self.w32(a[4] + 8, r)?; } 1 }
                     0x02b7 | 0x02b8 => { self.send(hwnd, msg, wp, lp)?; 1 }
                     0x02b1 | 0x3001 | 0x02ab => { // SendMessage / GetDispatchParams: user32 dispatches via win_proc_params
                         let Some(w) = self.wm.windows.get(&hwnd) else { return Ok(Some(0)) };

@@ -20,6 +20,36 @@ pub struct Extra {
 }
 
 impl WineProc {
+    /// SendMessageA: Windows converts ANSI message strings to Unicode before they reach a Unicode window procedure
+    /// (all the standard controls and dialogs) and converts results back. Application-registered ANSI classes get the raw message.
+    pub(super) fn send_ansi(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) -> Res<u32> {
+        let wide_target = self.wm.windows.get(&hwnd).map_or(true, |w| !self.wm.classes[w.class].ansi);
+        if !wide_target || lp == 0 { return self.send(hwnd, msg, wp, lp); }
+        // string in: lParam points at an ANSI string
+        const SET_TEXT: [u32; 11] = [0x0C, 0x180, 0x181, 0x18F, 0x18C, 0x1A2, 0x143, 0x14A, 0x14C, 0x14D, 0x158];
+        // string out: lParam points at a buffer the control fills
+        let out_max = match msg { 0x0D => Some(wp), 0x189 | 0x148 => Some(1020), _ => None };
+        let tmp = (self.cpu.r[ESP].wrapping_sub(0x4000)) & !15;
+        if SET_TEXT.contains(&msg) || msg == 0xC2 {
+            let mut n = 0u32;
+            while n < 1020 { let b = self.mem.r8(lp + n).unwrap_or(0); if b == 0 { break; } self.mem.w16(tmp + n * 2, b as u16).map_err(|_| "ansi tmp")?; n += 1; }
+            self.mem.w16(tmp + n * 2, 0).map_err(|_| "ansi tmp")?;
+            return self.send(hwnd, msg, wp, tmp);
+        }
+        if let Some(max) = out_max {
+            let cap = if msg == 0x0D { max.clamp(1, 1020) } else { 1020 };
+            self.mem.w16(tmp, 0).map_err(|_| "ansi tmp")?;
+            let r = self.send(hwnd, msg, if msg == 0x0D { cap } else { wp }, tmp)?;
+            if r == u32::MAX { return Ok(r); }
+            let limit = if msg == 0x0D { max.saturating_sub(1) } else { 1020 };
+            let mut n = 0u32;
+            while n < limit { let w = self.mem.r16(tmp + n * 2).unwrap_or(0); if w == 0 { break; } self.mem.w8(lp + n, if w < 256 { w as u8 } else { b'?' }).map_err(|_| "ansi out")?; n += 1; }
+            if max > 0 { self.mem.w8(lp + n, 0).map_err(|_| "ansi out")?; }
+            return Ok(if msg == 0x0D { n } else { r });
+        }
+        self.send(hwnd, msg, wp, lp)
+    }
+
     fn rgn_rect(&self, h: u32) -> Option<Rect> { match self.wm.gdi.get(&h) { Some(Gdi::Region(r)) => Some(*r), _ => None } }
 
     fn wide_key(&self, p: u32) -> Res<String> {
