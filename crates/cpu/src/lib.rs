@@ -461,6 +461,9 @@ impl Cpu {
             }
             0xA4..=0xA7 | 0xAA..=0xAF => {
                 let w = if op & 1 == 0 { 8 } else { vw };
+                if rep != 0 && matches!(op, 0xA4 | 0xA5 | 0xAA | 0xAB) && (self.r[ECX] as u64) * (w as u64 / 8) > 0x1000_0000 {
+                    return Err(Exit::Fault(self.r[EDI])); // a >256MB string op is a bug in the guest; fault instead of grinding through it
+                }
                 if rep == 0 { self.strop(m, op, w)?; } else {
                     while self.r[ECX] != 0 {
                         let cmp = self.strop(m, op, w)?;

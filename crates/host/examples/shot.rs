@@ -4,6 +4,7 @@ const APP: &str = r"c:pp.exe";
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut p = WineProc::new();
+    p.lenient = true;
     p.load_dir("wine/out");
     p.files.insert(APP.into(), std::fs::read(&a[1]).unwrap());
     p.boot(APP).unwrap();

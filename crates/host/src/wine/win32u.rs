@@ -194,6 +194,17 @@ impl WineProc {
         while !self.guest_returned {
             if let Err(e) = self.pump() { self.cb_depth -= 1; return Err(e); }
             if self.exit.is_some() { self.cb_depth -= 1; return Err("process exited inside window procedure".into()); }
+            if self.need_file.is_some() && !self.guest_returned {
+                // a lazy file request raised inside a callback: unwind and let the shell supply it, then the callback resumes
+                self.cb_depth -= 1;
+                self.orphans.push(saved);
+                return Err(super::YIELD.into());
+            }
+            if std::mem::take(&mut self.blocked) && !self.guest_returned {
+                // a wait inside a callback: let guest time pass; if nothing can ever wake it, hand control to the shell
+                self.no_progress += 1;
+                if let super::threads::Stuck::Idle = self.on_stuck() { self.idle = true; self.parked = true; }
+            }
             if self.idle && self.parked && !self.guest_returned {
                 // the callback started a modal loop and now waits for input: unwind the Rust frames but keep the
                 // guest mid-callback. When the procedure finally returns, the original syscall completes with its result.
@@ -443,6 +454,20 @@ impl WineProc {
                 self.fill_client(hwnd, cr, c);
                 1
             }
+            0x132..=0x138 => {
+                // WM_CTLCOLOR*: set the DC's text / background colours and return the matching system brush
+                let editlike = matches!(msg, 0x133 | 0x134);
+                let (bk_idx, bg) = if editlike { (5u32, sys_color(5)) } else { (15, sys_color(15)) };
+                let at = self.r32(self.gdi_table + (wp & 0xffff) * 24 + 16).unwrap_or(0);
+                if at != 0 {
+                    let tc = argb_to_colorref(sys_color(8));
+                    let _ = self.mem.w32(at + 24, tc);
+                    let _ = self.mem.w32(at + 12, argb_to_colorref(bg));
+                    let _ = self.mem.w16(at + 50, 2);
+                }
+                let h = match self.wm.extra.brush_cache.get(&bk_idx) { Some(h) => *h, None => { let h = self.gdi_alloc(0x100000 | 0x80_0000, Gdi::Brush(bg)); self.wm.extra.brush_cache.insert(bk_idx, h); h } };
+                h
+            }
             WM_NCHITTEST => 1,
             WM_NCCREATE => 1,
             0x0C => { // WM_SETTEXT (wide)
@@ -466,7 +491,7 @@ impl WineProc {
                 for (i, p) in procs.iter_mut().enumerate() { *p = self.r32(a[1] + i as u32 * 4)?; }
                 self.wm.client_procs_w = procs;
                 // win32u registers the built-in control classes with user32's window procedures
-                for (name, idx) in [("Button", 0), ("ComboBox", 1), ("#32770", 3), ("Edit", 4), ("ListBox", 5), ("MDIClient", 6), ("ScrollBar", 7), ("Static", 8), ("IME", 9)] {
+                for (name, idx) in [("Button", 0), ("ComboBox", 1), ("#32770", 3), ("Edit", 4), ("ListBox", 5), ("MDIClient", 6), ("ScrollBar", 7), ("Static", 8), ("IME", 9), ("ComboLBox", 5), ("Message", 13), ("#32768", 12), ("SysShadow", 10)] {
                     let atom = if name == "#32770" { 0x8002 } else { 0xC001 + self.wm.classes.len() as u32 };
                     self.wm.classes.push(Class { atom, name: name.into(), wndproc: procs[idx], bg: 0, raw: [48, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0], ansi: false });
                 }
@@ -601,11 +626,12 @@ impl WineProc {
                     0x02b7 | 0x02b8 => { self.send(hwnd, msg, wp, lp)?; 1 }
                     0x02b1 | 0x3001 | 0x02ab => { // SendMessage / GetDispatchParams: user32 dispatches via win_proc_params
                         let Some(w) = self.wm.windows.get(&hwnd) else { return Ok(Some(0)) };
-                        let (func, class_ansi) = (self.wm.classes[w.class].wndproc, self.wm.classes[w.class].ansi);
+                        let (mut func, class_ansi) = (if w.proc_override != 0 { w.proc_override } else { self.wm.classes[w.class].wndproc }, self.wm.classes[w.class].ansi);
+                        if ty == 0x02ab && a[4] != 0 { let given = self.r32(a[4])?; if given != 0 { func = given; } } // CallWindowProc: the caller names the procedure
                         if a[4] != 0 {
                             let v = [func, hwnd, msg, wp, lp, a[6], class_ansi as u32, 0, 0x8000_0010, func, func];
                             for (i, x) in v.iter().enumerate() { self.w32(a[4] + i as u32 * 4, *x)?; }
-                            if ty == 0x3001 { 1 } else { 0 }
+                            if ty == 0x3001 || ty == 0x02ab { 1 } else { 0 }
                         } else { self.send(hwnd, msg, wp, lp)? }
                     }
                     _ => return Err(format!("NtUserMessageCall type {:#x}", ty)),
@@ -891,6 +917,16 @@ impl WineProc {
         let mut out = Vec::with_capacity(px.len() * 4);
         for p in px { out.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8, 0xFF]); }
         out
+    }
+
+    /// Debug: all top-level windows (handle:class:visible:rect).
+    pub fn debug_windows(&self) -> String {
+        self.wm.windows.iter().filter(|(h, w)| **h != DESKTOP && w.surface.is_some()).map(|(h, w)| format!("{:#x}:{}:{}:{:?}", h, self.wm.classes[w.class].name, w.visible, w.rect)).collect::<Vec<_>>().join(" ")
+    }
+
+    /// Debug: windows that still have an invalid region (class, style, visible).
+    pub fn debug_invalid(&self) -> String {
+        self.wm.windows.iter().filter(|(_, w)| w.invalid.is_some()).map(|(h, w)| format!("{:#x}:{}:{:#x}:{}", h, self.wm.classes[w.class].name, w.style, w.visible)).collect::<Vec<_>>().join(" ")
     }
 
     pub(crate) fn threads_len(&self) -> usize { self.threads.len() }

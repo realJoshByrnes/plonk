@@ -16,6 +16,7 @@ pub struct Extra {
     pub cursor_show: i32,
     pub mouse: (i32, i32),
     pub hook_next: u32,
+    pub brush_cache: BTreeMap<u32, u32>,
 }
 
 impl WineProc {
@@ -351,6 +352,7 @@ impl WineProc {
                 }
             }
             // ---- regions ----
+            "NtGdiSetRectRgn" => { self.wm.gdi.insert(a[0], Gdi::Region([a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32])); 1 }
             "NtGdiCreateRoundRectRgn" => self.gdi_alloc(0x040000, Gdi::Region([a[0] as i32, a[1] as i32, a[2] as i32, a[3] as i32])),
             "NtGdiExtCreateRegion" => {
                 let n = self.r32(a[2] + 8)?;

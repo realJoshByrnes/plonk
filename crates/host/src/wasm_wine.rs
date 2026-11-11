@@ -124,3 +124,10 @@ static ALLOC: lol_alloc::AssumeSingleThreaded<lol_alloc::FreeListAllocator> =
 pub unsafe extern "C" fn plonk_wine_add_remote(name: *const u8, len: u32) {
     wine().remote.insert(String::from_utf8_lossy(bytes(name, len)).to_ascii_lowercase());
 }
+
+/// Debug: top-level windows and pending invalid regions as text (see plonk_wine_msg_*).
+#[no_mangle]
+pub extern "C" fn plonk_wine_debug() {
+    let w = wine();
+    unsafe { MSG = format!("windows: {} | invalid: {} | stubbed: {}", w.debug_windows(), w.debug_invalid(), w.stubbed.join(" ")); }
+}

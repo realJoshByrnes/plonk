@@ -431,9 +431,9 @@ impl WineProc {
                 let (mut acc, mut fit) = (0.0f32, 0u32);
                 let max = a[3] as i32;
                 let (asc, desc) = plonk_fonts::with(|f| { let v = f.vmetrics(px, bold); (v.ascent.ceil(), v.descent.ceil()) });
-                for (i, _) in text.chars().enumerate() {
-                    let pre: String = text.chars().take(i + 1).collect();
-                    acc = plonk_fonts::with(|f| f.text_width(&pre, px, bold));
+                for (i, ch) in text.chars().enumerate() {
+                    // integer per-character advances (no kerning) so extents match what ExtTextOut draws
+                    acc += plonk_fonts::with(|f| f.advance(ch, px, bold)).round();
                     if a[5] != 0 { self.w32(a[5] + i as u32 * 4, acc.round() as u32)?; }
                     if max < 0 || acc.round() as i32 <= max { fit = i as u32 + 1; }
                 }
@@ -450,10 +450,10 @@ impl WineProc {
                 let (px, bold) = self.dc_font(hdc);
                 let (asc, desc, widths): (i32, i32, Vec<f32>) = plonk_fonts::with(|f| {
                     let v = f.vmetrics(px, bold);
-                    let ws = text.chars().map(|c| f.advance(c, px, bold)).collect();
+                    let ws = text.chars().map(|c| f.advance(c, px, bold).round()).collect();
                     (v.ascent.ceil() as i32, v.descent.ceil() as i32, ws)
                 });
-                let adv: Vec<f32> = (0..text.chars().count()).map(|i| if dx_p != 0 { self.r32(dx_p + i as u32 * 4).unwrap_or(0) as i32 as f32 } else { widths[i] }).collect();
+                let adv: Vec<f32> = (0..text.chars().count()).map(|i| if dx_p != 0 { self.r32(dx_p + i as u32 * if opts & 0x2000 != 0 { 8 } else { 4 }).unwrap_or(0) as i32 as f32 } else { widths[i] }).collect();
                 let total: f32 = adv.iter().sum();
                 let at = self.r32(self.gdi_table + (hdc & 0xffff) * 24 + 16).unwrap_or(0);
                 let (align, bkmode, bk, tc) = if at != 0 {

@@ -97,6 +97,13 @@ try {
   s = await waitStatus(/exited|error/);
   await check("menu File>Quit -> exit code 12", /exited with code 12/.test(s), s);
 
+  await open("rust_controls.exe");
+  s = await waitStatus(/running|exited|error/, 60000);
+  await sleep(1500);
+  s = await status();
+  await check("rust controls app runs (lazy comctl32/vcruntime)", /running/.test(s), s);
+  await shot("rust");
+
   await open("gui_two.exe");
   await click(60, 50);
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: origin.x + 60, y: origin.y + 50, button: "left", clickCount: 1 });

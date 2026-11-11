@@ -30,6 +30,7 @@ const enc = new TextEncoder();
 let x, wasm;
 const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
 
+import { peImports } from "/web/pe_imports.mjs";
 const T = (window.plonkT = []); const mark = (n) => T.push(n + "=" + Math.round(performance.now()));
 async function loadAppList() {
   const manifest = await (await fetch("/manifest.json")).json();
@@ -64,6 +65,19 @@ async function boot(app) {
     add(name, u8.subarray(o, o + dl)); o += dl;
   }
   add("c:\\app.exe", new Uint8Array(exe));
+  // prefetch the app's DLL dependency closure so nothing has to be fetched in the middle of a window procedure
+  const man = await (await fetch("/manifest.json")).json(), deps = await (await fetch("/deps.json")).json();
+  const have = new Set(man.core), want = [], seen = new Set();
+  const queue = peImports(new Uint8Array(exe));
+  while (queue.length) {
+    const n = queue.pop();
+    if (seen.has(n)) continue;
+    seen.add(n);
+    if (!have.has(n) && man.remote.includes(n)) want.push(n);
+    for (const d of deps[n] ?? []) queue.push(d);
+  }
+  if (want.length) log("downloading " + want.join(", ") + "...");
+  await Promise.all(want.map(async (n) => add("c:\\windows\\system32\\" + n, new Uint8Array(await (await fetch("/file/" + n)).arrayBuffer()))));
   for (const r of (await (await fetch("/manifest.json")).json()).remote) { const n = enc.encode(r); x.plonk_wine_add_remote(put(n), n.length); }
   const path = enc.encode("c:\\app.exe");
   if (x.plonk_wine_boot(put(path), path.length) !== 0) return log("boot failed: " + msg());

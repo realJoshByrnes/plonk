@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { createReadStream, readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { gzipSync } from "node:zlib";
+import { peImports } from "./pe_imports.mjs";
 const root = new URL("../", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".json": "application/json", ".exe": "application/octet-stream" };
 // Always-needed set shipped in the first download; everything else is fetched on demand via /file/<name>.
@@ -10,7 +11,7 @@ const CORE = ["apisetschema.dll", "ntdll.dll", "kernelbase.dll", "kernel32.dll",
 let pack = null;
 function buildPack() {
   const out = readdirSync(join(root, "wine/out")).filter((f) => CORE.includes(f)).map((f) => [`c:\\windows\\system32\\${f}`, join(root, "wine/out", f)])
-    .concat(["locale.nls", "l_intl.nls"].map((f) => [`nls\\${f}`, join(root, "wine/out/nls", f)]));
+    .concat(["locale.nls", "l_intl.nls", "sortdefault.nls", "normnfc.nls", "normnfd.nls", "normnfkc.nls", "normnfkd.nls", "normidna.nls", "c_1252.nls", "c_437.nls", "c_20127.nls"].map((f) => [`nls\\${f}`, join(root, "wine/out/nls", f)]));
   const parts = [];
   for (const [name, path] of out) {
     const n = Buffer.from(name), d = readFileSync(path), h = Buffer.alloc(4);
@@ -31,10 +32,25 @@ createServer((req, res) => {
     res.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": "gzip", etag: pack.etag, "cache-control": "no-cache", "content-length": pack.gz.length });
     return res.end(pack.gz);
   }
+  if (url === "/deps.json") { // dll -> DLLs it imports (incl. delay-load), for prefetching
+    const out = join(root, "wine/out"), deps = {};
+    const all = readdirSync(out).filter((f) => f.endsWith(".dll"));
+    for (const f of all) {
+      const data = readFileSync(join(out, f));
+      const d = new Set(peImports(new Uint8Array(data)));
+      if (!CORE.includes(f)) { // run-time LoadLibrary targets: another DLL's name appearing as a string literal
+        for (const o of all) if (o !== f && !CORE.includes(o) && (data.indexOf(o, 0, "latin1") >= 0 || data.indexOf(Buffer.from(o, "utf16le")) >= 0)) d.add(o);
+      }
+      deps[f] = [...d];
+    }
+    res.setHeader("content-type", "application/json");
+    return res.end(JSON.stringify(deps));
+  }
   if (url === "/manifest.json") {
     res.setHeader("content-type", "application/json");
     const out = join(root, "wine/out");
     return res.end(JSON.stringify({
+      core: CORE,
       apps: readdirSync(join(root, "tests/guests")).filter((f) => f.endsWith(".exe")),
       remote: readdirSync(out).filter((f) => /\.(dll|msstyles)$/.test(f) && !CORE.includes(f)).concat(readdirSync(join(out, "nls"))),
     }));

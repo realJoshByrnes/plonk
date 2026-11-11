@@ -74,6 +74,8 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    /// Instructions per slice (tunable for debugging).
+    pub slice: u64,
     threads: Vec<threads::Thread>,
     cur: usize,
     cur_deadline: Option<u64>,
@@ -125,7 +127,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), threads: Vec::new(), cur: 0, cur_deadline: None, blocked: false, no_progress: 0, keyed: Default::default(), rtl_user_thread_start: 0, ldr_initialize_thunk: 0, ktimers: Vec::new(), exc_depth: 0, ki_user_exception: 0, cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), slice: STEP_SLICE, threads: Vec::new(), cur: 0, cur_deadline: None, blocked: false, no_progress: 0, keyed: Default::default(), rtl_user_thread_start: 0, ldr_initialize_thunk: 0, ktimers: Vec::new(), exc_depth: 0, ki_user_exception: 0, cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p.mem.set_guard(0x10000);
@@ -513,7 +515,7 @@ impl WineProc {
                 if let Err(e) = self.cpu.step(&mut self.mem) { break e; }
             }
         } else {
-            self.cpu.run(&mut self.mem, if self.threads.len() > 1 { 300_000 } else { STEP_SLICE })
+            self.cpu.run(&mut self.mem, if self.threads.len() > 1 { 300_000 } else { self.slice })
         };
         match exit {
             Exit::Thunk(SYSCALL_THUNK) => self.syscall(),
