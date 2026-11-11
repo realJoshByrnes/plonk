@@ -1,6 +1,7 @@
 //! i386 interpreter core. 32-bit protected-mode flat model (+ FS/GS bases). No FPU/SSE yet.
 use plonk_mem::{Fault, Mem};
 
+mod fast;
 mod fpu;
 mod sse;
 
@@ -66,6 +67,9 @@ pub struct Cpu {
     pub mxcsr: u32,
     seg: u32,
     ow: u32,
+    cache: fast::CacheSlot,
+    pending: Option<Exit>,
+    nsteps: u64,
 }
 
 type R<T> = Result<T, Exit>;
@@ -78,7 +82,8 @@ fn sx(v: u32, w: u32) -> i64 {
 impl Cpu {
     pub fn new() -> Self { Cpu { eflags: 0x202, ow: 32, fcw: 0x37F, mxcsr: 0x1F80, ..Default::default() } }
 
-    pub fn run(&mut self, mem: &mut Mem, max_steps: u64) -> Exit {
+    /// Reference interpreter loop (one `step` per instruction); `run` is the cached fast path.
+    pub fn run_slow(&mut self, mem: &mut Mem, max_steps: u64) -> Exit {
         for i in 0..max_steps {
             if let Err(e) = self.step(mem) { self.retired += i; return e; }
         }
@@ -318,6 +323,7 @@ impl Cpu {
         Ok(cmp)
     }
 
+    #[inline(never)]
     pub fn step(&mut self, m: &mut Mem) -> R<()> {
         let start = self.eip;
         self.insn_start = start;
@@ -497,6 +503,7 @@ impl Cpu {
             0xC9 => { self.r[ESP] = self.r[EBP]; self.r[EBP] = self.pop(m)?; }
             0xCC => return Err(Exit::Interrupt(3)),
             0xCD => { let n = self.f8(m)?; return Err(Exit::Interrupt(n)); }
+            0xD7 => { let a = self.r[EBX].wrapping_add(self.reg8(0)).wrapping_add(self.seg); let v = m.r8(a)? as u32; self.set_reg8(0, v); }
             0xD8..=0xDF => self.fpu(m, op, start)?,
             0xE0..=0xE3 => {
                 let d = self.f8(m)? as i8 as i32 as u32;

@@ -22,6 +22,8 @@ fn snippets() {
             .mem_init(&[(0x2008, &[0x78, 0x56, 0x34, 0x12])]),
         Case::new("mov eax,[ebx+ecx*4]", &[0x8B, 0x04, 0x8B], &[(EBX, 0x2000), (ECX, 2)], &[(EAX, 0x12345678)])
             .mem_init(&[(0x2008, &[0x78, 0x56, 0x34, 0x12])]),
+        Case::new("xlat", &[0xD7], &[(EBX, 0x2000), (EAX, 0xAABB_CC03)], &[(EAX, 0xAABB_CC5A)])
+            .mem_init(&[(0x2003, &[0x5A])]),
         Case::new("lea", &[0x8D, 0x04, 0x8B], &[(EBX, 0x2000), (ECX, 2)], &[(EAX, 0x2008)]),
         Case::new("loop jnz", &[0x83, 0xC0, 0x02, 0x49, 0x75, 0xFA], &[(ECX, 3)], &[(EAX, 6), (ECX, 0)]),
         Case::new("call/ret", &[0xE8, 1, 0, 0, 0, 0xF4, 0xB8, 7, 0, 0, 0, 0xC3], &[], &[(EAX, 7), (ESP, STACK)]),

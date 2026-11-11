@@ -30,6 +30,8 @@ fn steps(name: &str, code: &[u8], n: u64) {
 }
 
 fn main() {
+    { let mut v = vec![0x90u8; 60]; v.extend_from_slice(&[0xEB, 0xC2]); steps("60 nops; jmp", &v, 60_000_000); }
+    { let mut v = Vec::new(); for _ in 0..30 { v.extend_from_slice(&[0x89, 0xD8]); } v.extend_from_slice(&[0xEB, 0xC2]); steps("30 mov eax,ebx; jmp", &v, 60_000_000); }
     steps("jmp short self (0xEB 0xFE)", &[0xEB, 0xFE], 50_000_000);
     steps("inc eax; jmp -3", &[0x40, 0xEB, 0xFD], 50_000_000);
     steps("add eax,ebx; jmp", &[0x01, 0xD8, 0xEB, 0xFC], 50_000_000);
@@ -40,7 +42,7 @@ fn main() {
     // add eax,ebx ; dec ecx ; jnz -5
     run("alu reg (add/dec/jnz)", &[0x01, 0xD8, 0x49, 0x75, 0xFB, 0xF4], 30_000_000, 3);
     // mov eax,[esi] ; add eax,1 ; mov [esi],eax ; dec ecx ; jnz
-    run("mem load/add/store", &[0x8B, 0x06, 0x83, 0xC0, 0x01, 0x89, 0x06, 0x49, 0x75, 0xF5, 0xF4], 20_000_000, 5);
+    run("mem load/add/store", &[0x8B, 0x06, 0x83, 0xC0, 0x01, 0x89, 0x06, 0x49, 0x75, 0xF6, 0xF4], 20_000_000, 5);
     // push eax ; pop eax ; dec ecx ; jnz
     run("push/pop", &[0x50, 0x58, 0x49, 0x75, 0xFB, 0xF4], 30_000_000, 4);
     // nop x4 ; dec ecx ; jnz

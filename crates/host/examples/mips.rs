@@ -14,5 +14,6 @@ fn main() {
     while st == Ok(RunState::Busy) { st = p.run_until_idle(50_000_000); }
     let dt = t0.elapsed().as_secs_f64();
     let n = p.total_retired() - i0;
+    eprintln!("cache stats (flushes, step-insns, blocks run, blocks built): {:?}", p.cpu.cache_stats());
     println!("{:?}  {} M instructions in {:.2} s = {:.0} MIPS", st, n / 1_000_000, dt, n as f64 / 1e6 / dt);
 }
