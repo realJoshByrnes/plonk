@@ -216,3 +216,7 @@ pub extern "C" fn plonk_wine_set_wallpaper(ptr: *const u8, w: u32, h: u32) {
 /// Set the screen size (the page's available desktop area); call after `plonk_wine_reset` and before booting the program.
 #[no_mangle]
 pub extern "C" fn plonk_wine_set_screen(w: u32, h: u32) { wine().wm.set_screen(w.clamp(320, 8192) as i32, h.clamp(240, 8192) as i32); }
+
+/// Guest instructions retired so far (all threads' CPU state is summed by the host as it switches; this is the running CPU's counter).
+#[no_mangle]
+pub extern "C" fn plonk_wine_retired() -> f64 { wine().total_retired() as f64 }

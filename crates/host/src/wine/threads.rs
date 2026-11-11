@@ -28,6 +28,11 @@ impl WineProc {
         self.cur = 0;
     }
 
+    /// Instructions retired by all threads (the running one lives in `self.cpu`).
+    pub fn total_retired(&self) -> u64 {
+        self.cpu.retired + self.threads.iter().enumerate().filter(|(i, _)| *i != self.cur).map(|(_, t)| t.cpu.retired).sum::<u64>()
+    }
+
     pub(super) fn current_tid(&self) -> u32 { self.threads.get(self.cur).map_or(0x24, |t| t.tid) }
 
     fn ready_count(&self) -> usize { self.threads.iter().filter(|t| !t.done && t.suspend == 0).count() }

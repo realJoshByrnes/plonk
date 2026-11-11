@@ -46,6 +46,8 @@ enum Op { R(usize), M(u32) }
 
 #[derive(Clone, Debug, Default)]
 pub struct Cpu {
+    /// Instructions retired through `run` (benchmarking).
+    pub retired: u64,
     pub r: [u32; 8],
     pub eip: u32,
     pub eflags: u32,
@@ -77,9 +79,10 @@ impl Cpu {
     pub fn new() -> Self { Cpu { eflags: 0x202, ow: 32, fcw: 0x37F, mxcsr: 0x1F80, ..Default::default() } }
 
     pub fn run(&mut self, mem: &mut Mem, max_steps: u64) -> Exit {
-        for _ in 0..max_steps {
-            if let Err(e) = self.step(mem) { return e; }
+        for i in 0..max_steps {
+            if let Err(e) = self.step(mem) { self.retired += i; return e; }
         }
+        self.retired += max_steps;
         Exit::StepLimit
     }
 
