@@ -12,7 +12,7 @@ const shotDir = process.argv[2];
 const PORT = 9333, URL_ = "http://localhost:8080/web/index.html";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const chrome = spawn(CHROME, ["--headless=new", "--disable-gpu", `--remote-debugging-port=${PORT}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "plonk-e2e-"))}`,
+const chrome = spawn(CHROME, ["--headless=new", "--ignore-gpu-blocklist", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--remote-debugging-port=${PORT}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "plonk-e2e-"))}`,
   "--window-size=1100,1000", "--hide-scrollbars", "about:blank"], { stdio: "ignore" });
 let ws, nextId = 1; const pending = new Map(); const consoleErrors = [];
 async function connect() {
@@ -104,6 +104,11 @@ try {
   await check("rust controls app runs (lazy comctl32/vcruntime)", /running/.test(s), s);
   await shot("rust");
 
+  await open("gl_cube.exe");
+  await sleep(6000);
+  const gl = await evalJs("({ kind: window.__glKind || null })");
+  await check("3D cube renders via GPU backend", !!gl.kind, JSON.stringify(gl));
+  await shot("gl");
   await open("gui_two.exe");
   await click(60, 50);
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: origin.x + 60, y: origin.y + 50, button: "left", clickCount: 1 });

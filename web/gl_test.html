@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Plonk GL backend test</title>
+<style>
+  body { background: #1b1d22; color: #d8dce4; font: 13px/1.4 ui-monospace, Consolas, monospace; margin: 16px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  #status { margin-bottom: 12px; }
+  #main { image-rendering: pixelated; width: 640px; height: 480px; border: 1px solid #555; display: block; margin-bottom: 12px; }
+  #thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+  figure { margin: 0; } figcaption { font-size: 11px; opacity: .8; }
+  figure canvas { image-rendering: pixelated; width: 160px; height: 120px; border: 1px solid #444; display: block; }
+</style>
+</head>
+<body>
+<h1>Plonk GL backend test</h1>
+<div id="status">running...</div>
+<canvas id="main" width="160" height="120"></canvas>
+<div id="thumbs"></div>
+<script type="module">
+import { createGLBackend } from "./gl_backend.mjs";
+
+const W = 160, H = 120;
+const q = new URLSearchParams(location.search);
+const T = window.T = { done: false, error: null, kind: null, frames: {}, meta: {}, dump: null };
+
+// ---------------------------------------------------------------- stream builder
+const fb = new Float32Array(1), ub = new Uint32Array(fb.buffer);
+const bits = (x) => { fb[0] = x; return ub[0]; };
+const F = (...xs) => xs.map((x) => ({ f: x }));
+let names = [];
+class B {
+  constructor() { this.w = []; }
+  m(op, ...v) { const a = v.flat().map((x) => (typeof x === "object" ? bits(x.f) : x >>> 0)); this.w.push(op, a.length, ...a); return this; }
+  create() { return this.m(1, W, H); }
+  clearColor(r, g, b, a) { return this.m(4, F(r, g, b, a)); }
+  clear(mask = 0x4100) { return this.m(3, mask); }
+  en(c) { return this.m(6, c); } dis(c) { return this.m(7, c); }
+  mode(m) { return this.m(21, m); }
+  ident() { return this.m(22); }
+  load(mat) { return this.m(23, F(...mat)); }
+  mult(mat) { return this.m(24, F(...mat)); }
+  proj(mat) { return this.mode(0x1701).load(mat).mode(0x1700).ident(); }
+  color(r, g, b, a = 1) { return this.m(30, F(r, g, b, a)); }
+  normal(x, y, z) { return this.m(31, F(x, y, z)); }
+  tc(s, t) { return this.m(32, F(s, t, 0, 1)); }
+  begin(m) { return this.m(27, m); } end() { return this.m(28); }
+  v(x, y, z = 0) { return this.m(29, F(x, y, z, 1)); }
+  quad(x0, y0, x1, y1, z = 0) { return this.begin(7).v(x0, y0, z).v(x1, y0, z).v(x1, y1, z).v(x0, y1, z).end(); }
+  present() { names.push(this.name); return this.m(49, W, H); }
+  blob(op, head, rgba) {
+    const words = Math.ceil(rgba.length / 4), pad = new Uint8Array(words * 4); pad.set(rgba);
+    const u32 = new Uint32Array(pad.buffer);
+    this.w.push(op, head.length + words, ...head, ...u32); return this;
+  }
+  words() { return new Uint32Array(this.w); }
+}
+
+// ---------------------------------------------------------------- matrices (column-major)
+const mmul = (a, b) => { const o = new Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3]; return o; };
+const persp = (fovy, asp, n, f) => { const k = 1 / Math.tan(fovy * Math.PI / 360); return [k / asp, 0, 0, 0, 0, k, 0, 0, 0, 0, (f + n) / (n - f), -1, 0, 0, 2 * f * n / (n - f), 0]; };
+const ortho = (l, r, b, t, n, f) => [2 / (r - l), 0, 0, 0, 0, 2 / (t - b), 0, 0, 0, 0, -2 / (f - n), 0, -(r + l) / (r - l), -(t + b) / (t - b), -(f + n) / (f - n), 1];
+const trans = (x, y, z) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
+const rotX = (d) => { const a = d * Math.PI / 180, c = Math.cos(a), s = Math.sin(a); return [1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]; };
+const rotY = (d) => { const a = d * Math.PI / 180, c = Math.cos(a), s = Math.sin(a); return [c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]; };
+const xform = (m, p) => [0, 1, 2, 3].map((r) => m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r] * (p[3] ?? 1));
+const toPixel = (P, MV, p) => { const c = xform(P, xform(MV, p)); return [(c[0] / c[3] * 0.5 + 0.5) * W, (1 - (c[1] / c[3] * 0.5 + 0.5)) * H]; };
+const ortho2d = ortho(0, W, 0, H, -1, 1);
+
+// ---------------------------------------------------------------- scenes
+const scenes = [];
+const scene = (name, fn, opts = {}) => scenes.push({ name, fn, ...opts });
+
+scene("clear", (b) => { b.clearColor(0.2, 0.4, 0.6, 1).clear(); });
+
+scene("solid", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(ortho2d).en(0xb71);
+  b.color(1, 0, 0).quad(10, 10, 50, 50);
+  b.color(0, 0, 1).quad(110, 10, 150, 50, 0.5);       // nearer
+  b.color(1, 1, 0).quad(130, 10, 158, 50, -0.5);      // farther: hidden where it overlaps the blue one
+  b.en(0xb44);                                        // cull back faces (default CCW front)
+  b.color(0.5, 0.5, 0.5).begin(7).v(10, 60).v(10, 100).v(50, 100).v(50, 60).end();  // clockwise: culled
+  b.color(1, 0, 1).quad(60, 60, 100, 100);            // counter-clockwise: drawn
+});
+
+const texData = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]); // row0: red green / row1: blue white
+scene("tex", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(ortho2d);
+  b.m(41, 7).blob(39, [7, 2, 2], texData);
+  b.blob(40, [7, 1, 0, 1, 1], new Uint8Array([255, 255, 0, 255])); // green texel -> yellow
+  b.m(43, 0x2801, F(0x2600)).m(43, 0x2800, F(0x2600)).m(43, 0x2802, F(0x812f)).m(43, 0x2803, F(0x812f));
+  b.en(0xde1);
+  const cell = (x0, y0, env, col) => {
+    b.m(44, 0x2200, F(env)).color(...col).begin(7);
+    b.tc(0, 0).v(x0, y0).tc(1, 0).v(x0 + 80, y0).tc(1, 1).v(x0 + 80, y0 + 60).tc(0, 1).v(x0, y0 + 60).end();
+  };
+  cell(0, 60, 0x1e01, [1, 1, 1]);       // top-left: REPLACE
+  cell(80, 60, 0x2100, [0.5, 0.5, 0.5]); // top-right: MODULATE
+  cell(0, 0, 0x104, [0, 0, 0.5]);        // bottom-left: ADD
+  cell(80, 0, 0x2101, [1, 1, 1]);        // bottom-right: DECAL
+});
+
+// lit cube with colour material, directional light
+const cubeFaces = [
+  { n: [1, 0, 0], u: [0, 1, 0], v: [0, 0, 1], c: [1, 0, 0] }, { n: [-1, 0, 0], u: [0, 0, 1], v: [0, 1, 0], c: [0, 1, 0] },
+  { n: [0, 1, 0], u: [0, 0, 1], v: [1, 0, 0], c: [0, 0, 1] }, { n: [0, -1, 0], u: [1, 0, 0], v: [0, 0, 1], c: [1, 1, 0] },
+  { n: [0, 0, 1], u: [1, 0, 0], v: [0, 1, 0], c: [0, 1, 1] }, { n: [0, 0, -1], u: [0, 1, 0], v: [1, 0, 0], c: [1, 0, 1] },
+];
+function drawCube(b, textured) {
+  b.begin(7);
+  for (const f of cubeFaces) {
+    b.normal(...f.n).color(...f.c);
+    [[-1, -1, 0, 0], [1, -1, 1, 0], [1, 1, 1, 1], [-1, 1, 0, 1]].forEach(([a, c, s, t]) => {
+      if (textured) b.tc(s, t);
+      b.v(...[0, 1, 2].map((k) => f.n[k] + a * f.u[k] + c * f.v[k]));
+    });
+  }
+  b.end();
+}
+scene("lit", (b) => {
+  const P = persp(45, W / H, 1, 20), R = mmul(rotX(30), rotY(40)), MV = mmul(trans(0, 0, -5), R);
+  b.clearColor(0.1, 0.1, 0.1, 1).clear().proj(P).en(0xb71).en(0xb50).en(0x4000).en(0xb57).m(37, 0x408, 0x1602);
+  b.m(34, 0, 0x1203, F(0, 0, 1, 0));
+  b.load(MV);
+  drawCube(b, false);
+  const faces = [];
+  for (const f of cubeFaces) {
+    const rn = xform(R, [...f.n, 0]);
+    if (rn[2] < 0.2) continue;
+    const [px, py] = toPixel(P, MV, [...f.n, 1]);
+    faces.push({ n: f.n, x: Math.round(px), y: Math.round(py), exp: f.c.map((c) => Math.min(1, c * (0.2 + rn[2])) * 255) });
+  }
+  T.meta.lit = faces;
+});
+
+scene("point", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(persp(60, W / H, 0.5, 50)).en(0xb50).en(0x4000);
+  b.m(34, 0, 0x1203, F(0, 0, 0, 1)).m(34, 0, 0x1208, F(0.5, 0, 0, 0));
+  b.normal(0, 0, 1).color(1, 1, 1).quad(-1, -1, 1, 1, -2);
+  const d = Math.hypot(1, 1, 2), att = 1 / (1 + 0.5 * d);
+  T.meta.point = (0.04 + att * (2 / d) * 0.8) * 255;
+});
+
+scene("fog", (b) => {
+  const P = persp(60, W / H, 0.5, 50);
+  b.clearColor(0, 0, 0, 1).clear().proj(P).en(0xb60);
+  b.m(38, 0xb65, F(0x2601, 0, 0, 0)).m(38, 0xb63, F(1, 0, 0, 0)).m(38, 0xb64, F(10, 0, 0, 0)).m(38, 0xb66, F(0, 0, 1, 1));
+  b.color(1, 0, 0).quad(-1.1, -0.5, -0.1, 0.5, -2).quad(1.8, -1.2, 4.2, 1.2, -8);
+  const I = trans(0, 0, 0);
+  const [nx, ny] = toPixel(P, I, [-0.6, 0, -2]), [fx, fy] = toPixel(P, I, [3, 0, -8]);
+  T.meta.fog = { near: [Math.round(nx), Math.round(ny)], far: [Math.round(fx), Math.round(fy)] };
+});
+
+scene("blend", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(ortho2d);
+  b.color(1, 0, 0).quad(20, 20, 80, 80);
+  b.en(0xbe2).m(12, 0x302, 0x303).color(0, 1, 0, 0.5).quad(50, 50, 110, 110);
+  b.dis(0xbe2).en(0xbc0).m(13, 0x204, F(0.5));
+  b.color(1, 1, 1, 0.3).quad(120, 10, 150, 40);
+  b.color(1, 1, 1, 0.8).quad(120, 60, 150, 90);
+});
+
+scene("scissor", (b) => {
+  b.clearColor(0.1, 0.1, 0.1, 1).clear();
+  b.en(0xc11).m(19, 20, 20, 40, 40).clearColor(1, 1, 0, 1).clear(0x4000).dis(0xc11);
+  b.m(18, 80, 0, 80, 60).color(0, 0, 1).quad(-1, -1, 1, 1);
+});
+
+scene("shade_smooth", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(ortho2d).m(14, 0x1d01);
+  b.begin(4).color(1, 0, 0).v(20, 20).color(0, 1, 0).v(140, 20).color(0, 0, 1).v(80, 100).end();
+});
+scene("shade_flat", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(ortho2d).m(14, 0x1d00);
+  b.begin(4).color(1, 0, 0).v(20, 20).color(0, 1, 0).v(140, 20).color(0, 0, 1).v(80, 100).end();
+});
+
+scene("wire", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(ortho2d).m(15, 0x408, 0x1b01).color(1, 1, 1).quad(20, 20, 140, 100);
+});
+
+scene("prims", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(ortho2d);
+  b.color(1, 0, 0).begin(6).v(30, 30).v(50, 30).v(60, 45).v(50, 60).v(30, 60).v(20, 45).end();            // fan (hexagon) centre ~(40,45)
+  b.color(0, 1, 0).begin(8).v(80, 20).v(80, 70).v(100, 20).v(100, 70).v(120, 20).v(120, 70).end();         // quad strip 80..120
+  b.color(0, 0, 1).begin(9).v(30, 80).v(60, 80).v(70, 100).v(45, 115).v(20, 100).end();                   // pentagon
+  b.color(1, 1, 0).begin(5).v(100, 80).v(100, 110).v(120, 80).v(120, 110).v(140, 80).v(140, 110).end();     // tri strip
+});
+
+// display lists: same content direct / via list / nested list / compile-and-execute / compile only
+const content = (b) => {
+  b.proj(ortho2d).en(0xb71).en(0xb50).en(0x4000).en(0xb57).m(34, 0, 0x1203, F(0.3, 0.5, 1, 0)).normal(0, 0, 1);
+  b.m(25).mult(trans(20, 10, 0)).color(1, 0.2, 0.2).begin(4).v(10, 10).v(60, 10).v(30, 60).end().m(26);
+  b.color(0.2, 1, 0.2).quad(80, 20, 130, 70);
+  b.m(33, 6, 3, 0b010, F(100, 80, 0, 1, 150, 80, 0, 1, 150, 110, 0, 1), F(1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1));
+};
+const dlScene = (name, wrap) => scene(name, (b) => { b.clearColor(0, 0, 0, 1).clear(); wrap(b); });
+dlScene("dl_direct", (b) => content(b));
+dlScene("dl_list", (b) => { b.m(45, 1, 0x1300); content(b); b.m(46).clear().m(47, 1); });
+dlScene("dl_nested", (b) => { b.m(45, 1, 0x1300); content(b); b.m(46).m(45, 2, 0x1300).m(47, 1).m(46).m(45, 3, 0x1300).m(47, 2).m(46).clear().m(47, 3); });
+dlScene("dl_ce", (b) => { b.m(45, 1, 0x1301); content(b); b.m(46); });
+dlScene("dl_compile", (b) => { b.m(45, 1, 0x1300); content(b); b.m(46); });
+
+// DRAW vs immediate, and message-by-message execution
+const strip = [[20, 20, 1, 0, 0], [20, 100, 0, 1, 0], [80, 20, 0, 0, 1], [80, 100, 1, 1, 0], [140, 20, 1, 0, 1], [140, 100, 0, 1, 1]];
+scene("imm_strip", (b) => { b.clearColor(0, 0, 0, 1).clear().proj(ortho2d).begin(5); for (const [x, y, r, g, bl] of strip) b.color(r, g, bl).v(x, y); b.end(); });
+scene("draw_strip", (b) => {
+  b.clearColor(0, 0, 0, 1).clear().proj(ortho2d);
+  b.m(33, 5, strip.length, 2, strip.flatMap(([x, y]) => F(x, y, 0, 1)), strip.flatMap(([, , r, g, bl]) => F(r, g, bl, 1)));
+});
+scene("split_strip", (b) => { b.clearColor(0, 0, 0, 1).clear().proj(ortho2d).begin(5); for (const [x, y, r, g, bl] of strip) b.color(r, g, bl).v(x, y); b.end(); }, { split: true });
+
+// the showy final frames: textured + lit + fogged rotating cube in a display list, DRAW ground, blended quad
+const checker = new Uint8Array(16 * 16 * 4);
+for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) { const k = ((x >> 2) + (y >> 2)) & 1, o = (y * 16 + x) * 4; checker.set(k ? [250, 250, 250, 255] : [40, 60, 200, 255], o); }
+for (let i = 0; i < 4; i++) scene("demo" + i, (b) => {
+  const P = persp(50, W / H, 1, 30), MV = mmul(trans(0, -0.2, -5), mmul(rotX(25), rotY(20 + i * 30)));
+  b.clearColor(0.05, 0.07, 0.12, 1).clear().proj(P).en(0xb71);
+  b.m(41, 3).blob(39, [3, 16, 16], checker).m(43, 0x2801, F(0x2703)).m(43, 0x2800, F(0x2601)).m(43, 0x2802, F(0x2901)).m(43, 0x2803, F(0x2901)).en(0xde1);
+  b.en(0xb60).m(38, 0xb65, F(0x801, 0, 0, 0)).m(38, 0xb62, F(0.07, 0, 0, 0)).m(38, 0xb66, F(0.05, 0.07, 0.12, 1));
+  b.en(0xb50).en(0x4000).en(0xb57).m(34, 0, 0x1203, F(0.5, 1, 1, 0)).m(34, 0, 0x1200, F(0.2, 0.2, 0.2, 1)).m(44, 0x2200, F(0x2100));
+  b.m(45, 9, 0x1300).m(44, 0x2200, F(0x2100)).en(0xb50); drawCube(b, true); b.m(46);
+  b.load(MV).m(47, 9);
+  // ground via DRAW (positions + normals + texcoords)
+  b.ident().mult(trans(0, -2.2, -6)).m(44, 0x2200, F(0x2100)).color(1, 1, 1);
+  const g = [[-6, 0, 6, 0, 0], [6, 0, 6, 3, 0], [6, 0, -6, 3, 3], [-6, 0, -6, 0, 3]];
+  const tri = [0, 1, 2, 0, 2, 3].map((k) => g[k]);
+  b.m(33, 4, 6, 1 | 4, tri.flatMap(([x, y, z]) => F(x, y, z, 1)), tri.flatMap(() => F(0, 1, 0)), tri.flatMap(([, , , s, t]) => F(s, t)));
+  // translucent overlay
+  b.dis(0xde1).dis(0xb50).dis(0xb60).dis(0xb71).en(0xbe2).m(12, 0x302, 0x303).proj(ortho2d).color(1, 0.6, 0, 0.45).quad(10, 10, 60, 40);
+});
+
+// ---------------------------------------------------------------- run
+const b64 = (u8) => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+function splitMsgs(w) { const out = []; for (let i = 0; i < w.length;) { const n = 2 + w[i + 1]; out.push(w.subarray(i, i + n)); i += n; } return out; }
+
+try {
+  const gl = await createGLBackend({ prefer: q.get("prefer") || "webgpu" });
+  T.kind = gl.kind;
+  let got = 0;
+  gl.onPresent = (w, h, rgba) => { T.frames[names[got++]] = { w, h, data: rgba }; };
+  for (const s of scenes) {
+    const b = new B(); b.name = s.name;
+    b.create(); s.fn(b); b.present();
+    const words = b.words();
+    if (s.split) for (const m of splitMsgs(words)) gl.execute(m); else gl.execute(words);
+  }
+  for (let i = 0; i < 300 && got < names.length; i++) await new Promise((r) => setTimeout(r, 50));
+  if (got < names.length) throw new Error(`only ${got}/${names.length} frames presented`);
+  const thumbs = document.getElementById("thumbs");
+  for (const n of names) {
+    const f = T.frames[n];
+    const c = document.createElement("canvas"); c.width = f.w; c.height = f.h;
+    c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(f.data.buffer.slice(0)), f.w, f.h), 0, 0);
+    const fig = document.createElement("figure"); fig.append(c); const cap = document.createElement("figcaption"); cap.textContent = n; fig.append(cap); thumbs.append(fig);
+  }
+  const last = T.frames["demo3"], main = document.getElementById("main");
+  main.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(last.data.buffer.slice(0)), last.w, last.h), 0, 0);
+  T.dump = () => Object.fromEntries(Object.entries(T.frames).map(([k, v]) => [k, { w: v.w, h: v.h, b64: b64(v.data) }]));
+  document.getElementById("status").textContent = `backend: ${gl.kind}, ${names.length} frames presented`;
+} catch (e) {
+  T.error = String(e?.stack ?? e);
+  document.getElementById("status").textContent = "ERROR: " + T.error;
+}
+T.done = true;
+</script>
+</body>
+</html>
