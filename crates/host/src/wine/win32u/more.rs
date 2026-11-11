@@ -158,6 +158,9 @@ impl WineProc {
                 self.wm.gdi.insert(a[1], Gdi::Region(inv.unwrap_or([0; 4])));
                 if inv.is_some() { 2 } else { 1 }
             }
+            "NtUserInvalidateRgn" => { self.invalidate(a[0], a[2] != 0); 1 }
+            "NtUserGetDoubleClickTime" => 500,
+            "NtUserNotifyWinEvent" | "NtUserSetWinEventHook" | "NtUserUnhookWinEvent" => 0,
             "NtUserValidateRect" | "NtUserValidateRgn" => { if let Some(w) = self.wm.windows.get_mut(&a[0]) { w.invalid = None; } 1 }
             "NtUserUpdateWindow" => { if self.wm.windows.get(&a[0]).is_some_and(|w| w.invalid.is_some()) { self.send(a[0], WM_PAINT, 0, 0)?; } 1 }
             "NtUserSetActiveWindow" => {

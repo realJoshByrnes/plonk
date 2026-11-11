@@ -157,7 +157,7 @@ unsafe fn build(hwnd: HWND, inst: HINSTANCE) {
     mk(hwnd, inst, "STATIC", "Up-down:", SS_LEFT, 244, 282, 56, 16, 0);
     let ed = mk(hwnd, inst, "EDIT", "5", WS_BORDER | ES_AUTOHSCROLL, 304, 278, 60, 22, ID_SPINEDIT);
     let ud = mk(hwnd, inst, "msctls_updown32", "", UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_ARROWKEYS, 0, 0, 0, 0, ID_SPIN);
-    let _ = ed;
+    SendMessageW(ud, WM_USER + 105, ed as usize, 0); // UDM_SETBUDDY: snaps the arrows to the edit's right edge
     SendMessageW(ud, UDM_SETRANGE32, 0, 20);
     SendMessageW(ud, UDM_SETPOS32, 0, 5);
     mk(hwnd, inst, "SCROLLBAR", "", SBS_HORZ, 244, 306, 170, 16, ID_HSCROLL);
