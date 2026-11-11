@@ -251,7 +251,7 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
 /// Anti-aliased coverage of a rounded rectangle at pixel (x, y).
 fn corner_cov(x: i32, y: i32, w: i32, h: i32, r: i32) -> f32 {
     let (px, py, r) = (x as f32 + 0.5, y as f32 + 0.5, r as f32);
-    let (cx, cy) = (px.clamp(r, w as f32 - r), py.clamp(r, h as f32 - r));
+    let (cx, cy) = (px.clamp(r, (w as f32 - r).max(r)), py.clamp(r, (h as f32 - r).max(r)));
     let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - r;
     (0.5 - d).clamp(0.0, 1.0)
 }
@@ -267,7 +267,7 @@ fn draw_shadow(out: &mut [u32], w: u32, h: u32, s: &Surface) {
         for dx in (s.x - sh).max(0)..(s.x + s.w as i32 + sh).min(w as i32) {
             if inner && dx as f32 >= s.x as f32 + r && (dx as f32) <= (s.x + s.w as i32) as f32 - r { continue; }
             let (px, py) = ((dx - s.x) as f32 + 0.5, (dy - s.y - off) as f32 + 0.5);
-            let (cx, cy) = (px.clamp(r, s.w as f32 - r), py.clamp(r, s.h as f32 - r));
+            let (cx, cy) = (px.clamp(r, (s.w as f32 - r).max(r)), py.clamp(r, (s.h as f32 - r).max(r))); // windows smaller than 2r (e.g. zero-height backdrop windows) must not panic
             let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - r;
             if d <= 0.0 { continue; }
             let a = 0.32 * (1.0 - d / sh as f32).clamp(0.0, 1.0).powi(2);

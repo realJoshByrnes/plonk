@@ -141,7 +141,7 @@ impl WineProc {
         for e in rd(dir) {
             let n = e.file_name().to_string_lossy().to_ascii_lowercase();
             if n.ends_with(".msstyles") { self.files.insert(format!("c:\\windows\\resources\\themes\\light\\{n}"), std::fs::read(e.path()).unwrap()); }
-            if n.ends_with(".dll") { self.files.insert(format!("c:\\windows\\system32\\{n}"), std::fs::read(e.path()).unwrap()); }
+            if n.ends_with(".dll") || n.ends_with(".drv") { self.files.insert(format!("c:\\windows\\system32\\{n}"), std::fs::read(e.path()).unwrap()); }
         }
         for e in rd(&format!("{dir}/nls")) {
             self.files.insert(format!("nls\\{}", e.file_name().to_string_lossy()), std::fs::read(e.path()).unwrap());
@@ -158,6 +158,9 @@ impl WineProc {
     }
 
     /// Debug: which loaded image (base, name) contains `addr`.
+    /// Names of the loaded images (debugging aid).
+    pub fn module_names(&self) -> Vec<String> { self.images.iter().map(|(b, n)| format!("{b:#x} {n}")).collect() }
+
     pub fn module_at(&self, addr: u32) -> Option<(u32, &str)> {
         self.images.iter().filter(|(b, _)| *b <= addr).max_by_key(|(b, _)| *b).map(|(b, n)| (*b, n.as_str()))
     }
@@ -604,7 +607,7 @@ impl WineProc {
     fn remote_key(&self, path: &str) -> Option<String> {
         let base = path.rsplit('\\').next()?.to_ascii_lowercase();
         if !self.remote.contains(&base) { return None; }
-        let ok = path.starts_with("nls\\") || (path.starts_with("c:\\windows\\") && (path.ends_with(".dll") || path.ends_with(".msstyles")));
+        let ok = path.starts_with("nls\\") || (path.starts_with("c:\\windows\\") && (path.ends_with(".dll") || path.ends_with(".drv") || path.ends_with(".msstyles")));
         if ok { Some(path.to_string()) } else { None }
     }
 
@@ -648,9 +651,11 @@ impl WineProc {
         let (hlo, code, args) = (self.arg(0), self.arg(2), self.arg(3));
         let module = self.module_at(hlo).map(|(_, n)| n.to_string()).unwrap_or_default();
         self.log(format!("unixcall {module} code={code} args={args:#x}"));
-        let st = if module.ends_with("win32u.dll") && code == 0 { 0 }
+        // code 0 is the unix-lib attach call (win32u, winspool.drv, ...): nothing to set up on our side
+        let st = if hlo != 1 && code == 0 { 0 }
         else if hlo == 1 && code == 3 { self.server_call(args)?; 0 }
         else if hlo == 1 && code == 2 { 0 } // wine_dbg_write
+        else if module.ends_with("winspool.drv") { 0xC000_0002 } // no CUPS: STATUS_NOT_IMPLEMENTED (no printers found)
         else {
             return Err(format!("unimplemented unix call {module} code={code}"));
         };

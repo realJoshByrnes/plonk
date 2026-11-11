@@ -566,7 +566,9 @@ impl WineProc {
                 let Some(ci) = ci else { self.log(format!("  (CreateWindowEx: unknown class {cname:?})")); return Ok(Some(0)); };
                 let title = if a[3] != 0 { match self.class_arg(a[3])? { Err(s) => s, Ok(_) => String::new() } } else { String::new() };
                 let dim = |v: u32, d: i32| if v == CW_USEDEFAULT { d } else { v as i32 };
-                let (x, y, cx, cy) = (dim(a[5], 100), dim(a[6], 100), dim(a[7], 640), dim(a[8], 480));
+                // Windows: with x == CW_USEDEFAULT the y argument is ignored (it is a show command), likewise cy when cx == CW_USEDEFAULT
+                let (x, y) = if a[5] == CW_USEDEFAULT { (100, 100) } else { (dim(a[5], 100), dim(a[6], 100)) };
+                let (cx, cy) = if a[7] == CW_USEDEFAULT { (640, 480) } else { (dim(a[7], 640), dim(a[8], 480)) };
                 #[cfg(not(target_arch = "wasm32"))]
                 if std::env::var("CREATE_LOG").is_ok() { eprintln!("create {cname:?} title={title:?} style={style:#x} parent={:#x} id={:#x}", a[9], a[10]); }
                 let hwnd = self.wm.next_hwnd;

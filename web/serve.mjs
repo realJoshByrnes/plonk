@@ -45,7 +45,7 @@ createServer((req, res) => {
   }
   if (url === "/deps.json") { // dll -> DLLs it imports (incl. delay-load), for prefetching
     const out = join(root, "wine/out"), deps = {};
-    const all = readdirSync(out).filter((f) => f.endsWith(".dll"));
+    const all = readdirSync(out).filter((f) => f.endsWith(".dll") || f.endsWith(".drv"));
     for (const f of all) {
       const data = readFileSync(join(out, f));
       const d = new Set(peImports(new Uint8Array(data)));
@@ -63,7 +63,7 @@ createServer((req, res) => {
     return res.end(JSON.stringify({
       core: CORE,
       apps: readdirSync(join(root, "tests/guests")).filter((f) => f.endsWith(".exe")),
-      remote: readdirSync(out).filter((f) => /\.(dll|msstyles)$/.test(f) && !CORE.includes(f)).concat(readdirSync(join(out, "nls"))),
+      remote: readdirSync(out).filter((f) => /\.(dll|drv|msstyles)$/.test(f) && !CORE.includes(f)).concat(readdirSync(join(out, "nls"))),
     }));
   }
   if (url.startsWith("/file/")) {
