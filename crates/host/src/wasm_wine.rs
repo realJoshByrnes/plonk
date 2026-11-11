@@ -212,3 +212,7 @@ pub extern "C" fn plonk_wine_set_wallpaper(ptr: *const u8, w: u32, h: u32) {
     let _ = b;
     wine().wm.backend.gen += 1;
 }
+
+/// Set the screen size (the page's available desktop area); call after `plonk_wine_reset` and before booting the program.
+#[no_mangle]
+pub extern "C" fn plonk_wine_set_screen(w: u32, h: u32) { wine().wm.set_screen(w.clamp(320, 8192) as i32, h.clamp(240, 8192) as i32); }

@@ -9,7 +9,7 @@ const CHROME = ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Pro
   "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"].find(existsSync);
 if (!CHROME) { console.log("e2e: SKIP (no Chrome/Edge found)"); process.exit(0); }
 const shotDir = process.argv[2];
-const PORT = 9333, URL_ = "http://localhost:8080/web/index.html?nointro";
+const PORT = 9333, URL_ = "http://localhost:8080/web/index.html";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const chrome = spawn(CHROME, ["--headless=new", "--ignore-gpu-blocklist", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--remote-debugging-port=${PORT}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "plonk-e2e-"))}`,
@@ -109,11 +109,11 @@ try {
   const gl = await evalJs("({ kind: window.__glKind || null, perf: window.__perf })");
   console.log("PERF", JSON.stringify(gl), await evalJs("window.__glDirect")); await check("3D cube renders via GPU backend", !!gl.kind, JSON.stringify(gl));
   await shot("gl");
-  await send("Page.navigate", { url: URL_.replace("?nointro", "") });
-  await sleep(9000);
-  const it = await evalJs("window.__intro || null");
-  await check("boot intro plays and sets the wallpaper", it === "played", String(it));
-  await shot("intro");
+  await send("Page.navigate", { url: URL_ });
+  await sleep(1500);
+  for (let i = 0; i < 20 && !(await evalJs("window.__wall === true")); i++) await sleep(250);
+  await check("default wallpaper (vector scene) is drawn", (await evalJs("window.__wall === true")) === true, String(await evalJs("document.title")));
+  await shot("wallpaper");
   await open("gui_two.exe");
   await click(60, 50);
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: origin.x + 60, y: origin.y + 50, button: "left", clickCount: 1 });

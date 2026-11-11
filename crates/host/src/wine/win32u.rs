@@ -75,6 +75,8 @@ enum Gdi { Brush(u32), NullBrush, Pen(u32, bool), Region(Rect), Font, Bitmap, Ot
 struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32, pen: u32, pos: (i32, i32), font: u32, bitmap: u32 }
 
 pub struct Wm {
+    /// Screen size in pixels (set by the page from the available area).
+    pub screen: (i32, i32),
     pub gl: gl::Gl,
     classes: Vec<Class>,
     pub windows: BTreeMap<u32, Window>,
@@ -113,8 +115,15 @@ pub struct Wm {
 impl Wm {
     pub(crate) fn extra_scroll(&self, hwnd: u32, bar: u32) -> [i32; 5] { self.extra.scroll.get(&(hwnd, bar)).copied().unwrap_or([0, 100, 0, 0, 0]) }
 
+    pub fn set_screen(&mut self, w: i32, h: i32) {
+        self.screen = (w, h);
+        if let Some(d) = self.windows.get_mut(&DESKTOP) { d.rect = [0, 0, w, h]; }
+        self.backend.gen += 1;
+    }
+
     pub fn new() -> Self {
         let mut w = Wm {
+            screen: (1024, 768),
             gl: Default::default(),
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
             gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, default_objs: [0; 3], extra: Default::default(), menus: BTreeMap::new(), next_menu: 0x30020, open: None, track_pending: false, track_done: None, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
@@ -147,9 +156,9 @@ fn sys_color(i: u32) -> u32 {
     0xFF00_0000 | T.get(i as usize).copied().unwrap_or(0xF1F3F6)
 }
 /// GetSystemMetrics values (96 dpi) matching the Plonk Glass metrics in docs/DESIGN.md.
-fn system_metric(i: u32) -> u32 {
+fn system_metric(i: u32, screen: (i32, i32)) -> u32 {
     match i {
-        0 | 16 | 61 | 78 | 59 => 1024, 1 | 79 | 60 => 768, 17 | 62 => 728,
+        0 | 16 | 61 | 78 | 59 => screen.0 as u32, 1 | 79 | 60 => screen.1 as u32, 17 | 62 => (screen.1 - 40).max(1) as u32,
         2 | 3 | 9 | 10 | 20 | 21 => 16, 4 => 28, 5 | 6 | 83 | 84 => 1, 7 | 8 => 3, 11 | 12 | 13 | 14 => 32, 15 => 24,
         19 | 75 | 81 | 80 => 1, 28 | 34 => 120, 29 | 35 => 40, 30 => 36, 31 => 22, 32 | 33 => 4, 36 | 37 | 68 | 69 => 4, 38 | 39 => 75,
         43 => 3, 45 | 46 => 2, 47 | 57 => 160, 48 | 58 => 24, 49 | 50 => 16, 51 => 20, 52 => 28, 53 => 20, 54 | 55 => 18, 56 => 8, 63 => 1, 71 | 72 => 13,
@@ -764,14 +773,14 @@ impl WineProc {
                 self.dc_fill(hdc, [x, y, x + w, y + h], c);
                 1
             }
-            "NtGdiGetDeviceCaps" => match a[1] { 8 => 1024, 10 => 768, 12 => 32, 14 => 1, 88 | 90 => 96, 24 => 0xFFFF_FFFF, _ => 0 },
+            "NtGdiGetDeviceCaps" => match a[1] { 8 => self.wm.screen.0 as u32, 10 => self.wm.screen.1 as u32, 12 => 32, 14 => 1, 88 | 90 => 96, 24 => 0xFFFF_FFFF, _ => 0 },
             "NtUserCallNoParam" => match codes::CALL_NO_PARAM.get(a[0] as usize).copied() {
                 Some("GetDesktopWindow") => DESKTOP,
                 Some("ReleaseCapture") => { self.wm.capture = 0; 1 }
                 n => { self.note(format!("NtUserCallNoParam {n:?}")); return Ok(Some(0)); },
             },
             "NtUserCallOneParam" => match codes::CALL_ONE_PARAM.get(a[1] as usize).copied() {
-                Some("GetSystemMetrics") => system_metric(a[0]),
+                Some("GetSystemMetrics") => system_metric(a[0], self.wm.screen),
                 Some("CreateCursorIcon") => { let h = self.wm.next_menu; self.wm.next_menu += 4; h }
                 Some("CreateMenu") => { let h = self.wm.next_menu; self.wm.next_menu += 4; self.wm.menus.insert(h, Menu::default()); h }
                 Some("GetMenuItemCount") => self.menu_count(a[0]),
@@ -1019,7 +1028,7 @@ impl WineProc {
         for (i, v) in [0, 0, cr[2], cr[3]].iter().enumerate() { w(self, 72 + i as u32 * 4, *v as u32); }
         w(self, 88, 10.0f32.to_bits());
         w(self, 108, 1); w(self, 112, 1); w(self, 124, 1); w(self, 128, 1);
-        w(self, 132, 1024); w(self, 136, 768); w(self, 140, 320); w(self, 144, 240);
+        let (sw, sh) = self.wm.screen; w(self, 132, sw as u32); w(self, 136, sh as u32); w(self, 140, 320); w(self, 144, 240);
         w(self, 148, 1252);
         let _ = self.mem.w32(self.gdi_table + (h & 0xffff) * 24 + 16, at);
         self.wm.dcs.insert(h, Dc { hwnd, clip, brush: db, pen: dp, pos: (0, 0), font: df, bitmap: 0 });

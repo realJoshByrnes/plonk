@@ -281,7 +281,7 @@ impl WineProc {
             "NtUserCallOneParam" if matches!(codes::CALL_ONE_PARAM.get(a[1] as usize).copied(), Some("GetCursorPos" | "GetClipCursor" | "GetPrimaryMonitorRect" | "GetVirtualScreenRect" | "MessageBeep" | "RealizePalette" | "ReplyMessage" | "SetKeyboardAutoRepeat" | "EnumClipboardFormats" | "EnableDC" | "EnableThunkLock" | "BeginDeferWindowPos" | "SetProcessDefaultLayout" | "IsWindowRectFullScreen" | "GetIconParam")) => {
                 match codes::CALL_ONE_PARAM[a[1] as usize] {
                     "GetCursorPos" => { let (x, y) = self.wm.extra.mouse; self.w32(a[0], x as u32)?; self.w32(a[0] + 4, y as u32)?; 1 }
-                    "GetClipCursor" | "GetPrimaryMonitorRect" | "GetVirtualScreenRect" => { self.put_rect(a[0], [0, 0, 1024, 768])?; 1 }
+                    "GetClipCursor" | "GetPrimaryMonitorRect" | "GetVirtualScreenRect" => { self.put_rect(a[0], [0, 0, self.wm.screen.0, self.wm.screen.1])?; 1 }
                     "IsWindowRectFullScreen" => 0,
                     _ => 1,
                 }
@@ -290,10 +290,10 @@ impl WineProc {
                 match codes::CALL_TWO_PARAM[a[2] as usize] {
                     "GetMonitorInfo" => { // MONITORINFO: cbSize, rcMonitor, rcWork, dwFlags
                         let sz = self.r32(a[1])?;
-                        self.put_rect(a[1] + 4, [0, 0, 1024, 768])?; self.put_rect(a[1] + 20, [0, 0, 1024, 768])?; self.w32(a[1] + 36, 1)?;
+                        self.put_rect(a[1] + 4, [0, 0, self.wm.screen.0, self.wm.screen.1])?; self.put_rect(a[1] + 20, [0, 0, self.wm.screen.0, self.wm.screen.1])?; self.w32(a[1] + 36, 1)?;
                         let _ = sz; 1
                     }
-                    "GetSystemMetricsForDpi" => system_metric(a[0]),
+                    "GetSystemMetricsForDpi" => system_metric(a[0], self.wm.screen),
                     "MonitorFromRect" => 0x20001,
                     "NtUserAllocWinProc" | "GetDialogProc" => a[0], // window procedure "handle" = the function pointer itself
                     _ => 1,
@@ -442,7 +442,7 @@ impl WineProc {
                         1
                     }
                     0x1F => { self.fill_logfont(ptr, -12, false)?; 1 } // SPI_GETICONTITLELOGFONT
-                    0x30 => { self.put_rect(ptr, [0, 0, 1024, 768])?; 1 } // SPI_GETWORKAREA
+                    0x30 => { self.put_rect(ptr, [0, 0, self.wm.screen.0, self.wm.screen.1])?; 1 } // SPI_GETWORKAREA
                     0x68 => { self.w32(ptr, 3)?; 1 } // wheel scroll lines
                     0x26 | 0x4A | 0x1012 | 0x1042 => { if ptr != 0 { self.w32(ptr, 1)?; } 1 } // drag full windows, font smoothing, ...
                     0x4B | 0x48 => { if ptr != 0 { self.w32(ptr, 0)?; } 1 }

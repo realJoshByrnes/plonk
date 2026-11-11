@@ -98,7 +98,7 @@ void main(){ ivec2 p=ivec2(gl_FragCoord.xy); o=vec4(texelFetch(uSrc,ivec2(p.x,in
 
 const FS_IMG = HEAD + `
 uniform sampler2D uImg;
-void main(){ vec2 uv=vec2(gl_FragCoord.x/uScreen.x, 1.-gl_FragCoord.y/uScreen.y); o=vec4(texture(uImg,uv).rgb,1.); }`;
+void main(){ vec2 uv=gl_FragCoord.xy/uScreen; // internal buffer is top-down (FS_BLIT flips on the way out) o=vec4(texture(uImg,uv).rgb,1.); }`;
 
 export function createGpuCompositor(width, height) {
   let canvas;
