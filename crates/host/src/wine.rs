@@ -262,6 +262,9 @@ impl WineProc {
     fn map_image_data(&mut self, path: &str, data: &[u8]) -> Res<plonk_pe::Image> {
         if data.len() < 0x200 || &data[0..2] != b"MZ" { return Err(format!("{path}: not a Windows executable (no MZ header)")); }
         let pe0 = u32::from_le_bytes(data[0x3C..0x40].try_into().unwrap()) as usize;
+        if data.len() >= pe0 + 2 && (&data[pe0..pe0 + 2] == b"NE" || &data[pe0..pe0 + 2] == b"LE" || &data[pe0..pe0 + 2] == b"LX") {
+            return Err(format!("{path}: this is a 16-bit (Windows 3.x/DOS-era) program; only 32-bit Windows programs are supported"));
+        }
         if data.len() < pe0 + 0x60 || &data[pe0..pe0 + 4] != b"PE  " { return Err(format!("{path}: not a PE file")); }
         let machine = u16::from_le_bytes([data[pe0 + 4], data[pe0 + 5]]);
         let magic = u16::from_le_bytes([data[pe0 + 24], data[pe0 + 25]]);
