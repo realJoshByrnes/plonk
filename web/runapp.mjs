@@ -52,6 +52,7 @@ if (process.env.LAUNCH) { await evalJs("window.plonkShell.launch(" + JSON.string
 const { result } = await send("Page.captureScreenshot", { format: "png" });
 writeFileSync(out, Buffer.from(result.data, "base64"));
 console.log("status:", await evalJs("document.getElementById('log').textContent"));
+if (process.env.IMPORTS) console.log("imports:", JSON.stringify(await evalJs("window.plonkShell.imports(" + JSON.stringify(process.env.IMPORTS) + ")")));
 if (process.env.LISTEXE) { const l = await evalJs("window.plonkShell.list().filter((e) => /[.]exe$/i.test(e.path)).map((e) => e.path + ' ' + e.size).join('|')"); console.log("exes:", l); }
 if (process.env.DEBUGWIN) console.log(await evalJs("(() => { window.plonk.x.plonk_wine_debug(); const x = window.plonk.x; return new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len())); })()"));
 if (process.env.OPENS) {

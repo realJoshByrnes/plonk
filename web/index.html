@@ -115,7 +115,7 @@ const shell = createShell({
   },
 });
 document.getElementById("exp").onclick = () => shell.toggleExplorer();
-window.plonkShell = { list: () => readList(), launch: (p) => boot(null, p) }; // test/automation hook
+window.plonkShell = { list: () => readList(), launch: (p) => boot(null, p), imports: (p) => { snapshotDisk(); return peImports(disk.files.get(p)); } }; // test/automation hook
 setInterval(() => shell.refresh(), 1500);
 
 async function boot(app, installedPath) {

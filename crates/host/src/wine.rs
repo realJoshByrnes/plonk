@@ -353,6 +353,8 @@ impl WineProc {
             }
         }
         self.reg_set_sz("\\registry\\machine\\system\\currentcontrolset\\control\\computername\\activecomputername", "computername", "PLONK");
+        // wined3d (under ddraw/d3d*): software "no3d" renderer = 2D DirectDraw surfaces blitted with GDI, no OpenGL required
+        self.reg_set_sz("\\registry\\user\\s-1-5-21-0-0-0-1000\\software\\wine\\direct3d", "renderer", "no3d");
         let ntdll = self.map_image_file("c:\\windows\\system32\\ntdll.dll")?;
         self.ntdll_base = ntdll.base;
         let exp = |n: &str, p: &Self| plonk_pe::find_export(&p.mem, ntdll.base, n).ok_or(format!("ntdll export {n} missing"));

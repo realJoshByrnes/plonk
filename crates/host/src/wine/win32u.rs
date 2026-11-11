@@ -482,6 +482,15 @@ impl WineProc {
             }
             WM_NCHITTEST => 1,
             WM_NCCREATE => 1,
+            0x0E => self.wm.windows.get(&hwnd).map_or(0, |w| w.text.encode_utf16().count() as u32), // WM_GETTEXTLENGTH
+            0x0D => { // WM_GETTEXT (wide): wp = buffer size in characters
+                let text: Vec<u16> = self.wm.windows.get(&hwnd).map(|w| w.text.encode_utf16().collect()).unwrap_or_default();
+                if wp == 0 || lp == 0 { return Ok(0); }
+                let n = text.len().min(wp as usize - 1);
+                for (i, c) in text.iter().take(n).enumerate() { self.w16(lp + i as u32 * 2, *c)?; }
+                self.w16(lp + n as u32 * 2, 0)?;
+                n as u32
+            }
             0x0C => { // WM_SETTEXT (wide)
                 #[cfg(not(target_arch = "wasm32"))]
                 if std::env::var("SETTEXT_LOG").is_ok() { let b: Vec<u8> = (0..24).map(|i| self.mem.r8(lp + i).unwrap_or(0)).collect(); eprintln!("settext(wide path) hwnd={hwnd:#x} bytes={b:02x?}"); }
@@ -641,6 +650,14 @@ impl WineProc {
             "NtUserMessageCall" => {
                 let (hwnd, msg, wp, lp, ty) = (a[0], a[1], a[2], a[3], a[5]);
                 match ty {
+                    0x029e if a[6] != 0 && msg == 0x0E => self.wm.windows.get(&hwnd).map_or(0, |w| w.text.chars().count() as u32), // DefWindowProcA(WM_GETTEXTLENGTH)
+                    0x029e if a[6] != 0 && msg == 0x0D && lp != 0 && wp != 0 => { // DefWindowProcA(WM_GETTEXT): narrow to the ANSI buffer
+                        let bytes: Vec<u8> = self.wm.windows.get(&hwnd).map(|w| w.text.chars().map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }).collect()).unwrap_or_default();
+                        let n = bytes.len().min(wp as usize - 1);
+                        for (i, b) in bytes.iter().take(n).enumerate() { self.mem.w8(lp + i as u32, *b).map_err(|_| "gettext")?; }
+                        self.mem.w8(lp + n as u32, 0).map_err(|_| "gettext")?;
+                        n as u32
+                    }
                     0x029e if msg == 0x0C && a[6] != 0 && lp != 0 => { // DefWindowProcA(WM_SETTEXT): the string is ANSI
                         let mut bytes = Vec::new();
                         while let Ok(b) = self.mem.r8(lp + bytes.len() as u32) { if b == 0 || bytes.len() >= 512 { break; } bytes.push(b); }
@@ -951,6 +968,12 @@ impl WineProc {
     /// Debug: all top-level windows (handle:class:visible:rect).
     pub fn debug_windows(&self) -> String {
         self.wm.windows.iter().filter(|(h, w)| **h != DESKTOP && w.surface.is_some()).map(|(h, w)| format!("{:#x}:{}:{}:{:?}", h, self.wm.classes[w.class].name, w.visible, w.rect)).collect::<Vec<_>>().join(" ")
+    }
+
+    /// Debug: every window (children included) with its class, style and rect.
+    pub fn debug_all_windows(&self) -> String {
+        self.wm.windows.iter().filter(|(h, _)| **h != DESKTOP).map(|(h, w)| format!("{:#x}:{}:{:#x}:{}:p{:#x}:{:?}", h, self.wm.classes[w.class].name, w.style, w.visible, w.parent, w.rect)).collect::<Vec<_>>().join("
+")
     }
 
     /// Debug: windows that still have an invalid region (class, style, visible).

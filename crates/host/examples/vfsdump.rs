@@ -46,6 +46,7 @@ fn main() {
             for _ in 0..200 { if let Ok(RunState::Busy) = st { st = p.run_until_idle(50_000_000); } else { break; } }
         }
     }
+    if std::env::var("ALLWIN").is_ok() { println!("{}", p.debug_all_windows()); }
     if std::env::var("WINDOWS").is_ok() { println!("windows: {}", p.debug_windows()); }
     println!("state {:?}", st);
     println!("stdout: {}", String::from_utf8_lossy(&p.stdout));
