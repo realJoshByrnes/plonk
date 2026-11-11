@@ -481,6 +481,19 @@ impl WineProc {
 
     // ---- run loop ----
     /// Run the guest until it exits or parks waiting for input (GetMessage on an empty queue).
+    /// Native debugging aid: abort a call that has been running for WATCHDOG_MS milliseconds and say where the guest is.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn watchdog(&self, start: &std::time::Instant, what: &str) -> Res<()> {
+        let lim: u128 = std::env::var("WATCHDOG_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        if lim > 0 && start.elapsed().as_millis() > lim {
+            let m = self.module_at(self.cpu.eip).map(|(b, n)| format!("{n}+{:#x}", self.cpu.eip - b)).unwrap_or_default();
+            return Err(format!("watchdog: {what} still running after {lim} ms; eip={:#x} {m} cb_depth={} blocked={} idle={} regs={:x?}", self.cpu.eip, self.cb_depth, self.blocked, self.idle, self.cpu.r));
+        }
+        Ok(())
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn watchdog(&self, _start: &(), _what: &str) -> Res<()> { Ok(()) }
+
     pub fn run_until_idle(&mut self, max_traps: u64) -> Res<RunState> {
         self.idle = false;
         self.parked = false;

@@ -27,6 +27,23 @@ fn main() {
         }
     }
     p.boot("c:\\app.exe").unwrap();
+    // SAMPLE_MS=n: after n ms a debugging thread prints where the guest is (eip, module, recent trace) three times, then ends the process.
+    // (Racy by design: it peeks at the running emulator.)
+    if let Some(ms) = std::env::var("SAMPLE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        let ptr = &mut p as *mut WineProc as usize;
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            for _ in 0..3 {
+                let w = unsafe { &*(ptr as *const WineProc) };
+                let eip = w.cpu.eip;
+                let m = w.module_at(eip).map(|(b, n)| format!("{n}+{:#x}", eip - b)).unwrap_or_default();
+                println!("SAMPLE eip={eip:#x} {m} cb_depth={:?}", w.cb_depth_dbg());
+                for l in w.trace.iter().rev().take(6) { println!("SAMPLE   {l}"); }
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+            }
+            std::process::exit(3);
+        });
+    }
     let mut st = p.run_until_idle(50_000_000);
     for _ in 0..40 {
         if let Ok(RunState::Busy) = st { st = p.run_until_idle(50_000_000); } else { break; }

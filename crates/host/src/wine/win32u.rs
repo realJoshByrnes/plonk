@@ -212,11 +212,23 @@ impl WineProc {
         self.cpu.eip = func;
         self.guest_returned = false;
         self.cb_depth += 1;
+        #[cfg(not(target_arch = "wasm32"))]
+        let wd_start = std::time::Instant::now();
+        #[cfg(target_arch = "wasm32")]
+        let wd_start = ();
         while !self.guest_returned {
+            if let Err(e) = self.watchdog(&wd_start, "call_guest") { self.cb_depth -= 1; return Err(e); }
             if let Err(e) = self.pump() { self.cb_depth -= 1; return Err(e); }
             if self.exit.is_some() { self.cb_depth -= 1; return Err("process exited inside window procedure".into()); }
             if self.need_file.is_some() && !self.guest_returned {
                 // a lazy file request raised inside a callback: unwind and let the shell supply it, then the callback resumes
+                self.cb_depth -= 1;
+                self.orphans.push(saved);
+                return Err(super::YIELD.into());
+            }
+            if self.busy && !self.guest_returned {
+                // the callback used up its whole slice (a long loop inside a window procedure, e.g. a game loop): suspend it exactly like
+                // a modal loop so the page keeps painting and handling input; the original call completes when the procedure returns
                 self.cb_depth -= 1;
                 self.orphans.push(saved);
                 return Err(super::YIELD.into());
@@ -1013,6 +1025,9 @@ impl WineProc {
     pub fn debug_windows(&self) -> String {
         self.wm.windows.iter().filter(|(h, w)| **h != DESKTOP && w.surface.is_some()).map(|(h, w)| format!("{:#x}:{}:{}:{:?}", h, self.wm.classes[w.class].name, w.visible, w.rect)).collect::<Vec<_>>().join(" ")
     }
+
+    /// Debug: nesting depth of host-side guest callbacks.
+    pub fn cb_depth_dbg(&self) -> u32 { self.cb_depth }
 
     /// Debug: send a message to a window as if the program had (returns the result).
     pub fn debug_send(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) -> u32 { self.send(hwnd, msg, wp, lp).unwrap_or(0xDEAD_BEEF) }
