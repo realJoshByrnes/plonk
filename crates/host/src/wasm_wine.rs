@@ -32,9 +32,15 @@ pub unsafe extern "C" fn plonk_wine_boot(path: *const u8, len: u32) -> i32 {
 
 /// Runs a slice. Returns 0 = idle, 1 = exited (see exit code), 2 = busy (call again),
 /// 3 = needs a file (VFS key in the message; add it, then call again), -1 = error.
+static mut TRAP_BUDGET: u64 = 50_000_000;
+/// Work per `plonk_wine_run` call: guest instructions per slice and syscalls per call. The page tunes these to ~10 ms per call
+/// so a program that never idles (a game loop) cannot starve rendering and input.
+#[no_mangle]
+pub extern "C" fn plonk_wine_set_budget(steps: u32, traps: u32) { wine().slice = steps.max(10_000) as u64; unsafe { TRAP_BUDGET = traps.max(200) as u64; } }
+
 #[no_mangle]
 pub extern "C" fn plonk_wine_run() -> i32 {
-    match wine().run_until_idle(50_000_000) {
+    match wine().run_until_idle(unsafe { TRAP_BUDGET }) {
         Ok(RunState::Idle) => 0,
         Ok(RunState::Busy) => 2,
         Ok(RunState::Need(k)) => { unsafe { MSG = k; } 3 }

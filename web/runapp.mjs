@@ -28,7 +28,7 @@ ws.onmessage = (m) => {
     if (d.params.type === "error" || t.startsWith("[timing]")) errors.push(t);
   }
 };
-const send = (method, params = {}) => new Promise((res) => { const id = nextId++; pending.set(id, res); ws.send(JSON.stringify({ id, method, params })); });
+const send = (method, params = {}) => new Promise((res) => { const id = nextId++; pending.set(id, res); ws.send(JSON.stringify({ id, method, params })); setTimeout(() => { if (pending.delete(id)) res({ timeout: true, result: {} }); }, 20000); }); // a frozen page must not hang the script
 const evalJs = async (expr) => (await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true })).result?.result?.value;
 await send("Runtime.enable");
 await send("Page.navigate", { url: "http://localhost:8080/web/index.html" });
@@ -49,6 +49,7 @@ for (let s = 0; s < Number(secs); s++) {
   await sleep(1000);
 }
 if (process.env.LAUNCH) { await evalJs("window.plonkShell.launch(" + JSON.stringify(process.env.LAUNCH) + ")"); await sleep(Number(process.env.LAUNCH_WAIT ?? 10000)); }
+if (process.env.CLICK_AFTER) { const [cx, cy] = process.env.CLICK_AFTER.split(",").map(Number); for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: origin.x + cx, y: origin.y + cy, button: "left", clickCount: 1 }); await sleep(Number(process.env.AFTER_WAIT ?? 8000)); }
 const { result } = await send("Page.captureScreenshot", { format: "png" });
 writeFileSync(out, Buffer.from(result.data, "base64"));
 console.log("status:", await evalJs("document.getElementById('log').textContent"));

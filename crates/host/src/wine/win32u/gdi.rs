@@ -32,7 +32,8 @@ fn rop_apply(rop8: u32, p: u32, s: u32, d: u32) -> u32 {
 fn argb_of_colorref(c: u32) -> u32 { 0xFF00_0000 | (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff) }
 
 /// Decode a BITMAPINFO + bits into top-down ARGB (alpha kept for 32bpp).
-struct Dib { w: i32, h: i32, pix: Vec<u32> }
+/// Decoded DIB: `pix` is always top row first; `top_down` records the original orientation (it decides how source rows are addressed).
+struct Dib { w: i32, h: i32, pix: Vec<u32>, top_down: bool }
 
 impl WineProc {
     // ---- bitmap storage ----
@@ -218,7 +219,7 @@ impl WineProc {
                 };
             }
         }
-        Ok(Dib { w: ww, h: hh, pix })
+        Ok(Dib { w: ww, h: hh, pix, top_down })
     }
 
     // ---- syscalls ----
@@ -313,7 +314,8 @@ impl WineProc {
                 let d = self.decode_dib(bmi, bits, false)?;
                 let mut out = vec![0xFF00_0000u32; (cx * cy).max(0) as usize];
                 for y in 0..cy { for x in 0..cx {
-                    let (sx, sy) = (xs + x, d.h - 1 - (ys + y)); // source y counts from the bottom of the DIB
+                    // bottom-up DIB: ySrc counts from the bottom, and the destination's top row is the source rectangle's top row
+                    let (sx, sy) = (xs + x, if d.top_down { ys + y } else { d.h - ys - cy + y });
                     if sx >= 0 && sy >= 0 && sx < d.w && sy < d.h { out[(y * cx + x) as usize] = d.pix[(sy * d.w + sx) as usize]; }
                 } }
                 self.dc_write_rect(hdc, xd, yd, cx, cy, &out);
@@ -326,7 +328,7 @@ impl WineProc {
                 let (wda, hda) = (wd.abs().max(1), hd.abs().max(1));
                 let mut src = vec![0xFF00_0000u32; (ws.abs() * hs.abs()).max(0) as usize];
                 for y in 0..hs.abs() { for x in 0..ws.abs() {
-                    let (sx, sy) = (xs + x, d.h - 1 - (ys + y));
+                    let (sx, sy) = (xs + x, if d.top_down { ys + y } else { d.h - ys - hs.abs() + y });
                     if sx >= 0 && sy >= 0 && sx < d.w && sy < d.h { src[(y * ws.abs() + x) as usize] = d.pix[(sy * d.w + sx) as usize]; }
                 } }
                 let px = Self::resample(&src, ws.abs().max(1), hs.abs().max(1), wda, hda);

@@ -174,7 +174,7 @@ async function boot(app, installedPath) {
 }
 const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len()));
 
-let lastT = performance.now(), presStep = -9;
+let lastT = performance.now(), presStep = -9, work = 1; // work: fraction of the full per-call budget
 let lastGen = -1, lastLog = "";
 let stepTimer = 0;
 // zero-delay re-entry (setTimeout is clamped to >= 4 ms once nested): a MessageChannel hop yields to input/paint but nothing more
@@ -247,6 +247,11 @@ function step() {
   const st = x.plonk_wine_run();
   if (st === 1 && !exitedHandled) { exitedHandled = true; snapshotDisk(); shell.refresh(); } // the program ended: its installed files stay on the session disk
   let t1 = performance.now(); P.run += t1 - t0;
+  if (st === 2) { // busy: keep each call near 10 ms so rendering and input stay responsive while a game loop runs
+    const dt = t1 - t0;
+    if (dt > 14) work = Math.max(0.005, work * 0.6); else if (dt < 6) work = Math.min(1, work * 1.4);
+    x.plonk_wine_set_budget(Math.round(20e6 * work), Math.round(50e6 * work));
+  }
   (P.st ||= {})[st] = (P.st[st] || 0) + 1; P.pres = x.plonk_gl_presents();
   pumpGL();
   syncOverlay();

@@ -512,7 +512,8 @@ impl WineProc {
             }
             self.no_progress = 0;
         }
-        Err("syscall budget exhausted".into())
+        // a program that never goes idle (a game loop) simply used its whole budget: hand control back and continue next time
+        Ok(RunState::Busy)
     }
 
     /// Run to process exit; waiting for input is an error here (tests).
