@@ -25,6 +25,9 @@ fn main() {
         p.add_tar(&std::fs::read(format!("{root}wine/root.tar")).expect("wine/root.tar"));
     }
     p.mkdir("/home/user/.wine");
+    // PREFIX=file.tar: start from a saved Wine prefix; SAVE=file.tar: save the prefix afterwards (waits for all processes to end)
+    if let Ok(f) = std::env::var("PREFIX") { p.add_tar(&std::fs::read(f).expect("prefix tar")); }
+    p.wait_all = std::env::var("SAVE").is_ok();
     let elf = p.files.get(&a[1]).cloned().unwrap_or_else(|| std::fs::read(&a[1]).expect("read elf"));
     let argv: Vec<&str> = a[1..].iter().map(|s| s.as_str()).collect();
     let extra = std::env::var("ENV").unwrap_or_default();
@@ -41,6 +44,14 @@ fn main() {
     println!("result {r:?} blocked={} after {rounds} idle seconds", p.blocked);
     println!("stdout: {}", String::from_utf8_lossy(&p.stdout));
     println!("unknown: {:?}", p.unknown);
+    if let Ok(f) = std::env::var("SAVE") { let t = p.export_tar("/home/user/.wine"); println!("saved prefix: {} bytes", t.len()); std::fs::write(f, t).unwrap(); }
+    for h in &p.zorder { let w = &p.windows[h]; println!("window {:#x} {:?} visible={} surface {}x{} {:?}", w.hwnd, w.rect, w.visible, w.sw, w.sh, w.title); }
+    if let Ok(f) = std::env::var("SHOT") { // SHOT=out.ppm: screenshot of the composed windows
+        let nl = char::from(10);
+        let mut out = format!("P6{nl}{} {}{nl}255{nl}", p.screen.0, p.screen.1).into_bytes();
+        out.extend(p.compose_rgb());
+        std::fs::write(f, out).unwrap();
+    }
     if std::env::var("PS").is_ok() { print!("{}", p.ps()); }
     let n: usize = std::env::var("TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let pat = std::env::var("GREP").unwrap_or_default();

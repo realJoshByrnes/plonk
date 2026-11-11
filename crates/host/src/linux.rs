@@ -43,7 +43,18 @@ type Fd = Rc<RefCell<Ofd>>;
 /// Things created in the file tree at run time (the read-only `files` map sits underneath).
 enum Node { File(Data), Dir, Sock(usize), Link(String) }
 
-enum Kind { File { data: Data, pos: u64 }, Dir { pos: usize }, Null, Tty, Sock(usize) }
+enum Kind { File { data: Data, pos: u64 }, Dir { pos: usize }, Null, Tty, Sock(usize), Events }
+
+/// A top-level window as reported by the Wine display driver (wineplonk.drv), with the pixels it last flushed.
+#[derive(Default, Clone)]
+pub struct HostWin {
+    pub hwnd: u32, pub owner: u32,
+    /// Window and client rectangles in screen coordinates: x, y, width, height.
+    pub rect: [i32; 4], pub client: [i32; 4],
+    pub style: u32, pub ex_style: u32, pub visible: bool, pub title: String,
+    /// Surface size and its BGRX pixels (top-down).
+    pub sw: u32, pub sh: u32, pub pixels: Vec<u8>,
+}
 
 /// An open file description (shared by dup'ed descriptors and descriptors passed over sockets).
 pub struct Ofd { kind: Kind, flags: u32, path: String }
@@ -93,11 +104,21 @@ pub struct LinuxProc {
     exe: String,
     sigact: HashMap<u32, [u32; 5]>,
     procs: Vec<Proc>,
+    /// Display driver state: screen size, windows by handle, z-order (top first), pending input records, cursor kind.
+    pub screen: (u32, u32),
+    pub windows: BTreeMap<u32, HostWin>,
+    pub zorder: Vec<u32>,
+    events: VecDeque<[u32; 8]>,
+    pub cursor: i32,
+    /// Bumped whenever a window changes or pixels are flushed.
+    pub frame: u64,
     cur: (usize, usize),
     next_pid: u32,
     resched: bool,
     /// When every thread is waiting, jump the guest clock to the next timeout instead of reporting `blocked`.
     pub auto_time: bool,
+    /// Keep running after the first process has exited, until every process is gone.
+    pub wait_all: bool,
 }
 
 fn r16(d: &[u8], o: usize) -> u32 { u16::from_le_bytes([d[o], d[o + 1]]) as u32 }
@@ -108,10 +129,10 @@ fn parent(path: &str) -> &str { match path.rfind('/') { Some(0) | None => "/", S
 impl LinuxProc {
     pub fn new() -> Self {
         let mut vfs = BTreeMap::new();
-        for d in ["/", "/tmp", "/dev", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
+        for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
         LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), exit_code: None, blocked: false,
             vfs, cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
-            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false }
+            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, wait_all: false }
     }
 
     // ---- processes and threads ----
@@ -275,6 +296,93 @@ impl LinuxProc {
         0
     }
 
+    // ---- display driver (wineplonk.drv) ----
+
+    /// Driver calls: see wine/plonkdrv/wineplonk.drv/plonk_abi.h.
+    fn plonk_call(&mut self, n: u32, a: [u32; 5]) -> u32 {
+        self.frame += 1;
+        match n {
+            0 => { let _ = self.mem.w32(a[0], self.screen.0); let _ = self.mem.w32(a[0] + 4, self.screen.1); }
+            1 => { // create or update a top-level window
+                let g = |i: u32| self.mem.r32(a[0] + i * 4).unwrap_or(0);
+                let (hwnd, after) = (g(0), g(13));
+                let known = self.windows.contains_key(&hwnd);
+                let w = self.windows.entry(hwnd).or_default();
+                w.hwnd = hwnd; w.owner = g(1);
+                w.rect = [g(2) as i32, g(3) as i32, g(4) as i32, g(5) as i32];
+                w.client = [g(6) as i32, g(7) as i32, g(8) as i32, g(9) as i32];
+                w.style = g(10); w.ex_style = g(11); w.visible = g(12) != 0;
+                // z-order: 0 = top, otherwise directly behind `after`; an unknown `after` leaves a known window where it is
+                let behind = self.zorder.iter().position(|&h| h == after && h != hwnd);
+                if after == 0 || behind.is_some() || !known {
+                    self.zorder.retain(|&h| h != hwnd);
+                    let at = if after == 0 { 0 } else { self.zorder.iter().position(|&h| h == after).map_or(0, |i| i + 1) };
+                    self.zorder.insert(at, hwnd);
+                }
+            }
+            2 => { self.windows.remove(&a[0]); self.zorder.retain(|&h| h != a[0]); }
+            3 => { // flush(hwnd, bits, width, height, dirty[l,t,r,b])
+                let (sw, sh) = (a[2], a[3]);
+                if sw == 0 || sh == 0 || sw > 16384 || sh > 16384 { return EINVAL; }
+                let d = |i: u32| self.mem.r32(a[4] + i * 4).unwrap_or(0) as i32;
+                let Some(w) = self.windows.get_mut(&a[0]) else { return 0 };
+                let (mut l, mut t, mut r, mut b) = if a[4] != 0 { (d(0), d(1), d(2), d(3)) } else { (0, 0, sw as i32, sh as i32) };
+                if w.sw != sw || w.sh != sh { w.sw = sw; w.sh = sh; w.pixels = vec![0; (sw * sh * 4) as usize]; (l, t, r, b) = (0, 0, sw as i32, sh as i32); }
+                (l, t, r, b) = (l.max(0), t.max(0), r.min(sw as i32), b.min(sh as i32));
+                for y in t..b.max(t) {
+                    if r <= l { break; }
+                    let off = (y as u32 * sw + l as u32) * 4;
+                    let Ok(src) = self.mem.read_bytes(a[1] + off, (r - l) as u32 * 4) else { return EFAULT };
+                    w.pixels[off as usize..off as usize + src.len()].copy_from_slice(src);
+                }
+            }
+            4 => { // title(hwnd, utf16, len)
+                let u: Vec<u16> = (0..a[2].min(1024)).map(|i| self.mem.r16(a[1] + i * 2).unwrap_or(0)).collect();
+                if let Some(w) = self.windows.get_mut(&a[0]) { w.title = String::from_utf16_lossy(&u); }
+            }
+            5 => self.cursor = a[1] as i32,
+            _ => return ENOSYS,
+        }
+        0
+    }
+
+    /// Queue an input record for the driver (types as in plonk_abi.h: 1 move, 2 button down, 3 button up, 4 wheel, 5 key down, 6 key up, 7 close, 8 resize).
+    pub fn push_event(&mut self, ty: u32, hwnd: u32, x: i32, y: i32, data: u32, flags: u32) {
+        self.events.push_back([ty, hwnd, x as u32, y as u32, data, flags, (self.clock_ns / 1_000_000) as u32, 0]);
+    }
+
+    /// The topmost visible window at a screen position (0 = none).
+    pub fn window_at(&self, x: i32, y: i32) -> u32 {
+        self.zorder.iter().copied().find(|h| self.windows.get(h).map_or(false, |w| w.visible && x >= w.rect[0] && y >= w.rect[1] && x < w.rect[0] + w.rect[2] && y < w.rect[1] + w.rect[3])).unwrap_or(0)
+    }
+
+    /// Mouse input at a screen position: kind 0 = left down, 1 = move, 2 = left up.
+    pub fn mouse(&mut self, kind: u32, x: i32, y: i32) {
+        let h = self.window_at(x, y);
+        self.push_event(match kind { 0 => 2, 2 => 3, _ => 1 }, h, x, y, 0, 0);
+    }
+
+    /// Plain composition of the visible windows over a flat desktop colour: RGB, screen-sized (debugging / tests).
+    pub fn compose_rgb(&self) -> Vec<u8> {
+        let (sw, sh) = (self.screen.0 as i32, self.screen.1 as i32);
+        let mut out: Vec<u8> = [58u8, 110, 165].iter().copied().cycle().take((sw * sh * 3) as usize).collect();
+        for h in self.zorder.iter().rev() {
+            let Some(w) = self.windows.get(h) else { continue };
+            if !w.visible || w.pixels.is_empty() { continue; }
+            for y in 0..w.sh as i32 {
+                let dy = w.rect[1] + y;
+                if dy < 0 || dy >= sh { continue; }
+                for x in 0..w.sw as i32 {
+                    let dx = w.rect[0] + x;
+                    if dx < 0 || dx >= sw { continue; }
+                    let (si, di) = (((y as u32 * w.sw + x as u32) * 4) as usize, ((dy * sw + dx) * 3) as usize);
+                    out[di] = w.pixels[si + 2]; out[di + 1] = w.pixels[si + 1]; out[di + 2] = w.pixels[si];
+                }
+            }
+        }
+        out
+    }
+
     // ---- address space ----
 
     fn maps_hit(&self, a: u32, e: u32) -> bool { self.maps.range(..e).next_back().map_or(false, |(_, &en)| en > a) }
@@ -340,6 +448,45 @@ impl LinuxProc {
             }
             out.push(char::from(10));
         }
+        out
+    }
+
+    /// Pack everything created at run time under `prefix` (files, directories, symlinks) into a tar archive that `add_tar` can load.
+    pub fn export_tar(&self, prefix: &str) -> Vec<u8> {
+        fn entry(out: &mut Vec<u8>, name: &str, ty: u8, link: &str, data: &[u8]) {
+            let name = name.trim_start_matches('/');
+            if name.len() > 99 { entry(out, "././@LongLink", b'L', "", format!("{name}{}", char::from(0)).as_bytes()); }
+            let mut h = [0u8; 512];
+            let n = name.as_bytes();
+            h[..n.len().min(99)].copy_from_slice(&n[..n.len().min(99)]);
+            h[100..107].copy_from_slice(if ty == b'5' { b"0000755" } else { b"0000644" });
+            h[108..115].copy_from_slice(b"0001750");
+            h[116..123].copy_from_slice(b"0001750");
+            h[124..135].copy_from_slice(format!("{:011o}", data.len()).as_bytes());
+            h[136..147].copy_from_slice(b"00000000000");
+            h[156] = ty;
+            h[157..157 + link.len().min(99)].copy_from_slice(&link.as_bytes()[..link.len().min(99)]);
+            h[257..263].copy_from_slice(b"ustar ");
+            h[263] = b' ';
+            h[148..156].fill(b' ');
+            let sum: u32 = h.iter().map(|&b| b as u32).sum();
+            h[148..154].copy_from_slice(format!("{sum:06o}").as_bytes());
+            h[154] = 0;
+            out.extend_from_slice(&h);
+            out.extend_from_slice(data);
+            out.resize(out.len() + (512 - data.len() % 512) % 512, 0);
+        }
+        let mut out = Vec::new();
+        let pre = format!("{}/", prefix.trim_end_matches('/'));
+        for (k, n) in self.vfs.iter().filter(|(k, _)| k.starts_with(&pre) || k.as_str() == prefix) {
+            match n {
+                Node::Dir => entry(&mut out, k, b'5', "", &[]),
+                Node::Link(t) => entry(&mut out, k, b'2', t, &[]),
+                Node::File(d) => entry(&mut out, k, b'0', "", &d.borrow()),
+                Node::Sock(_) => {}
+            }
+        }
+        out.resize(out.len() + 1024, 0);
         out
     }
 
@@ -451,7 +598,7 @@ impl LinuxProc {
             let (mut progress, mut alive) = (false, false);
             for pi in 0..self.procs.len() {
                 for ti in 0..self.procs[pi].threads.len() {
-                    if self.exit_code.is_some() { return Ok(self.exit_code); }
+                    if self.exit_code.is_some() && !self.wait_all { return Ok(self.exit_code); }
                     let t = &mut self.procs[pi].threads[ti];
                     match t.state {
                         St::Dead => continue,
@@ -473,7 +620,7 @@ impl LinuxProc {
                     if budget == 0 { self.blocked = false; return Ok(self.exit_code); }
                 }
             }
-            if self.exit_code.is_some() || !alive { return Ok(self.exit_code); }
+            if (self.exit_code.is_some() && !self.wait_all) || !alive { return Ok(self.exit_code); }
             if !progress {
                 match self.next_deadline() {
                     Some(d) if self.auto_time => { self.clock_ns = self.clock_ns.max(d); }
@@ -533,7 +680,7 @@ impl LinuxProc {
             Some(Node::Sock(_)) => Some((0o140755, 0)),
             Some(Node::Link(t)) => Some((0o120777, t.len() as u64)),
             None => match p {
-                "/dev/null" | "/dev/tty" => Some((0o020666, 0)),
+                "/dev/null" | "/dev/tty" | "/dev/plonk/events" => Some((0o020666, 0)),
                 _ => self.files.get(p).map(|d| (0o100755, d.len() as u64)).or_else(|| self.is_dir(p).then_some((0o040755, 0))),
             },
         }
@@ -576,6 +723,7 @@ impl LinuxProc {
             None => match p.as_str() {
                 "/dev/null" => Kind::Null,
                 "/dev/tty" => Kind::Tty,
+                "/dev/plonk/events" => Kind::Events,
                 _ => {
                     if let Some(d) = self.files.get(&p) {
                         if flags & 3 != 0 { // opened for writing: copy up into the writable tree
@@ -630,7 +778,7 @@ impl LinuxProc {
         let (mode, size) = match &o.kind {
             Kind::File { data, .. } => (0o100644, data.borrow().len() as u64),
             Kind::Dir { .. } => (0o040700, 0),
-            Kind::Null | Kind::Tty => (0o020620, 0),
+            Kind::Null | Kind::Tty | Kind::Events => (0o020620, 0),
             Kind::Sock(_) => (0o140777, 0),
         };
         let path = if let Kind::Sock(s) = o.kind { format!("socket:{s}") } else { o.path.clone() };
@@ -691,6 +839,7 @@ impl LinuxProc {
                 r
             }
             Kind::Tty => if fd == 0 { 0 } else { events & POLLOUT },
+            Kind::Events => if self.events.is_empty() { 0 } else { events & POLLIN },
             _ => events & (POLLIN | POLLOUT),
         }
     }
@@ -832,6 +981,12 @@ impl LinuxProc {
             Kind::Sock(s) => *s,
             Kind::Dir { .. } => return Some(-21i32 as u32), // EISDIR
             Kind::Null | Kind::Tty => return Some(0),
+            Kind::Events => { // whole 32-byte input records
+                let k = (n as usize / 32).min(self.events.len());
+                if k == 0 { return if nb { Some(EAGAIN) } else { None }; }
+                for i in 0..k { let e = self.events.pop_front().unwrap(); for (j, w) in e.iter().enumerate() { let _ = self.mem.w32(buf + (i * 32 + j * 4) as u32, *w); } }
+                return Some(k as u32 * 32);
+            }
         };
         drop(o);
         let Some((d, _)) = self.recv(sock, n as usize) else { return if nb { Some(EAGAIN) } else { None } };
@@ -855,7 +1010,7 @@ impl LinuxProc {
             Kind::Tty => { self.stdout.extend_from_slice(&src); return n; }
             Kind::Null => return n,
             Kind::Sock(s) => *s,
-            Kind::Dir { .. } => return EBADF,
+            Kind::Dir { .. } | Kind::Events => return EBADF,
         };
         drop(o);
         self.send(sock, src, Vec::new())
@@ -1199,6 +1354,7 @@ impl LinuxProc {
                 Some(0)
             }
             191 => { let _ = self.mem.w32(b, u32::MAX); let _ = self.mem.w32(b + 4, u32::MAX); Some(0) } // ugetrlimit
+            0x504C_0000..=0x504C_00FF => Some(self.plonk_call(nr & 0xFF, [a, b, c, d, e])),
             355 => { for i in 0..b { let _ = self.mem.w8(a + i, (i * 37 + 11) as u8); } Some(b) } // getrandom
             _ => {
                 let s = format!("syscall {nr}");
