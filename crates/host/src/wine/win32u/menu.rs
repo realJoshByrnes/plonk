@@ -37,7 +37,25 @@ impl Item {
     fn enabled(&self) -> bool { self.flags & (MF_GRAYED | MF_DISABLED | MF_SEPARATOR) == 0 }
 }
 
-fn text_w(s: &str) -> i32 { plonk_fonts::with(|f| f.text_width(s, 12.0, false)).ceil() as i32 }
+/// Menu text without its `&` mnemonic markers ("&&" is a literal &), plus the byte index in the result of the mnemonic character.
+fn split_mnemonic(s: &str) -> (String, Option<usize>) {
+    let (mut out, mut mn, mut it) = (String::new(), None, s.chars().peekable());
+    while let Some(c) = it.next() {
+        if c == '&' { if it.peek() == Some(&'&') { out.push('&'); it.next(); } else if mn.is_none() && it.peek().is_some() { mn = Some(out.len()); } } else { out.push(c); }
+    }
+    (out, mn)
+}
+fn text_w(s: &str) -> i32 { let (t, _) = split_mnemonic(s); plonk_fonts::with(|f| f.text_width(&t, 12.0, false)).ceil() as i32 }
+/// Draw menu text with the mnemonic letter underlined.
+fn draw_menu_text(b: &mut SoftBackend, s: SurfaceId, x: i32, y: i32, text: &str, col: u32) {
+    let (t, mn) = split_mnemonic(text);
+    b.draw_text_px(s, x, y, &t, col, 12.0, false);
+    if let Some(i) = mn {
+        let (before, ch) = (&t[..i], t[i..].chars().next().unwrap_or(' '));
+        let (x0, w) = plonk_fonts::with(|f| (f.text_width(before, 12.0, false), f.text_width(&ch.to_string(), 12.0, false)));
+        b.fill_rect(s, x + x0.round() as i32, y + 14, w.round().max(1.0) as i32, 1, col);
+    }
+}
 
 impl WineProc {
     fn menu_find(&self, menu: u32, id: u32, flags: u32) -> Option<usize> {
@@ -67,7 +85,7 @@ impl WineProc {
         b.fill_rect(s, BORDER, y0, ww - 2 * BORDER, MENU_H, 0xFFF7_F8FA);
         for (i, ((text, _), (x0, x1))) in items.iter().zip(spans.iter()).enumerate() {
             if open_idx == Some(i) { b.fill_rect(s, *x0, y0 + 2, x1 - x0, MENU_H - 4, 0xFFD6_E6F8); }
-            b.draw_text_px(s, x0 + 10, y0 + 5, text, 0xFF1A_1A1A, 12.0, false);
+            draw_menu_text(b, s, x0 + 10, y0 + 5, text, 0xFF1A_1A1A);
         }
         b.fill_rect(s, BORDER, y0 + MENU_H - 1, ww - 2 * BORDER, 1, 0x1F00_0000);
     }
@@ -93,7 +111,7 @@ impl WineProc {
             if item.flags & MF_SEPARATOR != 0 { b.fill_rect(s, 10, y0 + SEP_H / 2, w - 20, 1, 0x2800_0000); continue; }
             if hover == Some(i) && item.enabled() { b.fill_rect(s, 4, *y0, w - 8, y1 - y0, 0xE00A_64C8); }
             let col = if item.enabled() { if hover == Some(i) { 0xFFFF_FFFF } else { 0xFF1A_1A1A } } else { 0xFF8A_8F96 };
-            b.draw_text_px(s, 28, y0 + 6, &item.text, col, 12.0, false);
+            draw_menu_text(b, s, 28, y0 + 6, &item.text, col);
             if item.sub != 0 { b.draw_text_px(s, w - 18, y0 + 6, ">", col, 12.0, false); }
         }
     }

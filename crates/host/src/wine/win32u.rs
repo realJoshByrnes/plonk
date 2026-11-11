@@ -77,6 +77,8 @@ struct Dc { hwnd: u32, clip: Option<Rect>, brush: u32, pen: u32, pos: (i32, i32)
 pub struct Wm {
     /// Recycled GDI handle-table indexes and DC_ATTR blocks (programs create and release thousands of DCs while painting).
     free_gdi: Vec<u32>,
+    /// Arena for CREATESTRUCT + window-name copies during CreateWindowEx (base, bytes in use); nesting-safe (restored after each create).
+    cs_arena: (u32, u32),
     dcattr_free: Vec<u32>,
     /// Screen size in pixels (set by the page from the available area).
     pub screen: (i32, i32),
@@ -126,7 +128,7 @@ impl Wm {
 
     pub fn new() -> Self {
         let mut w = Wm {
-            free_gdi: Vec::new(), dcattr_free: Vec::new(),
+            free_gdi: Vec::new(), dcattr_free: Vec::new(), cs_arena: (0, 0),
             screen: (1024, 768),
             gl: Default::default(),
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
@@ -579,11 +581,8 @@ impl WineProc {
                 let cname = self.class_arg(a[1])?;
                 let ci = self.wm.classes.iter().position(|c| match &cname { Ok(at) => c.atom == *at, Err(n) => c.name.eq_ignore_ascii_case(n) });
                 let Some(ci) = ci else { self.log(format!("  (CreateWindowEx: unknown class {cname:?})")); return Ok(Some(0)); };
-                let title = if a[3] != 0 && a.get(16).copied().unwrap_or(0) != 0 {
-                    // CreateWindowExA: the window name is 8-bit text in a UNICODE_STRING { Length(bytes), MaximumLength, Buffer }
-                    let (len, buf) = (self.mem.r16(a[3]).unwrap_or(0) as u32, self.r32(a[3] + 4)?);
-                    (0..len.min(512)).map(|i| self.mem.r8(buf + i).unwrap_or(0) as char).collect::<String>()
-                } else if a[3] != 0 { match self.class_arg(a[3])? { Err(s) => s, Ok(_) => String::new() } } else { String::new() };
+                // the window name is always a wide UNICODE_STRING (the ansi flag only says the window itself is an ANSI window)
+                let title = if a[3] != 0 { match self.class_arg(a[3])? { Err(s) => s, Ok(_) => String::new() } } else { String::new() };
                 let dim = |v: u32, d: i32| if v == CW_USEDEFAULT { d } else { v as i32 };
                 // Windows: with x == CW_USEDEFAULT the y argument is ignored (it is a show command), likewise cy when cx == CW_USEDEFAULT
                 let (x, y) = if a[5] == CW_USEDEFAULT { (100, 100) } else { (dim(a[5], 100), dim(a[6], 100)) };
@@ -599,12 +598,21 @@ impl WineProc {
                 if toplevel { self.wm.zorder.push(hwnd); }
                 self.wm.windows.insert(hwnd, Window { class: ci, style: style & !WS_VISIBLE, rect: [x, y, x + cx, y + cy], parent: if toplevel { DESKTOP } else { parent }, text: title.clone(), visible: false, invalid: None, needs_erase: false, surface, ex_style, menu: if toplevel && self.wm.menus.contains_key(&a[10]) { a[10] } else { 0 }, id: a[10], inst: a[11], userdata: 0, proc_override: 0, extra: vec![0; self.wm.classes[ci].raw[4] as usize] });
                 // CREATESTRUCTW on the guest stack for WM_NCCREATE / WM_CREATE
-                let cs = (self.cpu.r[ESP].wrapping_sub(0x200)) & !15;
-                let (name_p, _) = self.put_wstr_at(cs + 0x40, &title);
+                if self.wm.cs_arena.0 == 0 { self.wm.cs_arena.0 = self.vm_reserve(None, 0x40000).unwrap_or(0); }
+                let used0 = self.wm.cs_arena.1;
+                let need = 0x40 + ((title.encode_utf16().count() as u32 + 1) * 2 + 15 & !15);
+                // the window name can be long (a dialog paragraph): it must never be written onto the guest stack below esp
+                let (cs, title_w) = if self.wm.cs_arena.0 != 0 && used0 + need <= 0x40000 {
+                    self.wm.cs_arena.1 = used0 + need;
+                    (self.wm.cs_arena.0 + used0, title.clone())
+                } else { ((self.cpu.r[ESP].wrapping_sub(0x200)) & !15, title.chars().take(180).collect::<String>()) };
+                let (name_p, _) = self.put_wstr_at(cs + 0x40, &title_w);
                 for (i, v) in [a[12], a[11], a[10], a[9], cy as u32, cx as u32, y as u32, x as u32, style, name_p, 0, a[0]].iter().enumerate() {
                     self.w32(cs + i as u32 * 4, *v)?;
                 }
-                if self.send(hwnd, WM_NCCREATE, 0, cs)? == 0 || self.send(hwnd, WM_CREATE, 0, cs)? == u32::MAX {
+                let created = self.send(hwnd, WM_NCCREATE, 0, cs)? != 0 && self.send(hwnd, WM_CREATE, 0, cs)? != u32::MAX;
+                if self.wm.cs_arena.1 >= used0 { self.wm.cs_arena.1 = used0; }
+                if !created {
                     self.destroy_window(hwnd)?;
                     return Ok(Some(0));
                 }

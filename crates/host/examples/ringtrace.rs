@@ -15,6 +15,9 @@ fn main() {
     }
     println!("state {st:?}");
     for l in p.trace.iter().filter(|l| l.contains("(exception") || l.contains("(ring before") || l.contains("(stack return") || l.contains("(regs at") || l.contains("(stack words")) { println!("{l}"); }
+    if let Some(i) = p.trace.iter().position(|l| l.contains("(exception")) {
+        for l in p.trace.iter().skip(i.saturating_sub(8)).take(8) { println!("  before: {l}"); }
+    }
     let n = p.cpu.ring_pos;
     for i in n.saturating_sub(40)..n {
         let Some(&eip) = p.cpu.ring.get(i & 63) else { continue };
