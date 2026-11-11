@@ -1,5 +1,6 @@
-// Renders the Plonk wine scene (SVG) in headless Chrome: settled wallpapers at several sizes + animation stills.
-// Usage: node web/make_wallpaper.mjs <out_dir>   -> wall_1024x768.png, wall_1920x1080.png, wall_800x1200.png, intro_t<t>.png
+// Renders the Plonk 3D scene (web/scene3d.mjs) in headless Chrome (SwiftShader WebGL2).
+//   node web/make_wallpaper.mjs <out_dir> [--size=960x600] [--t=-1,1.5,2] [--tile=48]   iteration stills (PNG)
+//   node web/make_wallpaper.mjs <out_dir> --final   also writes web/wallpaper.jpg (2560x1600 settled) and web/poster.jpg (640x400 pre-splash)
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -8,7 +9,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WEB = dirname(fileURLToPath(import.meta.url));
-const outDir = process.argv[2];
+const args = process.argv.slice(2);
+const flag = (n) => args.find((a) => a.startsWith("--" + n + "="))?.split("=")[1];
+const outDir = args.find((a) => !a.startsWith("--"));
+const FINAL = args.includes("--final");
+const [SW, SH] = (flag("size") ?? "960x600").split("x").map(Number);
+const TILE = Number(flag("tile") ?? 48);
+const TS = flag("t") ? flag("t").split(",").map(Number) : [-1, 1.5, 1.7, 2.0, 2.6, 4.5];
 const CHROME = ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
   "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"].find(existsSync);
 if (!CHROME) { console.log("SKIP make_wallpaper: no Chrome/Edge found"); process.exit(0); }
@@ -23,31 +30,29 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const PORT = server.address().port;
 
-const PAGE = `(async () => {
-  const m = await import("/intro.mjs");
-  const out = { wall: {}, stills: {}, ts: [0.5, 1.6, 2.0, 2.4, 3.2, m.DURATION] };
-  const toURL = (c) => c.toDataURL("image/png");
-  const bmpToCanvas = (b) => { const c = document.createElement("canvas"); c.width = b.width; c.height = b.height; c.getContext("2d").drawImage(b, 0, 0); return c; };
-  for (const [w, h] of [[1024, 768], [1920, 1080], [800, 1200]]) out.wall[w + "x" + h] = toURL(bmpToCanvas(await m.rasterize(w, h)));
-  // stage like the page: relative container, canvas with margin 0 12px
-  const stage = document.createElement("div"); stage.style.cssText = "position:relative;width:1048px;height:768px;background:#000";
-  const cv = document.createElement("canvas"); cv.width = 1024; cv.height = 768; cv.style.cssText = "display:block;margin:0 12px;width:1024px;height:768px";
-  stage.appendChild(cv); document.body.appendChild(stage);
-  const tl = m.createTimeline(stage);
-  const get = (c) => c.getContext("2d").getImageData(0, 0, 1024, 768).data;
-  const datas = {};
-  for (const t of out.ts) { tl.seek(t); const c = await m.snapshot(tl.svg, 1024, 768); out.stills[t] = toURL(c); datas[t] = get(c); }
-  const ref = get(await (async () => bmpToCanvas(await m.rasterize(1024, 768)))());
-  const d = datas[m.DURATION]; let sum = 0, mx = 0;
-  for (let i = 0; i < ref.length; i += 4) for (let k = 0; k < 3; k++) { const e = Math.abs(ref[i + k] - d[i + k]); sum += e; if (e > mx) mx = e; }
-  let bad = 0; for (let i = 0; i < ref.length; i += 4) if (Math.abs(ref[i] - d[i]) + Math.abs(ref[i + 1] - d[i + 1]) + Math.abs(ref[i + 2] - d[i + 2]) > 30) bad++;
-  out.meanDiff = sum / (ref.length / 4 * 3); out.maxDiff = mx; out.badFrac = bad / (ref.length / 4);
-  const svg = tl.svg.getBoundingClientRect(); out.svgRect = [svg.left, svg.top, svg.width, svg.height]; out.nAnim = tl.anims.length; out.DURATION = m.DURATION;
-  out.scene0Len = m.scene0SVG().length;
+const job = (o) => `(async () => {
+  const o = ${JSON.stringify(o)};
+  const m = await import("/scene3d.mjs");
+  const out = { stills: [], log: [] };
+  const sync = (gl) => { const b = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, b); };
+  for (const j of o.jobs) {
+    const sc = m.createScene({ width: j.w, height: j.h, tileRows: j.tile, grain: j.grain ?? 1 });
+    if (!sc) return { error: "no webgl2" };
+    const t0 = performance.now();
+    const ok = await sc.ready;
+    if (!ok) return { error: "shader link failed" };
+    out.log.push("compile+link " + Math.round(performance.now() - t0) + " ms");
+    const gl = sc.canvas.getContext("webgl2");
+    for (const t of j.ts) {
+      const a = performance.now(); sc.render(t); sync(gl); const ms = Math.round(performance.now() - a);
+      out.stills.push({ name: j.names[j.ts.indexOf(t)], ms, data: j.jpeg ? sc.canvas.toDataURL("image/jpeg", j.jpeg) : sc.canvas.toDataURL("image/png"), w: j.w, h: j.h });
+    }
+    sc.dispose();
+  }
   return out;
 })()`;
 
-async function runPage(flags) {
+async function runPage(flags, expr) {
   const udd = mkdtempSync(join(tmpdir(), "plonk-wp-"));
   const chrome = spawn(CHROME, [...flags, "--remote-debugging-port=0", `--user-data-dir=${udd}`, "--no-first-run", "--no-default-browser-check",
     "--disable-extensions", "about:blank"], { stdio: "ignore" });
@@ -72,29 +77,29 @@ async function runPage(flags) {
     await send("Page.enable");
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/` });
     await sleep(800);
-    const r = await send("Runtime.evaluate", { expression: PAGE, returnByValue: true, awaitPromise: true });
+    const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
     if (r.result?.exceptionDetails) return { error: r.result.exceptionDetails.exception?.description ?? r.result.exceptionDetails.text };
     return r.result.result.value;
   } finally { cleanup(); }
 }
 
-
-const BASE = ["--headless=new", "--ignore-gpu-blocklist", "--disable-gpu-sandbox"];
-const SETS = [[...BASE, "--use-angle=swiftshader", "--enable-unsafe-swiftshader"], [...BASE, "--disable-gpu"]];
+const BASE = ["--headless=new", "--ignore-gpu-blocklist", "--disable-gpu-sandbox", "--disable-gpu-watchdog", "--no-sandbox"];
+const SETS = [[...BASE, "--use-angle=swiftshader", "--enable-unsafe-swiftshader"], [...BASE, "--use-gl=angle", "--use-angle=swiftshader-webgl"]];
+const jobs = [];
+const fmt = (t) => (t < 0 ? "pre" : "t" + t.toFixed(2));
+if (FINAL) {
+  jobs.push({ w: 2560, h: 1600, tile: 32, ts: [4.5], jpeg: 0.88, names: ["wallpaper.jpg"] });
+  jobs.push({ w: 640, h: 400, tile: 0, ts: [-1], jpeg: 0.55, grain: 0, names: ["poster.jpg"] });
+} else {
+  jobs.push({ w: SW, h: SH, tile: TILE, ts: TS, names: TS.map((t) => `${fmt(t)}_${SW}x${SH}.png`) });
+}
 let res;
-for (const f of SETS) { res = await runPage(f); if (res && !res.error) break; console.log("flags failed:", res?.error?.split("\n")[0]); }
+for (const f of SETS) { res = await runPage(f, job({ jobs })); if (res && !res.error) break; console.log("flags failed:", res?.error?.split("\n")[0]); }
 server.close();
 if (!res || res.error) { console.log("FAIL make_wallpaper:", res?.error); process.exit(1); }
-
-const png = (d) => Buffer.from(d.split(",")[1], "base64");
-if (outDir) {
-  mkdirSync(outDir, { recursive: true });
-  for (const [k, v] of Object.entries(res.wall)) writeFileSync(join(outDir, `wall_${k}.png`), png(v));
-  for (const [t, v] of Object.entries(res.stills)) writeFileSync(join(outDir, `intro_t${Number(t).toFixed(2)}.png`), png(v));
+for (const st of res.stills) {
+  const dir = FINAL ? WEB : outDir; if (!dir) continue; mkdirSync(dir, { recursive: true });
+  const buf = Buffer.from(st.data.split(",")[1], "base64"); writeFileSync(join(dir, st.name), buf);
+  console.log(st.name, st.w + "x" + st.h, buf.length + " bytes", st.ms + " ms/frame");
 }
-let fail = 0;
-const chk = (ok, name, detail = "") => { if (!ok) fail++; console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? " -- " + detail : ""}`); };
-chk(res.meanDiff < 0.5 && res.badFrac < 0.005, "t=DURATION animation still matches rasterize()", `mean ${res.meanDiff.toFixed(3)} max ${res.maxDiff} bad ${(res.badFrac * 100).toFixed(3)}%`);
-chk(Math.abs(res.svgRect[0] - 12) < 1 && Math.abs(res.svgRect[2] - 1024) < 1, "svg overlay covers canvas area", res.svgRect.join(","));
-console.log(`animations: ${res.nAnim}, scene0 svg: ${res.scene0Len} bytes, DURATION ${res.DURATION}s`);
-process.exit(fail ? 1 : 0);
+console.log(res.log.join("; "));
