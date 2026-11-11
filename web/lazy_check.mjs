@@ -2,7 +2,7 @@
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 const root = new URL("../", import.meta.url);
 const app = process.argv[2] ?? "gui_stay.exe";
-const CORE = ["ntdll", "kernelbase", "kernel32", "win32u", "user32", "gdi32", "msvcrt", "ucrtbase", "advapi32", "sechost", "rpcrt4", "imm32"];
+const CORE = ["apisetschema", "ntdll", "kernelbase", "kernel32", "win32u", "user32", "gdi32", "msvcrt", "ucrtbase", "advapi32", "sechost", "rpcrt4", "imm32"];
 const { instance } = await WebAssembly.instantiate(readFileSync(new URL("target/wasm32-unknown-unknown/release/plonk_host.wasm", root)), {});
 const x = instance.exports, enc = new TextEncoder();
 const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
@@ -11,7 +11,7 @@ const msg = () => Buffer.from(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_p
 for (const c of CORE) add(`c:\\windows\\system32\\${c}.dll`, readFileSync(new URL(`wine/out/${c}.dll`, root)));
 for (const n of ["locale.nls", "l_intl.nls"]) add(`nls\\${n}`, readFileSync(new URL(`wine/out/nls/${n}`, root)));
 add("c:\\app.exe", readFileSync(new URL(`tests/guests/${app}`, root)));
-const remote = [...readdirSync(new URL("wine/out/nls/", root)), "comctl32.dll", "uxtheme.dll", "msimg32.dll", "shlwapi.dll", "version.dll"];
+const remote = [...readdirSync(new URL("wine/out/nls/", root)), ...readdirSync(new URL("wine/out/", root)).filter((f) => f.endsWith(".dll") && !CORE.includes(f.replace(".dll", "")))];
 for (const f of remote) { const e = enc.encode(f); x.plonk_wine_add_remote(put(e), e.length); }
 const p = enc.encode("c:\\app.exe");
 console.log("boot", x.plonk_wine_boot(put(p), p.length), msg());

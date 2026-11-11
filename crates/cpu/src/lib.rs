@@ -648,6 +648,20 @@ impl Cpu {
                             self.setr(reg, vw, i);
                         }
                     }
+                    0xC7 => { // cmpxchg8b m64
+                        let (sub, rm) = self.modrm(m)?;
+                        let Op::M(a) = rm else { return unimpl(op2) };
+                        if sub != 1 { return unimpl(op2); }
+                        let cur = m.r32(a)? as u64 | (m.r32(a + 4)? as u64) << 32;
+                        let want = (self.r[EDX] as u64) << 32 | self.r[EAX] as u64;
+                        if cur == want {
+                            m.w32(a, self.r[EBX])?; m.w32(a + 4, self.r[ECX])?;
+                            self.setf(ZF, true);
+                        } else {
+                            self.r[EAX] = cur as u32; self.r[EDX] = (cur >> 32) as u32;
+                            self.setf(ZF, false);
+                        }
+                    }
                     0xC8..=0xCF => { let i = (op2 & 7) as usize; self.r[i] = self.r[i].swap_bytes(); }
                     _ => return self.sse(m, op2, start, rep),
                 }

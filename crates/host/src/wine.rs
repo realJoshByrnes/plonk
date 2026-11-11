@@ -413,6 +413,23 @@ impl WineProc {
         self.w32(pp + 0x290, u.len() as u32 * 2)?;
         self.w32(PEB + 0x10, pp)?;
 
+        // API set schema (api-ms-win-* -> real DLL): ntdll expects PEB->ApiSetMap to point at the `.apiset` section
+        if let Some(d) = self.files.get(r"c:\windows\system32\apisetschema.dll").cloned() {
+            let u32at = |o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap()) as usize;
+            let pe = u32at(0x3C);
+            let (nsec, optsz) = (u16::from_le_bytes([d[pe + 6], d[pe + 7]]) as usize, u16::from_le_bytes([d[pe + 20], d[pe + 21]]) as usize);
+            for i in 0..nsec {
+                let s = pe + 24 + optsz + i * 40;
+                if &d[s..s + 7] == b".apiset" {
+                    let (vsz, raw) = (u32at(s + 8), u32at(s + 20));
+                    let at = self.vm_reserve(None, vsz as u32).ok_or("apiset: no VM")?;
+                    self.mem.write_bytes(at, &d[raw..raw + vsz]).map_err(|_| "apiset write")?;
+                    self.w32(PEB + 0x38, at)?;
+                    break;
+                }
+            }
+        }
+
         // initial CONTEXT at top of stack, then enter LdrInitializeThunk like call_init_thunk does
         let esp0 = stack_top - 16;
         let ctx = (esp0 & !3) - 0x2CC;

@@ -6,7 +6,7 @@ import { gzipSync } from "node:zlib";
 const root = new URL("../", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".json": "application/json", ".exe": "application/octet-stream" };
 // Always-needed set shipped in the first download; everything else is fetched on demand via /file/<name>.
-const CORE = ["ntdll.dll", "kernelbase.dll", "kernel32.dll", "win32u.dll", "user32.dll", "gdi32.dll", "msvcrt.dll", "ucrtbase.dll", "advapi32.dll", "sechost.dll", "rpcrt4.dll", "imm32.dll"];
+const CORE = ["apisetschema.dll", "ntdll.dll", "kernelbase.dll", "kernel32.dll", "win32u.dll", "user32.dll", "gdi32.dll", "msvcrt.dll", "ucrtbase.dll", "advapi32.dll", "sechost.dll", "rpcrt4.dll", "imm32.dll"];
 let pack = null;
 function buildPack() {
   const out = readdirSync(join(root, "wine/out")).filter((f) => CORE.includes(f)).map((f) => [`c:\\windows\\system32\\${f}`, join(root, "wine/out", f)])

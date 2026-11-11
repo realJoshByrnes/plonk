@@ -104,3 +104,19 @@ fn fs_segment_and_div_error() {
     c.eip = 0x1000;
     assert_eq!(c.run(&mut m, 10), Exit::DivideError(0x1002));
 }
+
+#[test]
+fn cmpxchg8b_works() {
+    use plonk_mem::Mem;
+    let mut m = Mem::new_owned(0x10000);
+    m.write_bytes(0x1000, &[0xF0, 0x0F, 0xC7, 0x0B, 0xF4]).unwrap(); // lock cmpxchg8b [ebx]; hlt
+    m.write_bytes(0x2000, &[1, 0, 0, 0, 2, 0, 0, 0]).unwrap();
+    let mut c = Cpu::new();
+    c.eip = 0x1000; c.r[EBX] = 0x2000; c.r[EAX] = 1; c.r[EDX] = 2; // expected 0x2_00000001 (matches)
+    // ebx/ecx are the new value, but ebx is also the pointer: use ecx:ebx = ecx<<32|ebx -> new low = 0x2000
+    c.r[ECX] = 9;
+    assert_eq!(c.run(&mut m, 10), Exit::Halt);
+    assert!(c.eflags & ZF != 0);
+    assert_eq!(m.r32(0x2000).unwrap(), 0x2000);
+    assert_eq!(m.r32(0x2004).unwrap(), 9);
+}
