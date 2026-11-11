@@ -8,12 +8,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 
-const MEM_SIZE: u32 = 0x4000_0000; // 1 GB flat per process (zero pages are only committed when touched)
-const STACK_TOP: u32 = 0x3FF0_0000;
+const MEM_SIZE: u32 = 0xC000_0000; // 3 GB sparse address space per process, like Linux on i386
+const STACK_TOP: u32 = 0xBFF0_0000;
 const STACK_LOW: u32 = STACK_TOP - 0x80_0000;
 const MMAP_MIN: u32 = 0x1_0000;
-const EXE_BIAS: u32 = 0x3000_0000;
-const INTERP_BIAS: u32 = 0x3800_0000;
+const EXE_BIAS: u32 = 0x9000_0000;
+const INTERP_BIAS: u32 = 0xB000_0000;
 const SLICE: u64 = 200_000;
 const ECHILD: u32 = -10i32 as u32;
 const ESRCH: u32 = -3i32 as u32;
@@ -147,8 +147,7 @@ impl LinuxProc {
     fn blank_proc(&mut self, ppid: u32) -> Proc {
         let pid = self.next_pid;
         self.next_pid += 1;
-        let mut mem = Mem::new_owned(MEM_SIZE);
-        mem.set_guard(0x1000);
+        let mut mem = Mem::new_sparse(MEM_SIZE);
         Proc { pid, ppid, mem, fds: HashMap::new(), cwd: "/".into(), brk: 0, brk_start: 0, maps: BTreeMap::new(), umask: 0o022, exe: String::new(), sigact: HashMap::new(),
             threads: vec![Thread { cpu: Self::new_cpu(), tid: pid, poll_deadline: None, clear_tid: 0, state: St::Run, wake_at: None }], cache: CacheSlot::default(), exit: None, reaped: false }
     }
@@ -199,9 +198,8 @@ impl LinuxProc {
     /// fork / vfork / clone without CLONE_THREAD: a new process with a copy of the mapped memory.
     fn fork(&mut self, stack: u32, wait_exec: bool) -> u32 {
         let mut p = self.blank_proc(self.pid());
-        for (&s, &e) in self.maps.iter().chain(std::iter::once((&self.brk_start, &self.brk))) {
-            if e > s { if let Ok(b) = self.mem.read_bytes(s, e - s) { let _ = p.mem.write_bytes(s, b); } }
-        }
+        for (&s, &e) in self.maps.iter() { p.mem.copy_pages_from(&self.mem, s, e - s); }
+        if self.brk > self.brk_start { p.mem.copy_pages_from(&self.mem, self.brk_start, self.brk - self.brk_start); }
         p.fds = self.fds.clone(); p.cwd = self.cwd.clone(); p.brk = self.brk; p.brk_start = self.brk_start; p.maps = self.maps.clone();
         p.umask = self.umask; p.exe = self.exe.clone(); p.sigact = self.sigact.clone();
         let mut cpu = self.cpu.clone();
@@ -263,8 +261,7 @@ impl LinuxProc {
         for pr in self.procs.iter_mut() { for t in pr.threads.iter_mut() { if t.state == St::Vfork(pi) { t.state = St::Run; } } }
         self.me().clear_tid = 0;
         let retired = self.cpu.retired;
-        self.mem = Mem::new_owned(MEM_SIZE);
-        self.mem.set_guard(0x1000);
+        self.mem = Mem::new_sparse(MEM_SIZE);
         self.cpu = Self::new_cpu();
         self.cpu.retired = retired;
         self.sigact.clear();
@@ -317,9 +314,12 @@ impl LinuxProc {
             let src = elf.get(off as usize..(off + filesz) as usize).ok_or("ELF segment outside file")?;
             if ty == 3 { interp = Some(String::from_utf8_lossy(src).trim_end_matches(char::from(0)).to_string()); }
             if ty != 1 { continue; }
+            let (lo, hi) = (va & !0xFFF, (va + memsz + 0xFFF) & !0xFFF);
+            if hi > MEM_SIZE || hi <= lo { return Err("ELF segment outside guest memory".into()); }
+            for pg in (lo..hi).step_by(4096) { if !self.mapped(pg, pg + 4096) { self.mem.map(pg, 4096, true); } } // segments may share a page
+            self.unmap(lo, hi);
+            self.maps.insert(lo, hi);
             self.mem.write_bytes(va, src).map_err(|_| "ELF segment outside guest memory")?;
-            self.unmap(va & !0xFFF, (va + memsz + 0xFFF) & !0xFFF);
-            self.maps.insert(va & !0xFFF, (va + memsz + 0xFFF) & !0xFFF);
             end = end.max(va + memsz);
             if off as usize <= phoff && phoff < (off + filesz) as usize { phdr_va = va + (phoff as u32 - off); }
         }
@@ -342,6 +342,7 @@ impl LinuxProc {
         self.brk = (end + 0xFFF) & !0xFFF;
         self.brk_start = self.brk;
         self.maps.insert(STACK_LOW, STACK_TOP);
+        self.mem.map(STACK_LOW, STACK_TOP - STACK_LOW, true);
         // strings at the top of the stack, then the pointer vectors
         let mut sp = STACK_TOP;
         let mut push_str = |mem: &mut Mem, s: &[u8]| -> u32 { sp -= s.len() as u32 + 1; mem.write_bytes(sp, s).unwrap(); mem.w8(sp + s.len() as u32, 0).unwrap(); sp };
@@ -794,7 +795,7 @@ impl LinuxProc {
         self.send(sock, src, Vec::new())
     }
 
-    fn mmap(&mut self, addr: u32, len: u32, flags: u32, fd: u32, off: u64) -> u32 {
+    fn mmap(&mut self, addr: u32, len: u32, prot: u32, flags: u32, fd: u32, off: u64) -> u32 {
         let len = (len + 0xFFF) & !0xFFF;
         if len == 0 { return EINVAL; }
         let fits = |a: u32| a >= 0x1000 && a & 0xFFF == 0 && a.checked_add(len).map_or(false, |e| e <= MEM_SIZE);
@@ -810,7 +811,7 @@ impl LinuxProc {
             match self.find_gap(len) { Some(a) => a, None => return ENOMEM }
         };
         self.maps.insert(a, a + len);
-        if self.mem.write_bytes(a, &vec![0u8; len as usize]).is_err() { return ENOMEM; }
+        self.mem.map(a, len, prot != 0 || flags & 0x20 == 0);
         if flags & 0x20 == 0 { // file-backed (a private copy; shared writable mappings are not written back yet)
             let Some(o) = self.fds.get(&fd).cloned() else { return EBADF };
             let o = o.borrow();
@@ -915,7 +916,11 @@ impl LinuxProc {
                 Some(0)
             }
             45 => { // brk
-                if a >= self.brk_start && a < self.brk_start + 0x0800_0000 && (a <= self.brk || !self.mapped(self.brk, a)) { self.brk = a; }
+                if a >= self.brk_start && a < self.brk_start + 0x0800_0000 && (a <= self.brk || !self.mapped(self.brk, a)) {
+                    let (lo, hi) = ((self.brk + 0xFFF) & !0xFFF, (a + 0xFFF) & !0xFFF);
+                    if hi > lo { self.mem.map(lo, hi - lo, true); }
+                    self.brk = a;
+                }
                 Some(self.brk)
             }
             54 => Some(ENOTTY), // ioctl
@@ -938,14 +943,19 @@ impl LinuxProc {
                 let t = match self.vfs.get(&p) { Some(Node::Link(t)) => Some(t.clone()), _ if p == "/proc/self/exe" => Some(self.exe.clone()), _ => None };
                 Some(match t { Some(t) => { let k = t.len().min(n as usize); let _ = self.mem.write_bytes(buf, &t.as_bytes()[..k]); k as u32 } None => EINVAL })
             }
-            91 => { let e = a.saturating_add((b + 0xFFF) & !0xFFF); self.unmap(a, e); Some(0) } // munmap
-            125 | 219 | 118 | 148 | 36 => Some(0), // mprotect, madvise, fsync, fdatasync, sync
+            91 => { // munmap
+                let e = a.saturating_add((b + 0xFFF) & !0xFFF).min(MEM_SIZE);
+                if a & 0xFFF == 0 && e > a { self.unmap(a, e); self.mem.map(a, e - a, false); }
+                Some(0)
+            }
+            125 => { self.mem.protect(a & !0xFFF, (b + (a & 0xFFF) + 0xFFF) & !0xFFF, c != 0); Some(0) } // mprotect
+            219 | 118 | 148 | 36 => Some(0), // madvise, fsync, fdatasync, sync
             90 => { // old mmap: args in a struct
                 let g = |i: u32| self.mem.r32(a + i * 4).unwrap_or(0);
-                let (addr, len, flags, fd, off) = (g(0), g(1), g(3), g(4), g(5));
-                Some(self.mmap(addr, len, flags, fd, off as u64))
+                let (addr, len, prot, flags, fd, off) = (g(0), g(1), g(2), g(3), g(4), g(5));
+                Some(self.mmap(addr, len, prot, flags, fd, off as u64))
             }
-            192 => Some(self.mmap(a, b, d, e, (f as u64) << 12)), // mmap2
+            192 => Some(self.mmap(a, b, c, d, e, (f as u64) << 12)), // mmap2
             93 | 194 => { // ftruncate, ftruncate64
                 Some(match self.fds.get(&a).cloned() {
                     Some(o) => { if let Kind::File { data, .. } = &o.borrow().kind { data.borrow_mut().resize(b as usize, 0); 0 } else { EINVAL } }
