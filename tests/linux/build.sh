@@ -5,4 +5,4 @@ cd "$(dirname "$0")"
 gcc -m32 -static -O1 -o hello hello.c
 gcc -m32 -O1 -o hello_dyn hello.c
 mkdir -p root
-cp -L /lib32/ld-linux.so.2 /lib32/libc.so.6 root/
+cp -L /lib32/ld-linux.so.2 /lib32/libc.so.6 /lib32/libm.so.6 /lib32/libdl.so.2 /lib32/libpthread.so.0 root/
