@@ -19,21 +19,29 @@ fn main() {
             }
         }
     }
+    // ROOT=1: use the full Wine install from wine/root.tar (/usr/local/...) instead of the hand-picked files above
+    if std::env::var("ROOT").is_ok() {
+        p.files.retain(|k, _| !k.starts_with("/usr/"));
+        p.add_tar(&std::fs::read(format!("{root}wine/root.tar")).expect("wine/root.tar"));
+    }
     p.mkdir("/home/user/.wine");
     let elf = p.files.get(&a[1]).cloned().unwrap_or_else(|| std::fs::read(&a[1]).expect("read elf"));
     let argv: Vec<&str> = a[1..].iter().map(|s| s.as_str()).collect();
     let extra = std::env::var("ENV").unwrap_or_default();
-    let mut env = vec!["HOME=/home/user", "WINEPREFIX=/home/user/.wine", "PATH=/usr/bin:/bin", "WINELOADERNOEXEC=1", "USER=user"];
+    let mut env = vec!["HOME=/home/user", "WINEPREFIX=/home/user/.wine", "PATH=/usr/local/bin:/usr/bin:/bin", "WINELOADERNOEXEC=1", "USER=user"];
     env.extend(extra.split(';').filter(|s| !s.is_empty()));
     p.load(&elf, &argv, &env).unwrap();
+    p.auto_time = std::env::var("AUTO").is_ok(); // jump the guest clock whenever everything waits on a timeout
     // run; whenever everything blocks, let a second of guest time pass (up to IDLE rounds)
     let idle: u32 = std::env::var("IDLE").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
-    let mut r = p.run(2_000_000_000);
+    let steps: u64 = std::env::var("STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(2_000_000_000);
+    let mut r = p.run(steps);
     let mut rounds = 0;
     while matches!(r, Ok(None)) && p.blocked && rounds < idle { p.advance(1000); rounds += 1; r = p.run(2_000_000_000); }
     println!("result {r:?} blocked={} after {rounds} idle seconds", p.blocked);
     println!("stdout: {}", String::from_utf8_lossy(&p.stdout));
     println!("unknown: {:?}", p.unknown);
+    if std::env::var("PS").is_ok() { print!("{}", p.ps()); }
     let n: usize = std::env::var("TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let pat = std::env::var("GREP").unwrap_or_default();
     let lines: Vec<&String> = p.trace.iter().filter(|l| l.contains(pat.as_str())).collect();

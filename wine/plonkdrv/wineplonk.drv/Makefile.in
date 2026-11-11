@@ -1,0 +1,9 @@
+MODULE    = wineplonk.drv
+UNIXLIB   = wineplonk.so
+UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)
+
+SOURCES = \
+	display.c \
+	dllmain.c \
+	plonkdrv_main.c \
+	window.c
