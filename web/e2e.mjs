@@ -109,6 +109,11 @@ try {
   const gl = await evalJs("({ kind: window.__glKind || null, perf: window.__perf })");
   console.log("PERF", JSON.stringify(gl), await evalJs("window.__glDirect")); await check("3D cube renders via GPU backend", !!gl.kind, JSON.stringify(gl));
   await shot("gl");
+  await send("Page.navigate", { url: URL_.replace("?nointro", "") });
+  await sleep(9000);
+  const it = await evalJs("window.__intro || null");
+  await check("boot intro plays and sets the wallpaper", it === "played", String(it));
+  await shot("intro");
   await open("gui_two.exe");
   await click(60, 50);
   await send("Input.dispatchMouseEvent", { type: "mousePressed", x: origin.x + 60, y: origin.y + 50, button: "left", clickCount: 1 });
