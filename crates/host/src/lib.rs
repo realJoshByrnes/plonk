@@ -2,6 +2,7 @@
 pub mod ntuser_codes;
 pub mod reqnames;
 pub mod glnames;
+pub mod linux;
 pub mod sysnames;
 pub mod wasm_wine;
 pub mod wine;

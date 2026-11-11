@@ -221,7 +221,7 @@ fn decode_opt(b: &[u8], pc: u32) -> Option<Insn> {
             let op2 = *b.get(p)?;
             p += 1;
             match op2 {
-                0x0D | 0x18 | 0x1F => { mr!(); i.h = H::Nop; }
+                0x0D | 0x18 | 0x1E | 0x1F => { mr!(); i.h = H::Nop; }
                 0x40..=0x4F => { i.reg = mr!(); i.aux = op2 & 0xF; i.h = H::Cmov; }
                 0x80..=0x8F => {
                     let d = rd32(b, &mut p)?;

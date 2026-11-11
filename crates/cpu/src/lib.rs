@@ -62,6 +62,11 @@ pub struct Cpu {
     pub ring: Vec<u32>,
     pub ring_pos: usize,
     pub gs_base: u32,
+    /// Linux personality: segment loads of fs/gs pick their base from `tls` (GDT entries 6..=8, set_thread_area).
+    pub linux: bool,
+    pub tls: [u32; 3],
+    pub sel_fs: u32,
+    pub sel_gs: u32,
     pub tsc: u64,
     /// Address of the instruction being executed (for exception records).
     pub insn_start: u32,
@@ -465,10 +470,18 @@ impl Cpu {
             }
             0x8C => {
                 let (reg, rm) = self.modrm(m)?;
-                let sel = [0x2B, 0x23, 0x2B, 0x2B, 0x53, 0x2B, 0, 0][reg];
+                let mut sel = [0x2B, 0x23, 0x2B, 0x2B, 0x53, 0x2B, 0, 0][reg];
+                if self.linux { sel = match reg { 1 => 0x73, 4 => self.sel_fs, 5 => self.sel_gs, _ => 0x7B }; }
                 self.wr(m, rm, if matches!(rm, Op::R(_)) { vw } else { 16 }, sel)?;
             }
-            0x8E => { self.modrm(m)?; }
+            0x8E => {
+                let (reg, rm) = self.modrm(m)?;
+                if self.linux && (reg == 4 || reg == 5) {
+                    let sel = self.rd(m, rm, 16)? & 0xFFFF;
+                    let base = match sel >> 3 { i @ 6..=8 if sel & 4 == 0 => self.tls[(i - 6) as usize], _ => 0 };
+                    if reg == 4 { self.sel_fs = sel; self.fs_base = base; } else { self.sel_gs = sel; self.gs_base = base; }
+                }
+            }
             0x8D => {
                 self.seg = 0;
                 match self.modrm(m)? {
@@ -587,7 +600,7 @@ impl Cpu {
                 let op2 = self.f8(m)?;
                 match op2 {
                     0x0B => return Err(Exit::Undefined(start)),
-                    0x0D | 0x18 | 0x1F => { self.modrm(m)?; }
+                    0x0D | 0x18 | 0x1E | 0x1F => { self.modrm(m)?; }
                     0x31 => { self.tsc += 1000; self.r[EAX] = self.tsc as u32; self.r[EDX] = (self.tsc >> 32) as u32; }
                     0xA2 => {
                         let leaf = self.r[EAX];
