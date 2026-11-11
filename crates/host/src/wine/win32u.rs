@@ -689,6 +689,13 @@ impl WineProc {
                     0x02b3 => { let r = if a[6] != 0 { self.send_ansi(hwnd, msg, wp, lp)? } else { self.send(hwnd, msg, wp, lp)? }; if a[4] != 0 { self.w32(a[4] + 8, r)?; } 1 }
                     0x02b7 | 0x02b8 => { self.send(hwnd, msg, wp, lp)?; 1 }
                     0x02b1 | 0x3001 | 0x02ab => { // SendMessage / GetDispatchParams: user32 dispatches via win_proc_params
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if msg == 0x2B && std::env::var("DRAWITEM_LOG").is_ok() { // WM_DRAWITEM: DRAWITEMSTRUCT
+                            let g = |i: u32| self.mem.r32(lp + i * 4).unwrap_or(0);
+                            eprintln!("WM_DRAWITEM to {hwnd:#x}: ctl={} item={} action={:#x} state={:#x} hdc={:#x} rect=[{},{},{},{}]", g(1), g(2), g(3), g(4), g(6), g(8) as i32, g(9) as i32, g(10) as i32, g(11) as i32);
+                        }
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if msg == 0x2C && std::env::var("DRAWITEM_LOG").is_ok() { eprintln!("WM_MEASUREITEM to {hwnd:#x}: ctl={} item={}", self.mem.r32(lp + 4).unwrap_or(0), self.mem.r32(lp + 8).unwrap_or(0)); }
                         let Some(w) = self.wm.windows.get(&hwnd) else { return Ok(Some(0)) };
                         let (mut func, class_ansi) = (if w.proc_override != 0 { w.proc_override } else { self.wm.classes[w.class].wndproc }, self.wm.classes[w.class].ansi);
                         if ty == 0x02ab && a[4] != 0 { let given = self.r32(a[4])?; if given != 0 { func = given; } } // CallWindowProc: the caller names the procedure
@@ -706,6 +713,8 @@ impl WineProc {
                 let Some(w) = self.wm.windows.get(&hwnd) else { return Ok(Some(0)) };
                 let inv = w.invalid.unwrap_or([0, 0, 0, 0]);
                 let erase = w.needs_erase;
+                #[cfg(not(target_arch = "wasm32"))]
+                if std::env::var("PAINT_LOG").is_ok() { eprintln!("BeginPaint {hwnd:#x} invalid={:?} client={:?}", w.invalid, self.wm.client_rect(hwnd)); }
                 let hdc = self.new_dc(hwnd, Some(inv));
                 let mut f_erase = 0;
                 if erase {
@@ -787,13 +796,21 @@ impl WineProc {
                 std::mem::replace(&mut dc.font, a[1])
             }
             "NtGdiCreateRectRgn" => self.gdi_alloc(0x040000, Gdi::Region([a[0] as i32, a[1] as i32, a[2] as i32, a[3] as i32])),
-            "NtGdiGetRandomRgn" => { // visible/clip region of the DC, in screen coordinates
+            "NtGdiGetRandomRgn" => {
+                // code 1 = the DC's clip region (DC-relative coordinates, 0 if there is none - callers restore it with SelectClipRgn(NULL));
+                // code 4 = the system/visible region in screen coordinates
                 let Some(dc) = self.wm.dcs.get(&a[0]) else { return Ok(Some(0)) };
                 let (hwnd, clip) = (dc.hwnd, dc.clip);
-                let (ox, oy) = self.client_origin_screen(hwnd);
-                let c = clip.unwrap_or_else(|| self.wm.client_rect(hwnd));
-                self.wm.gdi.insert(a[1], Gdi::Region([ox + c[0], oy + c[1], ox + c[2], oy + c[3]]));
-                1
+                match a[2] & 0xff {
+                    1 => match clip { Some(c) => { self.wm.gdi.insert(a[1], Gdi::Region(c)); 1 } None => 0 },
+                    4 => {
+                        let (ox, oy) = self.client_origin_screen(hwnd);
+                        let c = clip.unwrap_or_else(|| self.wm.client_rect(hwnd));
+                        self.wm.gdi.insert(a[1], Gdi::Region([ox + c[0], oy + c[1], ox + c[2], oy + c[3]]));
+                        1
+                    }
+                    _ => 0,
+                }
             }
             "NtGdiIntersectClipRect" => {
                 let r = [a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32];
