@@ -2,3 +2,5 @@ target/
 node_modules/
 *.log
 wine/out/
+tests/linux/root/
+wine/out32/

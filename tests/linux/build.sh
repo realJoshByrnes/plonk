@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Build the Linux i386 test programs (run inside WSL Debian; needs gcc-multilib). Copies the i386 loader + libc into root/ (git-ignored).
+set -e
+cd "$(dirname "$0")"
+gcc -m32 -static -O1 -o hello hello.c
+gcc -m32 -O1 -o hello_dyn hello.c
+mkdir -p root
+cp -L /lib32/ld-linux.so.2 /lib32/libc.so.6 root/
