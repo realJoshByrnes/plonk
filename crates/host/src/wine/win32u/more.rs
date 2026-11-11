@@ -17,6 +17,9 @@ pub struct Extra {
     pub mouse: (i32, i32),
     pub hook_next: u32,
     pub brush_cache: BTreeMap<u32, u32>,
+    pub gdi_b: super::gdi_batch::State,
+    pub user_b: super::user_batch::State,
+    pub misc_b: super::misc_batch::State,
 }
 
 impl WineProc {

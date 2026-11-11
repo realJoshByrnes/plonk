@@ -7,9 +7,12 @@ use plonk_display::{Backend, SoftBackend, SurfaceId};
 use std::collections::{BTreeMap, VecDeque};
 
 mod gdi;
+mod gdi_batch;
 pub mod gl;
 mod menu;
+mod misc_batch;
 mod more;
+mod user_batch;
 use gdi::Bitmap;
 use menu::{Menu, OpenMenu, MENU_H};
 
@@ -514,6 +517,9 @@ impl WineProc {
     /// Ok(None): not handled here.
     pub(crate) fn win32u_call(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
         if let Some(v) = self.more_call(name, a)? { return Ok(Some(v)); }
+        if let Some(v) = self.gdi_batch_call(name, a)? { return Ok(Some(v)); }
+        if let Some(v) = self.user_batch_call(name, a)? { return Ok(Some(v)); }
+        if let Some(v) = self.misc_batch_call(name, a)? { return Ok(Some(v)); }
         if let Some(v) = self.gl_nt(name, a)? { return Ok(Some(v)); }
         Ok(Some(match name {
             "NtUserInitializeClientPfnArrays" => {

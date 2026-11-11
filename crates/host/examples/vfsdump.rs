@@ -50,6 +50,7 @@ fn main() {
     if std::env::var("WINDOWS").is_ok() { println!("windows: {}", p.debug_windows()); }
     println!("state {:?}", st);
     println!("stdout: {}", String::from_utf8_lossy(&p.stdout));
+    if std::env::var("STUBBED").is_ok() { println!("stubbed: {}", p.stubbed.join(" ")); }
     if std::env::var("OPENS").is_ok() { for l in p.trace.iter().filter(|l| l.contains("(open ")) { println!("{l}"); } }
     if std::env::var("MODS").is_ok() { for m in p.module_names() { println!("module {m}"); } }
     let mut names: Vec<&String> = p.files.keys().filter(|k| !base.contains(*k)).collect();
