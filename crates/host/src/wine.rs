@@ -4,6 +4,7 @@ use crate::sysnames::{NT, WIN32U};
 use plonk_cpu::{Cpu, Exit, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP};
 use plonk_mem::Mem;
 
+mod kernel;
 mod vfs;
 mod win32u;
 pub use win32u::Wm;
@@ -44,6 +45,7 @@ pub enum RunState { Exited(u32), Idle,
     Need(String), /// Step budget used up while the guest is still computing; call again to continue.
     Busy }
 
+#[derive(Clone)]
 pub enum Obj {
     File { path: String, pos: u32, dir: bool },
     Section { path: String, image: bool, size: u32 },
@@ -69,6 +71,7 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    ktimers: Vec<(u32, u64, u32)>,
     exc_depth: u32,
     ki_user_exception: u32,
     cb_depth: u32,
@@ -111,7 +114,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), exc_depth: 0, ki_user_exception: 0, cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), ktimers: Vec::new(), exc_depth: 0, ki_user_exception: 0, cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p.mem.set_guard(0x10000);
@@ -317,6 +320,7 @@ impl WineProc {
                 self.reg_set_sz(tm, n, v);
             }
         }
+        self.reg_set_sz("\\registry\\machine\\system\\currentcontrolset\\control\\computername\\activecomputername", "computername", "PLONK");
         let ntdll = self.map_image_file("c:\\windows\\system32\\ntdll.dll")?;
         self.ntdll_base = ntdll.base;
         let exp = |n: &str, p: &Self| plonk_pe::find_export(&p.mem, ntdll.base, n).ok_or(format!("ntdll export {n} missing"));
@@ -389,7 +393,7 @@ impl WineProc {
         self.put_ustr(pp + 0x78, "");
         self.put_ustr(pp + 0x80, "");
         self.put_ustr(pp + 0x88, "");
-        let env = "SystemRoot=C:\\windows\0SystemDrive=C:\0PATH=C:\\windows\\system32\0\0";
+        let env = "SystemRoot=C:\\windows\0windir=C:\\windows\0SystemDrive=C:\0PATH=C:\\windows\\system32;C:\\windows\0TEMP=C:\\temp\0TMP=C:\\temp\0COMPUTERNAME=PLONK\0USERNAME=plonk\0USERPROFILE=C:\\users\\plonk\0APPDATA=C:\\users\\plonk\\AppData\\Roaming\0OS=Windows_NT\0PROCESSOR_ARCHITECTURE=x86\0NUMBER_OF_PROCESSORS=1\0ComSpec=C:\\windows\\system32\\cmd.exe\0PATHEXT=.COM;.EXE;.BAT;.CMD\0\0";
         let u: Vec<u16> = env.encode_utf16().collect();
         let ea = self.scratch_alloc(u.len() as u32 * 2);
         for (i, c) in u.iter().enumerate() { self.w16(ea + i as u32 * 2, *c)?; }
@@ -531,7 +535,7 @@ impl WineProc {
 
     /// Publish the guest clock in KUSER_SHARED_DATA (TickCount, InterruptTime, SystemTime).
     pub(crate) fn update_kuser(&mut self) {
-        let ms = self.ticks / 10_000 + self.wm_now_ms();
+        let ms = self.ticks / 10_000 + self.wm_now_ms() + 300_000; // pretend the machine has been up for 5 minutes
         let tc = ms; // Wine uses TickCountMultiplier = 1<<24, i.e. TickCount is in ms
         let (it, st) = (self.ticks + self.wm_now_ms() * 10_000, 133_500_000_000_000_000u64 + self.ticks + self.wm_now_ms() * 10_000);
         for (off, v) in [(0x320u32, tc), (0x8, it), (0x14, st)] {
@@ -630,6 +634,7 @@ impl WineProc {
     fn dispatch(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
         if !name.starts_with("NtUser") && !name.starts_with("NtGdi") {
             if let Some(r) = self.vfs_call(name, a)? { return Ok(Some(r)); }
+            if let Some(r) = self.kernel_call(name, a)? { return Ok(Some(r)); }
             if self.need_file.is_some() { return Ok(None); }
         }
         if name.starts_with("NtUser") || name.starts_with("NtGdi") {
@@ -812,7 +817,7 @@ impl WineProc {
             "NtQueryVolumeInformationFile" => {
                 let (iosb, buf, class) = (a[1], a[2], a[4]);
                 match class {
-                    4 => { self.w32(buf, 7)?; self.w32(buf + 4, 0)?; self.w32(iosb, 0)?; self.w32(iosb + 4, 8)?; }
+                    4 => { self.w32(buf, 8)?; self.w32(buf + 4, 0)?; self.w32(iosb, 0)?; self.w32(iosb + 4, 8)?; } // FILE_DEVICE_DISK_FILE_SYSTEM
                     _ => { self.note(format!("QueryVolumeInformationFile class {class}")); return Ok(Some(0xC000_0003)); },
                 }
                 0
@@ -1044,15 +1049,31 @@ impl WineProc {
                     _ => STATUS_INVALID_HANDLE,
                 }
             }
-            "NtWaitForSingleObject" => self.wait_one(a[0]),
-            "NtWaitForMultipleObjects" => { // (count, handles*, wait_type(0=all,1=any), alertable, timeout*)
-                let mut res = 0x102u32; // STATUS_TIMEOUT
-                for i in 0..a[0] {
-                    let h = self.r32(a[1] + i * 4)?;
-                    if self.wait_one(h) == 0 { res = i; if a[2] == 1 { break; } }
-                    else if a[2] == 0 { res = 0x102; break; }
+            "NtWaitForSingleObject" => {
+                // (h, alertable, timeout*): an unsignaled wait lets guest time pass (timers fire) before giving up
+                let r = self.wait_one(a[0]);
+                if r == 0x102 {
+                    let ms = if a[2] == 0 { 50 } else { let t = self.r32(a[2])? as u64 | (self.r32(a[2] + 4)? as u64) << 32; if (t as i64) < 0 { ((-(t as i64)) as u64 / 10_000).min(60_000) } else { 0 } };
+                    if ms > 0 { self.tick(ms as u32); let r2 = self.wait_one(a[0]); if r2 == 0 { self.idle = false; return Ok(Some(0)); } }
                 }
-                if res == 0x102 { self.idle = true; }
+                r
+            }
+            "NtWaitForMultipleObjects" => { // (count, handles*, wait_type(0=all,1=any), alertable, timeout*)
+                let hs: Vec<u32> = (0..a[0]).map(|i| self.r32(a[1] + i * 4).unwrap_or(0)).collect();
+                let poll = |p: &mut Self| -> u32 {
+                    let mut res = 0x102u32;
+                    for (i, h) in hs.iter().enumerate() {
+                        if p.wait_one(*h) == 0 { res = i as u32; if a[2] == 1 { break; } }
+                        else if a[2] == 0 { res = 0x102; break; }
+                    }
+                    res
+                };
+                let mut res = poll(self);
+                if res == 0x102 {
+                    let ms = if a[4] == 0 { 50 } else { let t = self.r32(a[4])? as u64 | (self.r32(a[4] + 4)? as u64) << 32; if (t as i64) < 0 { ((-(t as i64)) as u64 / 10_000).min(60_000) } else { 0 } };
+                    if ms > 0 { self.tick(ms as u32); res = poll(self); }
+                    if res == 0x102 { self.idle = true; } else { self.idle = false; }
+                }
                 res
             }
             "NtDelayExecution" | "NtYieldExecution" => {

@@ -798,6 +798,7 @@ impl WineProc {
     pub fn tick(&mut self, dt_ms: u32) {
         self.wm.now_ms += dt_ms as u64;
         self.update_kuser();
+        self.fire_ktimers();
         let now = self.wm.now_ms;
         let mut due = Vec::new();
         for t in self.wm.timers.iter_mut() {
