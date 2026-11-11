@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 mod gdi;
 mod menu;
+mod more;
 use gdi::Bitmap;
 use menu::{Menu, OpenMenu, MENU_H};
 
@@ -89,6 +90,7 @@ pub struct Wm {
     drag: Option<(u32, i32, i32)>, // hwnd, grab offset
     capture: u32,
     focus: u32,
+    extra: more::Extra,
     menus: BTreeMap<u32, Menu>,
     next_menu: u32,
     open: Option<OpenMenu>,
@@ -109,7 +111,7 @@ impl Wm {
     pub fn new() -> Self {
         let mut w = Wm {
             classes: Vec::new(), windows: BTreeMap::new(), queue: VecDeque::new(), quit: None, next_hwnd: 0x10030,
-            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, menus: BTreeMap::new(), next_menu: 0x30020, open: None, track_pending: false, track_done: None, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
+            gdi: BTreeMap::new(), dcs: BTreeMap::new(), next_gdi: 1, backend: SoftBackend::new(), time: 1000, keep_snapshot: false, snapshot: None, zorder: Vec::new(), active: 0, drag: None, capture: 0, focus: 0, extra: Default::default(), menus: BTreeMap::new(), next_menu: 0x30020, open: None, track_pending: false, track_done: None, timers: Vec::new(), now_ms: 0, keys: [false; 256], fonts: BTreeMap::new(), bitmaps: BTreeMap::new(), stock_bitmap: 0, client_procs_w: [0; 14],
         };
         w.classes.push(Class { atom: 0xC000, name: "#32769".into(), wndproc: 0, bg: 0, raw: [0; 12], ansi: false });
         w.windows.insert(DESKTOP, Window { class: 0, style: WS_VISIBLE, rect: [0, 0, 1024, 768], parent: 0, text: String::new(), visible: true, invalid: None, needs_erase: false, surface: None, ex_style: 0, menu: 0, id: 0, inst: 0, userdata: 0, proc_override: 0, extra: Vec::new() });
@@ -425,6 +427,7 @@ impl WineProc {
     // ---- syscall entry ----
     /// Ok(None): not handled here.
     pub(crate) fn win32u_call(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
+        if let Some(v) = self.more_call(name, a)? { return Ok(Some(v)); }
         Ok(Some(match name {
             "NtUserInitializeClientPfnArrays" => {
                 let mut procs = [0u32; 14];
@@ -783,6 +786,7 @@ impl WineProc {
 
     /// Desktop mouse events from the shell. kind: 0 = down, 1 = move, 2 = up.
     pub fn mouse(&mut self, kind: u32, x: i32, y: i32) {
+        self.wm.extra.mouse = (x, y);
         if self.menu_mouse(kind, x, y) { return; }
         match kind {
             0 => {

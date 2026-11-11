@@ -4,6 +4,7 @@ use crate::sysnames::{NT, WIN32U};
 use plonk_cpu::{Cpu, Exit, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP};
 use plonk_mem::Mem;
 
+mod vfs;
 mod win32u;
 pub use win32u::Wm;
 use std::collections::{HashMap, VecDeque};
@@ -66,6 +67,8 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    dirs: std::collections::HashSet<String>,
+    del_on_close: std::collections::HashSet<u32>,
     /// Basenames (lowercase) of files the shell can supply on demand.
     pub remote: std::collections::HashSet<String>,
     need_file: Option<String>,
@@ -102,7 +105,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
@@ -294,6 +297,7 @@ impl WineProc {
 
     pub fn boot(&mut self, exe_path: &str) -> Res<()> {
         let exe_path = Self::nt_path(exe_path);
+        for d in [r"c:\windows", r"c:\windows\system32", r"c:\windows\temp", r"c:\users", r"c:\users\plonk", r"c:\temp", r"c:\program files"] { self.dirs.insert(d.to_string()); }
         if let Some(cc) = self.files.get("c:\\windows\\system32\\comctl32.dll").cloned() {
             const ID: &str = "x86_microsoft.windows.common-controls_6595b64144ccf1df_6.0.0.0_none_deadbeef";
             let manifest = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n<assemblyIdentity type=\"win32\" name=\"Microsoft.Windows.Common-Controls\" version=\"6.0.0.0\" processorArchitecture=\"x86\" publicKeyToken=\"6595b64144ccf1df\"/>\n<file name=\"comctl32.dll\"/>\n</assembly>\n";
@@ -353,6 +357,9 @@ impl WineProc {
         self.w32(TEB + 0x24, 0x24)?; // tid
         self.w32(TEB + 0x30, PEB)?;
         self.w32(TEB + 0xC0, SYSCALL_THUNK)?;
+        // StaticUnicodeString (used by every ANSI->Unicode path conversion) -> StaticUnicodeBuffer
+        self.w16(TEB + 0xBF8 + 2, 0x20A)?;
+        self.w32(TEB + 0xBF8 + 4, TEB + 0xC00)?;
         self.cpu.fs_base = TEB;
 
         // process parameters
@@ -517,6 +524,9 @@ impl WineProc {
         if ok { Some(path.to_string()) } else { None }
     }
 
+    /// Record an unsupported sub-feature (shown in the shell banner) without aborting the guest.
+    pub(crate) fn note(&mut self, what: String) { if !self.stubbed.contains(&what) { self.stubbed.push(what); } }
+
     pub(crate) fn ret_stdcall(&mut self, status: u32) -> Res<()> {
         let ra = self.r32(self.cpu.r[ESP])?;
         self.cpu.r[ESP] = self.cpu.r[ESP].wrapping_add(4);
@@ -567,6 +577,10 @@ impl WineProc {
 
     /// Ok(Some(status)) = return to caller; Ok(None) = handler already set the cpu state.
     fn dispatch(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
+        if !name.starts_with("NtUser") && !name.starts_with("NtGdi") {
+            if let Some(r) = self.vfs_call(name, a)? { return Ok(Some(r)); }
+            if self.need_file.is_some() { return Ok(None); }
+        }
         if name.starts_with("NtUser") || name.starts_with("NtGdi") {
             if let Some(r) = self.win32u_call(name, a)? {
                 if std::mem::take(&mut self.took_over) { return Ok(None); }
@@ -618,7 +632,7 @@ impl WineProc {
                     self.w32(buf + 4, 0)?;
                     return Ok(Some(0));
                 }
-                if class != 0 { return Err(format!("QueryVirtualMemory class {class}")); }
+                if class != 0 { { self.note(format!("QueryVirtualMemory class {class}")); return Ok(Some(0xC000_0003)); }; }
                 if len < 28 { return Ok(Some(0xC000_0004)); }
                 let page = addr & !0xfff;
                 let hit = self.regions.iter().copied().find(|&(s, z)| page >= s && page < s + z);
@@ -690,7 +704,7 @@ impl WineProc {
             "NtQuerySection" => {
                 let (sec, class, buf, len, retlen) = (a[0], a[1], a[2], a[3], a[4]);
                 let path = match self.handles.get(&sec) { Some(Obj::Section { path, .. }) => path.clone(), _ => return Ok(Some(STATUS_INVALID_HANDLE)) };
-                if class != 1 { return Err(format!("QuerySection class {class}")); }
+                if class != 1 { { self.note(format!("QuerySection class {class}")); return Ok(Some(0xC000_0003)); }; }
                 if len < 0x30 { return Ok(Some(0xC000_0004)); }
                 self.fill_image_info(&path, buf)?;
                 if retlen != 0 { self.w32(retlen, 0x30)?; }
@@ -711,7 +725,7 @@ impl WineProc {
                         for (i, v) in [0u32, PEB, 1, 8, 0x20, 0].iter().enumerate() { self.w32(buf + i as u32 * 4, *v)?; }
                         if retlen != 0 { self.w32(retlen, 24)?; }
                     }
-                    _ => return Err(format!("QueryInformationProcess class {class}")),
+                    _ => { self.note(format!("QueryInformationProcess class {class}")); return Ok(Some(0xC000_0003)); },
                 }
                 0
             }
@@ -724,7 +738,7 @@ impl WineProc {
                     14 => { self.w32(buf, pos)?; self.w32(buf + 4, 0)?; 8 }
                     20 | 19 => { self.w32(buf, fsz)?; self.w32(buf + 4, 0)?; 8 } // FileEndOfFile / FileAllocation
                     34 => { for o in (0..56).step_by(4) { self.w32(buf + o, 0)?; } self.w32(buf + 32, fsz)?; self.w32(buf + 40, fsz)?; self.w32(buf + 48, 0x80)?; 56 } // FileNetworkOpen
-                    _ => return Err(format!("QueryInformationFile class {class}")),
+                    _ => { self.note(format!("QueryInformationFile class {class}")); return Ok(Some(0xC000_0003)); },
                 };
                 if len < n { return Ok(Some(0xC000_0004)); }
                 self.w32(iosb, 0)?; self.w32(iosb + 4, n)?;
@@ -747,7 +761,7 @@ impl WineProc {
                 let (iosb, buf, class) = (a[1], a[2], a[4]);
                 match class {
                     4 => { self.w32(buf, 7)?; self.w32(buf + 4, 0)?; self.w32(iosb, 0)?; self.w32(iosb + 4, 8)?; }
-                    _ => return Err(format!("QueryVolumeInformationFile class {class}")),
+                    _ => { self.note(format!("QueryVolumeInformationFile class {class}")); return Ok(Some(0xC000_0003)); },
                 }
                 0
             }
@@ -781,7 +795,7 @@ impl WineProc {
                 let kp = match self.handles.get(&a[0]) { Some(Obj::Key(k)) => k.clone(), _ => return Ok(Some(STATUS_INVALID_HANDLE)) };
                 let vn = self.get_ustr(a[1])?.to_ascii_lowercase();
                 let Some((typ, data)) = self.values.get(&(kp, vn)).cloned() else { return Ok(Some(STATUS_OBJECT_NAME_NOT_FOUND)) };
-                if a[2] != 2 { return Err(format!("QueryValueKey class {}", a[2])); }
+                if a[2] != 2 { { self.note(format!("QueryValueKey class {}", a[2])); return Ok(Some(0xC000_0003)); }; }
                 let need = 12 + data.len() as u32;
                 if a[4] != 0 { self.w32(a[5], need)?; }
                 if a[4] < need { return Ok(Some(0x8000_0005)); }
@@ -801,6 +815,12 @@ impl WineProc {
                         if retlen != 0 { self.w32(retlen, 4)?; }
                         let _ = len;
                     }
+                    3 => { // SystemTimeOfDayInformation
+                        for o in (0..0x30).step_by(4) { self.w32(buf + o, 0)?; }
+                        let t = 133_500_000_000_000_000u64 + self.ticks + self.wm_now_ms() * 10_000;
+                        self.w32(buf + 8, t as u32)?; self.w32(buf + 12, (t >> 32) as u32)?;
+                        if retlen != 0 { self.w32(retlen, 0x30)?; }
+                    }
                     102 => {
                         for i in 0..len / 4 { self.w32(buf + i * 4, 0)?; }
                         if retlen != 0 { self.w32(retlen, 0x1B0)?; }
@@ -816,7 +836,7 @@ impl WineProc {
                         self.w32(buf + 8, 0)?;
                         if retlen != 0 { self.w32(retlen, 12)?; }
                     }
-                    _ => return Err(format!("QuerySystemInformation class {class:#x}")),
+                    _ => { self.note(format!("QuerySystemInformation class {class:#x}")); return Ok(Some(0xC000_0003)); },
                 }
                 0
             }
@@ -832,7 +852,7 @@ impl WineProc {
                         for (i, v) in [21u32, 0, 0, 0, 1000].iter().enumerate() { self.w32(buf + 16 + i as u32 * 4, *v)?; }
                         self.w32(retlen, 36)?;
                     }
-                    _ => return Err(format!("QueryInformationToken class {class}")),
+                    _ => { self.note(format!("QueryInformationToken class {class}")); return Ok(Some(0xC000_0003)); },
                 }
                 0
             }
@@ -913,7 +933,7 @@ impl WineProc {
                 let dir = match self.handles.get(&h) { Some(Obj::File { path, dir: true, .. }) => path.clone(), _ => return Ok(Some(STATUS_INVALID_HANDLE)) };
                 let first = matches!(self.handles.get(&h), Some(Obj::File { pos: 0, .. })) || a[10] != 0;
                 if !first { return Ok(Some(0x8000_0006)); } // STATUS_NO_MORE_FILES
-                if class != 3 { return Err(format!("QueryDirectoryFile class {class}")); }
+                if class != 3 { { self.note(format!("QueryDirectoryFile class {class}")); return Ok(Some(0xC000_0003)); }; }
                 let pat = if pat_p != 0 { self.get_ustr(pat_p)?.to_ascii_lowercase() } else { "*".to_string() };
                 let prefix = format!("{dir}\\");
                 let mut names: Vec<(String, bool, u32)> = Vec::new();
@@ -1000,6 +1020,10 @@ impl WineProc {
             _ if self.lenient && (name.starts_with("NtUser") || name.starts_with("NtGdi")) => {
                 if !self.stubbed.iter().any(|n| n == name) { self.stubbed.push(name.to_string()); }
                 0
+            }
+            _ if self.lenient => { // kernel-side call with no handler: fail it politely so the program can cope
+                if !self.stubbed.iter().any(|n| n == name) { self.stubbed.push(name.to_string()); }
+                STATUS_NOT_IMPLEMENTED
             }
             _ => return Err("unimplemented syscall".into()),
         }))

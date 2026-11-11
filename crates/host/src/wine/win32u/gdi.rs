@@ -85,7 +85,7 @@ impl WineProc {
     }
 
     /// Font selected into a DC as (pixel size, bold); default is the UI font at 12px.
-    fn dc_font(&self, hdc: u32) -> (f32, bool) {
+    pub(super) fn dc_font(&self, hdc: u32) -> (f32, bool) {
         self.wm.dcs.get(&hdc).and_then(|d| self.wm.fonts.get(&d.font)).map_or((12.0, false), |f| (f.px, f.bold))
     }
 
