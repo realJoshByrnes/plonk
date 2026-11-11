@@ -7,6 +7,8 @@ pub struct Fault(pub u32);
 pub struct Mem {
     base: *mut u8,
     len: u32,
+    /// Accesses below this address fault (the NULL page).
+    guard: u32,
     _own: Option<Vec<u8>>,
 }
 
@@ -14,20 +16,22 @@ impl Mem {
     /// Owned zeroed memory (tests / native).
     pub fn new_owned(len: u32) -> Self {
         let mut v = vec![0u8; len as usize];
-        Mem { base: v.as_mut_ptr(), len, _own: Some(v) }
+        Mem { base: v.as_mut_ptr(), len, guard: 0, _own: Some(v) }
     }
     /// # Safety
     /// `base..base+len` must be valid, writable, and outlive the Mem.
     pub unsafe fn from_raw(base: *mut u8, len: u32) -> Self {
-        Mem { base, len, _own: None }
+        Mem { base, len, guard: 0, _own: None }
     }
+    /// Make accesses to [0, n) fault.
+    pub fn set_guard(&mut self, n: u32) { self.guard = n; }
     pub fn len(&self) -> u32 { self.len }
     pub fn is_empty(&self) -> bool { self.len == 0 }
     pub fn base(&self) -> *mut u8 { self.base }
 
     fn chk(&self, a: u32, n: u32) -> Result<*mut u8, Fault> {
         match a.checked_add(n) {
-            Some(e) if e <= self.len => Ok(unsafe { self.base.add(a as usize) }),
+            Some(e) if e <= self.len && a >= self.guard => Ok(unsafe { self.base.add(a as usize) }),
             _ => Err(Fault(a)),
         }
     }

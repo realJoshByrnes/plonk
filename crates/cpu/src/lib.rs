@@ -54,6 +54,8 @@ pub struct Cpu {
     pub fs_base: u32,
     pub gs_base: u32,
     pub tsc: u64,
+    /// Address of the instruction being executed (for exception records).
+    pub insn_start: u32,
     pub fst: [f64; 8],
     pub ftop: u32,
     pub fsw: u32,
@@ -315,6 +317,7 @@ impl Cpu {
 
     pub fn step(&mut self, m: &mut Mem) -> R<()> {
         let start = self.eip;
+        self.insn_start = start;
         if start >= self.thunk.0 && start < self.thunk.1 { return Err(Exit::Thunk(start)); }
         self.seg = 0;
         self.ow = 32;

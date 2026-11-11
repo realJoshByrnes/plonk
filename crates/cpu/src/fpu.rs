@@ -107,6 +107,25 @@ impl Cpu {
                     0 => { let v = f64::from_bits(m.r32(a)? as u64 | (m.r32(a + 4)? as u64) << 32); self.fpush(v); }
                     1 => { self.store_int(m, a, 64, true)?; self.fpop(); }
                     2 | 3 => { let bits = self.st(0).to_bits(); m.w32(a, bits as u32)?; m.w32(a + 4, (bits >> 32) as u32)?; if reg == 3 { self.fpop(); } }
+                    4 => { // frstor: 28-byte environment, then ST0..ST7 as 80-bit
+                        self.fcw = m.r16(a)? as u32; self.fsw = m.r16(a + 4)? as u32; self.ftop = (self.fsw >> 11) & 7;
+                        for i in 0..8u32 {
+                            let o = a + 28 + i * 10;
+                            let lo = m.r32(o)? as u64 | (m.r32(o + 4)? as u64) << 32;
+                            let v = ext_to_f64(lo, m.r16(o + 8)?);
+                            self.set_st(i, v);
+                        }
+                    }
+                    6 => { // fnsave: store state, then reinitialise the FPU
+                        m.w32(a, self.fcw | 0xFFFF_0000)?; m.w32(a + 4, self.fsw_get() | 0xFFFF_0000)?; m.w32(a + 8, 0xFFFF_FFFF)?;
+                        for o in [12u32, 16, 20, 24] { m.w32(a + o, 0)?; }
+                        for i in 0..8u32 {
+                            let (lo, se) = f64_to_ext(self.st(i));
+                            let o = a + 28 + i * 10;
+                            m.w32(o, lo as u32)?; m.w32(o + 4, (lo >> 32) as u32)?; m.w16(o + 8, se)?;
+                        }
+                        self.fcw = 0x37F; self.fsw = 0; self.ftop = 0;
+                    }
                     7 => m.w16(a, self.fsw_get() as u16)?,
                     _ => return unimpl,
                 },

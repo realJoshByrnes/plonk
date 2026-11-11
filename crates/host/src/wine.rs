@@ -69,6 +69,8 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    exc_depth: u32,
+    ki_user_exception: u32,
     cb_depth: u32,
     orphans: Vec<Cpu>,
     dirs: std::collections::HashSet<String>,
@@ -109,9 +111,10 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), exc_depth: 0, ki_user_exception: 0, cb_depth: 0, orphans: Vec::new(), dirs: Default::default(), del_on_close: Default::default(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
+        p.mem.set_guard(0x10000);
         p
     }
 
@@ -320,6 +323,7 @@ impl WineProc {
         let (sd, ud, uh) = (exp("__wine_syscall_dispatcher", self)?, exp("__wine_unix_call_dispatcher", self)?, exp("__wine_unixlib_handle", self)?);
         let (ldr_init, thread_start) = (exp("LdrInitializeThunk", self)?, exp("RtlUserThreadStart", self)?);
         self.ki_user_callback = exp("KiUserCallbackDispatcher", self)?;
+        self.ki_user_exception = exp("KiUserExceptionDispatcher", self)?;
         self.w32(sd, SYSCALL_THUNK)?;
         self.w32(ud, UNIXCALL_THUNK)?;
         self.w32(uh, 1)?;
@@ -361,6 +365,9 @@ impl WineProc {
         self.w32(TEB + 0x24, 0x24)?; // tid
         self.w32(TEB + 0x30, PEB)?;
         self.w32(TEB + 0xC0, SYSCALL_THUNK)?;
+        // ActivationContextStackPointer -> an empty ACTIVATION_CONTEXT_STACK (read by activation-context lookups)
+        let acs = self.scratch_alloc(0x20);
+        self.w32(TEB + 0x1A8, acs)?;
         // StaticUnicodeString (used by every ANSI->Unicode path conversion) -> StaticUnicodeBuffer
         self.w16(TEB + 0xBF8 + 2, 0x20A)?;
         self.w32(TEB + 0xBF8 + 4, TEB + 0xC00)?;
@@ -462,6 +469,13 @@ impl WineProc {
             }
             Exit::Thunk(CALL_RETURN_THUNK) => { self.guest_returned = true; Ok(()) }
             Exit::StepLimit => { self.busy = true; Ok(()) }
+            // CPU-raised exceptions go to Wine's KiUserExceptionDispatcher (SEH / C++ exceptions / unhandled filter)
+            Exit::Fault(a) => self.raise_cpu_exception(0xC000_0005, &[0, a], self.cpu.insn_start),
+            Exit::DivideError(_) => self.raise_cpu_exception(0xC000_0094, &[], self.cpu.insn_start),
+            Exit::Undefined(_) => self.raise_cpu_exception(0xC000_001D, &[], self.cpu.insn_start),
+            Exit::Halt => self.raise_cpu_exception(0xC000_0096, &[], self.cpu.insn_start),
+            Exit::Interrupt(3) | Exit::Interrupt(0x2d) => { let a = self.cpu.eip.wrapping_sub(1); self.raise_cpu_exception(0x8000_0003, &[], a) }
+            Exit::Interrupt(_) => self.raise_cpu_exception(0xC000_0005, &[0, 0], self.cpu.insn_start),
             e => Err(format!("cpu stopped: {:?} eip={:#x}", e, self.cpu.eip)),
         }
     }
@@ -537,6 +551,31 @@ impl WineProc {
 
     /// Record an unsupported sub-feature (shown in the shell banner) without aborting the guest.
     pub(crate) fn note(&mut self, what: String) { if !self.stubbed.contains(&what) { self.stubbed.push(what); } }
+
+    /// Build EXCEPTION_RECORD + CONTEXT on the guest stack and enter KiUserExceptionDispatcher(rec, ctx).
+    fn raise_cpu_exception(&mut self, code: u32, params: &[u32], addr: u32) -> Res<()> {
+        self.log(format!("  (exception {code:#x} at {addr:#x} params {params:x?})"));
+        if self.exc_depth > 8 { return Err(format!("exception storm: {code:#x} at {addr:#x}")); }
+        let sp = self.cpu.r[ESP];
+        let base = (sp.wrapping_sub(0x400)) & !15;
+        let (ctx, rec) = (base - 0x2D0, base - 0x2D0 - 0x50);
+        for o in (0..0x2D0).step_by(4) { self.w32(ctx + o, 0)?; }
+        for o in (0..0x50).step_by(4) { self.w32(rec + o, 0)?; }
+        let r = self.cpu.r;
+        self.w32(ctx, 0x1_0007)?; // CONTEXT_i386 | CONTROL | INTEGER | SEGMENTS
+        for (off, v) in [(0x8Cu32, 0x2Bu32), (0x90, 0x53), (0x94, 0x2B), (0x98, 0x2B), (0x9C, r[7]), (0xA0, r[6]), (0xA4, r[3]), (0xA8, r[2]), (0xAC, r[1]), (0xB0, r[0]),
+                          (0xB4, r[5]), (0xB8, if code == 0x8000_0003 { self.cpu.eip } else { addr }), (0xBC, 0x23), (0xC0, self.cpu.eflags), (0xC4, sp), (0xC8, 0x2B)] { self.w32(ctx + off, v)?; }
+        self.w32(rec, code)?;
+        self.w32(rec + 12, addr)?;
+        self.w32(rec + 16, params.len() as u32)?;
+        for (i, p) in params.iter().enumerate() { self.w32(rec + 20 + i as u32 * 4, *p)?; }
+        let new_sp = rec - 8; // KiUserExceptionDispatcher entry: [esp] = rec, [esp+4] = context (no return address)
+        self.w32(new_sp, rec)?; self.w32(new_sp + 4, ctx)?;
+        self.cpu.r[ESP] = new_sp;
+        self.cpu.eip = self.ki_user_exception;
+        self.exc_depth += 1;
+        Ok(())
+    }
 
     pub(crate) fn ret_stdcall(&mut self, status: u32) -> Res<()> {
         let ra = self.r32(self.cpu.r[ESP])?;
@@ -623,6 +662,7 @@ impl WineProc {
             }
             "NtProtectVirtualMemory" => { if a[4] != 0 { self.w32(a[4], 4)?; } 0 }
             "NtContinue" => {
+                self.exc_depth = 0;
                 let c = a[0];
                 let rd = |p: &Self, o: u32| p.r32(c + o);
                 for (i, off) in [(EDI, 0x9C), (ESI, 0xA0), (EBX, 0xA4), (EDX, 0xA8), (ECX, 0xAC), (EAX, 0xB0), (EBP, 0xB4), (ESP, 0xC4)] {
@@ -1025,6 +1065,15 @@ impl WineProc {
                 self.idle = true; // yield to the shell; the guest resumes on the next tick
                 self.update_kuser();
                 0
+            }
+            "NtRaiseException" => {
+                // (EXCEPTION_RECORD *rec, CONTEXT *ctx, BOOLEAN first_chance)
+                if a[2] & 0xff == 0 { self.exit = Some(self.r32(a[0])?); return Ok(None); } // second chance: unhandled -> terminate
+                let new_sp = ((self.cpu.r[ESP]).wrapping_sub(0x100)) & !15;
+                self.w32(new_sp, a[0])?; self.w32(new_sp + 4, a[1])?;
+                self.cpu.r[ESP] = new_sp;
+                self.cpu.eip = self.ki_user_exception;
+                return Ok(None);
             }
             "NtCallbackReturn" => { self.callback_ret = Some((a[0], a[1], a[2])); return Ok(None); }
             "NtTerminateProcess" => { self.exit = Some(a[1]); return Ok(None); }
