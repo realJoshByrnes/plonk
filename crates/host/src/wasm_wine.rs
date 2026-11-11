@@ -30,11 +30,12 @@ pub unsafe extern "C" fn plonk_wine_boot(path: *const u8, len: u32) -> i32 {
     match wine().boot(&p) { Ok(()) => 0, Err(e) => { MSG = e; -1 } }
 }
 
-/// Runs until the guest exits or waits for input. Returns 0 = idle, 1 = exited (see exit code), -1 = error.
+/// Runs a slice. Returns 0 = idle, 1 = exited (see exit code), 2 = busy (call again), -1 = error.
 #[no_mangle]
 pub extern "C" fn plonk_wine_run() -> i32 {
     match wine().run_until_idle(50_000_000) {
         Ok(RunState::Idle) => 0,
+        Ok(RunState::Busy) => 2,
         Ok(RunState::Exited(c)) => { unsafe { MSG = format!("{c}"); } 1 }
         Err(e) => { unsafe { MSG = e; } -1 }
     }

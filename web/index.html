@@ -29,11 +29,15 @@ const enc = new TextEncoder();
 let x, wasm;
 
 const T = (window.plonkT = []); const mark = (n) => T.push(n + "=" + Math.round(performance.now()));
-async function boot(app) {
-  mark("start");
+async function loadAppList() {
   const manifest = await (await fetch("/manifest.json")).json();
   const sel = document.getElementById("app");
-  if (!sel.options.length) for (const a of [...manifest.apps].sort((p, q) => (q === "gui_stay.exe") - (p === "gui_stay.exe"))) sel.add(new Option(a));
+  for (const a of [...manifest.apps].sort((p, q) => (q === "gui_stay.exe") - (p === "gui_stay.exe"))) sel.add(new Option(a));
+  log("Pick an app and press Run.");
+}
+async function boot(app) {
+  mark("start");
+  const sel = document.getElementById("app");
   app = app ?? sel.value;
   wasm = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
   x = wasm.instance.exports;
@@ -65,8 +69,10 @@ async function boot(app) {
 const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len()));
 
 let lastGen = -1, lastLog = "";
+let stepTimer = 0;
 function step() {
   const st = x.plonk_wine_run();
+  if (st === 2) { clearTimeout(stepTimer); stepTimer = setTimeout(step, 0); } // busy: yield to the page, then continue
   const g = x.plonk_wine_gen();
   if (g !== lastGen) { // redraw only when something on screen changed
     lastGen = g;
@@ -75,7 +81,7 @@ function step() {
   }
   const stub = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stubbed_ptr() >>> 0, x.plonk_wine_stubbed_len()));
   const out = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stdout_ptr() >>> 0, x.plonk_wine_stdout_len()));
-  const text = (stub ? "[unimplemented, answered 0: " + stub + "]\n" : "") + (st === 0 ? "running (waiting for input) - drag windows by the title bar, click the red X to close" : st === 1 ? "exited with code " + msg() : "error: " + msg());
+  const text = (stub ? "[unimplemented, answered 0: " + stub + "]\n" : "") + (st === 2 ? "running..." : st === 0 ? "running (waiting for input) - drag windows by the title bar, click the red X to close" : st === 1 ? "exited with code " + msg() : "error: " + msg());
   if (text !== lastLog) { lastLog = text; log(text); document.getElementById("out").textContent = out; }
 }
 
@@ -93,7 +99,7 @@ window.addEventListener("keydown", (e) => { if (!x) return; e.preventDefault(); 
 window.addEventListener("keyup", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(1, vkOf(e), 0); step(); });
 setInterval(() => { if (x) { x.plonk_wine_tick(50); step(); } }, 100);
 document.getElementById("run").onclick = () => boot();
-boot();
+loadAppList();
 </script>
 </body>
 </html>

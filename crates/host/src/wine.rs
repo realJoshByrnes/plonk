@@ -9,6 +9,11 @@ pub use win32u::Wm;
 use std::collections::{HashMap, VecDeque};
 
 /// Just past KUSER_SHARED_DATA (0x7ffe0000); a wasm32 Vec cannot exceed isize::MAX (2GB-1).
+/// Instructions per slice: small in the browser so the page stays responsive.
+#[cfg(target_arch = "wasm32")]
+const STEP_SLICE: u64 = 20_000_000;
+#[cfg(not(target_arch = "wasm32"))]
+const STEP_SLICE: u64 = 500_000_000;
 pub const GUEST_SIZE: u32 = 0x7ffe_1000;
 const SYSCALL_THUNK: u32 = 0xF000_0000;
 const UNIXCALL_THUNK: u32 = 0xF000_0010;
@@ -31,7 +36,8 @@ pub const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
 pub const STATUS_CONFLICTING_ADDRESSES: u32 = 0xC000_0018;
 
 #[derive(Debug, PartialEq)]
-pub enum RunState { Exited(u32), Idle }
+pub enum RunState { Exited(u32), Idle, /// Step budget used up while the guest is still computing; call again to continue.
+    Busy }
 
 pub enum Obj {
     File { path: String, pos: u32, dir: bool },
@@ -56,6 +62,7 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    busy: bool,
     atoms: Vec<(String, u32)>,
     took_over: bool,
     idle: bool,
@@ -84,7 +91,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
@@ -376,6 +383,7 @@ impl WineProc {
             self.pump()?;
             if let Some(c) = self.exit { return Ok(RunState::Exited(c)); }
             if self.idle { return Ok(RunState::Idle); }
+            if std::mem::take(&mut self.busy) { return Ok(RunState::Busy); }
         }
         Err("syscall budget exhausted".into())
     }
@@ -385,6 +393,7 @@ impl WineProc {
         match self.run_until_idle(max_syscalls)? {
             RunState::Exited(c) => Ok(c),
             RunState::Idle => Err("idle: waiting for input".into()),
+            RunState::Busy => self.run(max_syscalls),
         }
     }
 
@@ -399,12 +408,13 @@ impl WineProc {
                 if let Err(e) = self.cpu.step(&mut self.mem) { break e; }
             }
         } else {
-            self.cpu.run(&mut self.mem, 500_000_000)
+            self.cpu.run(&mut self.mem, STEP_SLICE)
         };
         match exit {
             Exit::Thunk(SYSCALL_THUNK) => self.syscall(),
             Exit::Thunk(UNIXCALL_THUNK) => self.unixcall(),
             Exit::Thunk(CALL_RETURN_THUNK) => { self.guest_returned = true; Ok(()) }
+            Exit::StepLimit => { self.busy = true; Ok(()) }
             e => Err(format!("cpu stopped: {:?} eip={:#x}", e, self.cpu.eip)),
         }
     }

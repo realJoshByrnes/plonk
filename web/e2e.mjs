@@ -52,12 +52,13 @@ async function type(key, vk, text) {
 }
 async function open(app) {
   await send("Page.navigate", { url: URL_ });
-  await waitStatus(/running|exited|error/);
+  await waitStatus(/Pick an app/);
   await evalJs(`(() => { const s = document.getElementById('app'); s.value = ${JSON.stringify(app)}; document.getElementById('run').click(); })()`);
   await sleep(500);
   await waitStatus(/running|exited|error/);
   const r = await evalJs("(() => { const r = document.getElementById('screen').getBoundingClientRect(); return { x: r.left, y: r.top }; })()");
   origin = r;
+  await sleep(1500); // let the first paint settle
 }
 async function shot(name) {
   if (!shotDir) return;
@@ -72,8 +73,9 @@ try {
   await connect();
   await send("Runtime.enable"); await send("Page.enable");
 
+  await open("gui_stay.exe"); // warm-up
   await open("gui_button.exe");
-  for (let i = 0; i < 2; i++) await click(100, 100);                // button at desktop (64..174, 92..120)
+  for (let i = 0; i < 2; i++) { await click(100, 100); await sleep(500); }                // button at desktop (64..174, 92..120)
   await shot("button");
   await click(326, 52);                                             // close box
   let s = await waitStatus(/exited|error/);
