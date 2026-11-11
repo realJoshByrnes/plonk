@@ -106,8 +106,8 @@ try {
 
   await open("gl_cube.exe");
   await sleep(6000);
-  const gl = await evalJs("({ kind: window.__glKind || null })");
-  await check("3D cube renders via GPU backend", !!gl.kind, JSON.stringify(gl));
+  const gl = await evalJs("({ kind: window.__glKind || null, perf: window.__perf })");
+  console.log("PERF", JSON.stringify(gl)); await check("3D cube renders via GPU backend", !!gl.kind, JSON.stringify(gl));
   await shot("gl");
   await open("gui_two.exe");
   await click(60, 50);

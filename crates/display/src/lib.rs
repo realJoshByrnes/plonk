@@ -82,7 +82,25 @@ impl SoftBackend {
     fn compose_into(&self, out: &mut [u32], w: u32, h: u32) {
         for s in self.order.iter().filter_map(|id| self.surface(*id)).filter(|s| s.visible) {
             if s.shadow > 0 { draw_shadow(out, w, h, s); }
-            let blurred = if s.blur > 0 { Some(blur_region(out, w, h, s)) } else { None };
+            // only translucent pixels show the blurred backdrop: blur each contiguous band of rows that has any (+ kernel margin)
+            let mut blurred: Vec<((i32, i32, i32, i32), Blurred)> = Vec::new();
+            if s.blur > 0 {
+                let m = s.blur as i32;
+                let spans: Vec<Option<(i32, i32)>> = (0..s.h as i32).map(|sy| {
+                    let row = &s.pix[(sy as u32 * s.w) as usize..((sy as u32 + 1) * s.w) as usize];
+                    let lo = row.iter().position(|p| p >> 24 < 255)?;
+                    let hi = row.iter().rposition(|p| p >> 24 < 255)?;
+                    Some((lo as i32, hi as i32))
+                }).collect();
+                let mut y = 0usize;
+                while y < spans.len() {
+                    if spans[y].is_none() { y += 1; continue; }
+                    let (mut x0, mut x1, y0) = (i32::MAX, -1, y);
+                    while y < spans.len() { match spans[y] { Some((l, h)) => { x0 = x0.min(l); x1 = x1.max(h); y += 1; } None => break } }
+                    let rect = ((x0 - m).max(0), (y0 as i32 - m).max(0), (x1 + m + 1).min(s.w as i32), (y as i32 + m).min(s.h as i32));
+                    blurred.push((rect, blur_region(out, w, h, s, rect)));
+                }
+            }
             for sy in 0..s.h as i32 {
                 let dy = sy + s.y;
                 if dy < 0 || dy >= h as i32 { continue; }
@@ -90,13 +108,16 @@ impl SoftBackend {
                     let dx = sx + s.x;
                     if dx < 0 || dx >= w as i32 { continue; }
                     let src = s.pix[(sy as u32 * s.w + sx as u32) as usize];
-                    let cov = if s.radius > 0 { corner_cov(sx, sy, s.w as i32, s.h as i32, s.radius) } else { 1.0 };
+                    let cov = if s.radius > 0 && in_corner(sx, sy, s.w as i32, s.h as i32, s.radius) { corner_cov(sx, sy, s.w as i32, s.h as i32, s.radius) } else { 1.0 };
                     let a = (src >> 24) as f32 / 255.0;
                     let di = (dy as u32 * w + dx as u32) as usize;
                     if cov >= 1.0 && a >= 1.0 { out[di] = src | 0xFF00_0000; continue; }
                     if cov <= 0.0 { continue; }
                     let base = out[di];
-                    let back = match &blurred { Some(b) => glass_adjust(b[(sy as u32 * s.w + sx as u32) as usize], dx, dy), None => base };
+                    let back = match blurred.iter().find(|(r, _)| sx >= r.0 && sx < r.2 && sy >= r.1 && sy < r.3) {
+                        Some((r, b)) => glass_adjust(b.at(sx - r.0, sy - r.1), dx, dy),
+                        None => base,
+                    };
                     let color = mix(back, src, a);
                     out[di] = mix(base, color, cov);
                 }
@@ -217,11 +238,16 @@ fn corner_cov(x: i32, y: i32, w: i32, h: i32, r: i32) -> f32 {
     (0.5 - d).clamp(0.0, 1.0)
 }
 
+fn in_corner(x: i32, y: i32, w: i32, h: i32, r: i32) -> bool { (x < r || x >= w - r) && (y < r || y >= h - r) }
+
 fn draw_shadow(out: &mut [u32], w: u32, h: u32, s: &Surface) {
     let (sh, off) = (s.shadow, s.shadow / 3);
     let r = s.radius.max(1) as f32;
     for dy in (s.y - sh).max(0)..(s.y + s.h as i32 + sh + off).min(h as i32) {
+        let py0 = (dy - s.y - off) as f32 + 0.5;
+        let inner = py0 >= r && py0 <= s.h as f32 - r; // rows where the window body covers [x+r, x+w-r]
         for dx in (s.x - sh).max(0)..(s.x + s.w as i32 + sh).min(w as i32) {
+            if inner && dx as f32 >= s.x as f32 + r && (dx as f32) <= (s.x + s.w as i32) as f32 - r { continue; }
             let (px, py) = ((dx - s.x) as f32 + 0.5, (dy - s.y - off) as f32 + 0.5);
             let (cx, cy) = (px.clamp(r, s.w as f32 - r), py.clamp(r, s.h as f32 - r));
             let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - r;
@@ -234,22 +260,53 @@ fn draw_shadow(out: &mut [u32], w: u32, h: u32, s: &Surface) {
 }
 
 /// Backdrop under a surface, box-blurred (3 passes ~ gaussian). Indexed like the surface pixels.
-fn blur_region(out: &[u32], w: u32, h: u32, s: &Surface) -> Vec<u32> {
-    let (sw, sh) = (s.w as usize, s.h as usize);
-    let mut px: Vec<[f32; 3]> = Vec::with_capacity(sw * sh);
-    for sy in 0..sh as i32 {
-        for sx in 0..sw as i32 {
-            let (dx, dy) = ((sx + s.x).clamp(0, w as i32 - 1), (sy + s.y).clamp(0, h as i32 - 1));
-            let c = out[(dy as u32 * w + dx as u32) as usize];
-            px.push([ch(c, 16), ch(c, 8), ch(c, 0)]);
+struct Blurred { px: Vec<[f32; 3]>, dw: usize, dh: usize, f: usize }
+impl Blurred {
+    /// Bilinear sample at region-local pixel (x, y).
+    fn at(&self, x: i32, y: i32) -> u32 {
+        let f = self.f as f32;
+        let fy = ((y as f32 + 0.5) / f - 0.5).clamp(0.0, (self.dh - 1) as f32);
+        let fx = ((x as f32 + 0.5) / f - 0.5).clamp(0.0, (self.dw - 1) as f32);
+        let (x0, y0, tx, ty) = (fx as usize, fy as usize, fx.fract(), fy.fract());
+        let (x1, y1) = ((x0 + 1).min(self.dw - 1), (y0 + 1).min(self.dh - 1));
+        let mut c = [0f32; 3];
+        for k in 0..3 {
+            let top = self.px[y0 * self.dw + x0][k] * (1.0 - tx) + self.px[y0 * self.dw + x1][k] * tx;
+            let bot = self.px[y1 * self.dw + x0][k] * (1.0 - tx) + self.px[y1 * self.dw + x1][k] * tx;
+            c[k] = top * (1.0 - ty) + bot * ty;
+        }
+        0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32
+    }
+}
+
+fn blur_region(out: &[u32], w: u32, h: u32, s: &Surface, rect: (i32, i32, i32, i32)) -> Blurred {
+    let (sw, sh) = ((rect.2 - rect.0) as usize, (rect.3 - rect.1) as usize);
+    // blur a downsampled backdrop (f x f box average) and upsample bilinearly: same look, ~f^2 less work
+    let f = if s.blur >= 12 { 4usize } else { 1 };
+    let (dw, dh) = ((sw + f - 1) / f, (sh + f - 1) / f);
+    let mut px: Vec<[f32; 3]> = Vec::with_capacity(dw * dh);
+    for by in 0..dh {
+        for bx in 0..dw {
+            let mut acc = [0f32; 3];
+            let mut n = 0f32;
+            for oy in 0..f {
+                for ox in 0..f {
+                    let (sx, sy) = ((bx * f + ox).min(sw - 1) as i32 + rect.0, (by * f + oy).min(sh - 1) as i32 + rect.1);
+                    let (x, y) = ((sx + s.x).clamp(0, w as i32 - 1), (sy + s.y).clamp(0, h as i32 - 1));
+                    let c = out[(y as u32 * w + x as u32) as usize];
+                    acc[0] += ch(c, 16); acc[1] += ch(c, 8); acc[2] += ch(c, 0);
+                    n += 1.0;
+                }
+            }
+            px.push([acc[0] / n, acc[1] / n, acc[2] / n]);
         }
     }
-    let r = (s.blur / 3).max(1) as usize;
+    let r = ((s.blur as usize / 3) / f).max(1);
     for _ in 0..3 {
-        box_pass(&mut px, sw, sh, r, true);
-        box_pass(&mut px, sw, sh, r, false);
+        box_pass(&mut px, dw, dh, r, true);
+        box_pass(&mut px, dw, dh, r, false);
     }
-    px.iter().map(|c| 0xFF00_0000 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).collect()
+    Blurred { px, dw, dh, f }
 }
 
 fn box_pass(px: &mut [[f32; 3]], w: usize, h: usize, r: usize, horiz: bool) {
