@@ -201,7 +201,13 @@ impl WineProc {
 
     /// SECTION_IMAGE_INFORMATION (0x30 bytes) from a PE in the VFS.
     fn fill_image_info(&mut self, path: &str, buf: u32) -> Res<()> {
-        let d = self.files.get(path).cloned().ok_or("image info: no file")?;
+        let d = self.files.remove(path).ok_or("image info: no file")?;
+        let r = self.fill_image_info_from(&d, buf);
+        self.files.insert(path.to_string(), d);
+        r
+    }
+
+    fn fill_image_info_from(&mut self, d: &[u8], buf: u32) -> Res<()> {
         let pe = u32::from_le_bytes(d[0x3C..0x40].try_into().unwrap()) as usize;
         let o = pe + 24;
         let u16at = |x: usize| u16::from_le_bytes([d[x], d[x + 1]]) as u32;
@@ -219,11 +225,11 @@ impl WineProc {
     fn nls_map(&mut self, name: &str) -> Res<(u32, u32)> {
         let key = format!("nls\\{name}");
         if let Some(&r) = self.nls.get(&key) { return Ok(r); }
-        let data = self.files.get(&key).cloned().ok_or(format!("missing NLS file {name}"))?;
-        let b = self.vm_reserve(None, data.len() as u32).ok_or("nls: no VM")?;
-        self.mem.write_bytes(b, &data).map_err(|_| "nls write")?;
-        self.nls.insert(key, (b, data.len() as u32));
-        Ok((b, data.len() as u32))
+        let len = self.files.get(&key).ok_or(format!("missing NLS file {name}"))?.len() as u32;
+        let b = self.vm_reserve(None, len).ok_or("nls: no VM")?;
+        self.mem.write_bytes(b, &self.files[&key]).map_err(|_| "nls write")?;
+        self.nls.insert(key, (b, len));
+        Ok((b, len))
     }
 
     // ---- boot ----
@@ -234,7 +240,13 @@ impl WineProc {
 
     /// Map an image from the VFS (headers+sections+relocs), registering the VM region.
     fn map_image_file(&mut self, path: &str) -> Res<plonk_pe::Image> {
-        let data = self.files.get(path).ok_or_else(|| format!("no such file {path}"))?.clone();
+        let data = self.files.remove(path).ok_or_else(|| format!("no such file {path}"))?;
+        let r = self.map_image_data(path, &data);
+        self.files.insert(path.to_string(), data);
+        r
+    }
+
+    fn map_image_data(&mut self, path: &str, data: &[u8]) -> Res<plonk_pe::Image> {
         let pref = {
             let pe = u32::from_le_bytes(data[0x3C..0x40].try_into().unwrap()) as usize;
             u32::from_le_bytes(data[pe + 24 + 28..pe + 24 + 32].try_into().unwrap())
@@ -245,7 +257,7 @@ impl WineProc {
         };
         let base = match self.vm_reserve(Some(pref), size) { Some(b) => b, None => self.vm_reserve(None, size).ok_or("no VM for image")? };
         self.images.push((base, path.to_string()));
-        plonk_pe::map_ex(&data, &mut self.mem, Some(base), false)
+        plonk_pe::map_ex(data, &mut self.mem, Some(base), false)
     }
 
     pub fn boot(&mut self, exe_path: &str) -> Res<()> {
@@ -595,7 +607,7 @@ impl WineProc {
                     let vs = self.r32(psize)?;
                     let len = if vs == 0 { size.saturating_sub(off) } else { vs };
                     let b = match self.vm_reserve(if want != 0 { Some(want) } else { None }, len) { Some(b) => b, None => return Ok(Some(STATUS_NO_MEMORY)) };
-                    let data = self.files.get(&path).cloned().unwrap_or_default();
+                    let data: &[u8] = self.files.get(&path).map_or(&[], |v| v.as_slice());
                     let n = (len as usize).min(data.len().saturating_sub(off as usize));
                     self.mem.write_bytes(b, &data[off as usize..off as usize + n]).map_err(|_| "map data")?;
                     self.w32(pbase, b)?;
@@ -650,7 +662,7 @@ impl WineProc {
                 let (h, iosb, buf, len, poff) = (a[0], a[4], a[5], a[6], a[7]);
                 let off = if poff != 0 { Some(self.r32(poff)?) } else { None };
                 let (path, pos) = match self.handles.get(&h) { Some(Obj::File { path, pos, .. }) => (path.clone(), *pos), _ => return Ok(Some(STATUS_INVALID_HANDLE)) };
-                let data = self.files.get(&path).cloned().unwrap_or_default();
+                let data: &[u8] = self.files.get(&path).map_or(&[], |v| v.as_slice());
                 let at = off.unwrap_or(pos) as usize;
                 if at >= data.len() { self.w32(iosb, 0xC000_0011)?; self.w32(iosb + 4, 0)?; return Ok(Some(0xC000_0011)); }
                 let n = (len as usize).min(data.len() - at);

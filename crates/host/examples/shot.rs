@@ -7,7 +7,8 @@ fn main() {
     p.load_dir("wine/out");
     p.files.insert(APP.into(), std::fs::read(&a[1]).unwrap());
     p.boot(APP).unwrap();
-    println!("{:?}", p.run_until_idle(1_000_000));
+    let t0 = std::time::Instant::now();
+    println!("{:?} first run {:?}", p.run_until_idle(1_000_000), t0.elapsed());
     for ev in a.get(3).map(|s| s.as_str()).unwrap_or("").split(';').filter(|s| !s.is_empty()) {
         let f: Vec<&str> = ev.split(',').collect();
         let k = match f[0] { "d" => 0, "m" => 1, _ => 2 };

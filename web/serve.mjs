@@ -8,7 +8,7 @@ const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/ja
 let pack = null;
 function buildPack() {
   const out = readdirSync(join(root, "wine/out")).filter((f) => f.endsWith(".dll")).map((f) => [`c:\\windows\\system32\\${f}`, join(root, "wine/out", f)])
-    .concat(NLS.filter((f) => existsSync(join(root, "wine/out/nls", f))).map((f) => [`nls\\${f}`, join(root, "wine/out/nls", f)]));
+    .concat(readdirSync(join(root, "wine/out/nls")).map((f) => [`nls\\${f}`, join(root, "wine/out/nls", f)]));
   const parts = [];
   for (const [name, path] of out) {
     const n = Buffer.from(name), d = readFileSync(path), h = Buffer.alloc(4);

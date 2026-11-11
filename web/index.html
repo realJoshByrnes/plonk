@@ -28,7 +28,9 @@ const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
 const enc = new TextEncoder();
 let x, wasm;
 
+const T = (window.plonkT = []); const mark = (n) => T.push(n + "=" + Math.round(performance.now()));
 async function boot(app) {
+  mark("start");
   const manifest = await (await fetch("/manifest.json")).json();
   const sel = document.getElementById("app");
   if (!sel.options.length) for (const a of [...manifest.apps].sort((p, q) => (q === "gui_stay.exe") - (p === "gui_stay.exe"))) sel.add(new Option(a));
@@ -46,7 +48,7 @@ async function boot(app) {
     fetch("/pack").then((r) => r.arrayBuffer()),
     fetch(`/tests/guests/${app}`).then((r) => r.arrayBuffer()),
   ]);
-  log("loading...");
+  mark("downloaded"); log("loading...");
   const dv = new DataView(pack), u8 = new Uint8Array(pack);
   for (let o = 0; o < pack.byteLength;) {
     const nl = dv.getUint32(o, true); o += 4;
@@ -57,7 +59,8 @@ async function boot(app) {
   add("c:\\app.exe", new Uint8Array(exe));
   const path = enc.encode("c:\\app.exe");
   if (x.plonk_wine_boot(put(path), path.length) !== 0) return log("boot failed: " + msg());
-  step();
+  mark("booted"); step(); mark("first-run+draw");
+  document.title = "T " + T.join(" ");
 }
 const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len()));
 

@@ -12,3 +12,6 @@ plonk-cpu = { path = "../cpu" }
 plonk-pe = { path = "../pe" }
 plonk-display = { path = "../display" }
 plonk-fonts = { path = "../fonts" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+lol_alloc = "0.4"

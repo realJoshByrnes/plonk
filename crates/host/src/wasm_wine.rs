@@ -8,16 +8,18 @@ static mut MSG: String = String::new();
 
 #[allow(static_mut_refs)]
 fn wine() -> &'static mut WineProc {
-    unsafe { WINE.get_or_insert_with(|| { let mut p = WineProc::new(); p.lenient = true; p }) }
+    unsafe { WINE.get_or_insert_with(|| { drop(Vec::<u8>::with_capacity(160 << 20)); let mut p = WineProc::new(); p.lenient = true; p }) }
 }
 unsafe fn bytes<'a>(p: *const u8, n: u32) -> &'a [u8] { core::slice::from_raw_parts(p, n as usize) }
 
+/// Takes ownership of both buffers, which must come from `plonk_alloc` (no copy, no leak).
+///
 /// # Safety
-/// Pointers must be valid for the given lengths.
+/// `name`/`data` must be exact-size allocations returned by `plonk_alloc` and not used afterwards.
 #[no_mangle]
-pub unsafe extern "C" fn plonk_wine_add_file(name: *const u8, nlen: u32, data: *const u8, dlen: u32) {
-    let n = String::from_utf8_lossy(bytes(name, nlen)).into_owned();
-    wine().files.insert(n, bytes(data, dlen).to_vec());
+pub unsafe extern "C" fn plonk_wine_add_file(name: *mut u8, nlen: u32, data: *mut u8, dlen: u32) {
+    let n = String::from_utf8_lossy(&Vec::from_raw_parts(name, nlen as usize, nlen as usize)).into_owned();
+    wine().files.insert(n, Vec::from_raw_parts(data, dlen as usize, dlen as usize));
 }
 
 /// # Safety
@@ -99,3 +101,10 @@ static mut OUT_TRACE: String = String::new();
 /// Display generation (low 32 bits); changes whenever anything on screen changed.
 #[no_mangle]
 pub extern "C" fn plonk_wine_gen() -> u32 { wine().wm.backend.gen as u32 }
+
+// dlmalloc degrades badly next to the 2GB guest block (fontdue's many small reallocs took seconds);
+// lol_alloc's free-list allocator keeps small allocations cheap.
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOC: lol_alloc::AssumeSingleThreaded<lol_alloc::FreeListAllocator> =
+    unsafe { lol_alloc::AssumeSingleThreaded::new(lol_alloc::FreeListAllocator::new()) };
