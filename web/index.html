@@ -17,6 +17,7 @@
   <strong>Plonk</strong>
   <label>App <select id="app"></select></label>
   <button id="run">Run</button>
+  <label>or your own 32-bit .exe <input type="file" id="file" accept=".exe"></label>
 </div>
 <canvas id="screen" width="1024" height="768"></canvas>
 <div id="log">loading…</div>
@@ -47,10 +48,12 @@ async function boot(app) {
     const n = enc.encode(name);
     x.plonk_wine_add_file(put(n), n.length, put(b), b.length);
   };
+  x.plonk_wine_reset();
+  lastGen = -1;
   log("downloading Wine runtime (compressed, cached)...");
   const [pack, exe] = await Promise.all([
     fetch("/pack").then((r) => r.arrayBuffer()),
-    fetch(`/tests/guests/${app}`).then((r) => r.arrayBuffer()),
+    customExe ? customExe.arrayBuffer() : fetch(`/tests/guests/${app}`).then((r) => r.arrayBuffer()),
   ]);
   mark("downloaded"); log("loading...");
   const dv = new DataView(pack), u8 = new Uint8Array(pack);
@@ -98,6 +101,11 @@ const chOf = (e) => (e.ctrlKey || e.altKey || e.metaKey ? 0 : e.key.length === 1
 window.addEventListener("keydown", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(0, vkOf(e), chOf(e)); step(); });
 window.addEventListener("keyup", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(1, vkOf(e), 0); step(); });
 setInterval(() => { if (x) { x.plonk_wine_tick(50); step(); } }, 100);
+let customExe = null;
+document.getElementById("file").onchange = (e) => { customExe = e.target.files[0] ?? null; if (customExe) log("Loaded " + customExe.name + " - press Run."); };
+document.getElementById("app").onchange = () => { customExe = null; document.getElementById("file").value = ""; };
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) { customExe = f; log("Loaded " + f.name + " - press Run."); } });
 document.getElementById("run").onclick = () => boot();
 loadAppList();
 </script>

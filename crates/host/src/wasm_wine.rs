@@ -53,6 +53,10 @@ pub extern "C" fn plonk_wine_key(kind: u32, vk: u32, ch: u32) { wine().key(kind,
 #[no_mangle]
 pub extern "C" fn plonk_wine_tick(dt_ms: u32) { wine().tick(dt_ms); }
 
+/// Drop the current process (frees the 2GB guest) so the next boot starts clean.
+#[no_mangle]
+pub extern "C" fn plonk_wine_reset() { unsafe { WINE = None; } }
+
 #[no_mangle]
 pub extern "C" fn plonk_wine_click(x: i32, y: i32) { wine().click(x, y); }
 

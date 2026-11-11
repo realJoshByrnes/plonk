@@ -16,7 +16,7 @@
 - Shell: drag by title bar, click-to-raise, active/inactive caption, close box (no resize/min/max, no taskbar). Child windows + built-in classes (real Wine BUTTON works: clicks -> WM_COMMAND), window longs, capture/focus, pens/lines/Rectangle, fixed-metrics text, GDI bitmap engine (memory DCs, DDB/DIB sections in guest memory, BitBlt/StretchBlt/AlphaBlend with ROPs, DIB transfer, GetObject). Keyboard input + real Wine EDIT control (typing, backspace, focus messages), timers (shell tick), caret stubs. Menus: menu bars + one-level glass popups + TrackPopupMenu (no submenus, keyboard nav, check marks, accelerators). Clipboard, multiple threads: not implemented.
 - Registry/VFS minimal; most wineserver requests unimplemented; unimplemented syscalls abort the run (LENIENT=1 in run_wine stubs NtUser/NtGdi).
 - SSE not implemented (build guests with -mno-sse); x87 uses f64 precision. Guest memory capped at 0x7ffe1000 (wasm32 Vec limit).
-- CRT-linked (msvcrt) apps untested.
+- CRT-linked mingw exes work (crt_hello). Real-app risks: SSE/SSE2 code (not implemented; CPUID hides it), missing NtUser/NtGdi calls (listed in the page banner), single thread, no sound/network.
 
 ## Design
 See docs/DESIGN.md (compatibility strategy, Plonk Flat visual spec, layer ownership, open decisions); preview at /web/design.html.
