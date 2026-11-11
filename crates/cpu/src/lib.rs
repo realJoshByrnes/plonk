@@ -23,6 +23,8 @@ pub const DF: u32 = 0x400;
 pub const OF: u32 = 0x800;
 const FLAGS_MASK: u32 = CF | PF | AF | ZF | SF | 0x100 | 0x200 | DF | OF;
 
+pub use fast::CacheSlot;
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Exit {
     Halt,
@@ -91,6 +93,9 @@ fn sx(v: u32, w: u32) -> i64 {
 }
 
 impl Cpu {
+    /// Detach / attach the decoded-code cache (a process's threads share one).
+    pub fn take_cache(&mut self) -> CacheSlot { std::mem::take(&mut self.cache) }
+    pub fn put_cache(&mut self, c: CacheSlot) { self.cache = c; }
     pub fn new() -> Self { Cpu { eflags: 0x202, ow: 32, fcw: 0x37F, mxcsr: 0x1F80, ..Default::default() } }
 
     /// Reference interpreter loop (one `step` per instruction); `run` is the cached fast path.

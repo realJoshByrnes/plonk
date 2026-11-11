@@ -1,16 +1,23 @@
 //! Linux i386 personality: ELF loader + `int 0x80` syscall layer, so real Wine Unix-side binaries can run in the interpreter.
-//! So far: one process, one thread; static and dynamic ELFs; a small writable file tree; Unix stream sockets and pipes; poll.
-use plonk_cpu::{Cpu, Exit, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP};
+//! A small kernel: processes (fork/exec/wait) and threads (clone/futex) scheduled round robin, static and dynamic ELFs,
+//! a writable file tree, Unix stream sockets and pipes, poll. The running process/thread has its state swapped into the
+//! top-level fields (`mem`, `cpu`, `fds`, ...); everything else is parked in `procs`.
+use plonk_cpu::{CacheSlot, Cpu, Exit, EAX, EBP, EBX, ECX, EDI, EDX, ESI, ESP};
 use plonk_mem::Mem;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::rc::Rc;
 
-const MEM_SIZE: u32 = 0x1000_0000; // 256 MB flat
-const STACK_TOP: u32 = 0x0FF0_0000;
-const MMAP_BASE: u32 = 0x0A00_0000;
-const EXE_BIAS: u32 = 0x0400_0000;
-const INTERP_BIAS: u32 = 0x0980_0000;
+const MEM_SIZE: u32 = 0x4000_0000; // 1 GB flat per process (zero pages are only committed when touched)
+const STACK_TOP: u32 = 0x3FF0_0000;
+const STACK_LOW: u32 = STACK_TOP - 0x80_0000;
+const MMAP_MIN: u32 = 0x1_0000;
+const EXE_BIAS: u32 = 0x3000_0000;
+const INTERP_BIAS: u32 = 0x3800_0000;
+const SLICE: u64 = 200_000;
+const ECHILD: u32 = -10i32 as u32;
+const ESRCH: u32 = -3i32 as u32;
+const ETIMEDOUT: u32 = -110i32 as u32;
 const ENOENT: u32 = -2i32 as u32;
 const EBADF: u32 = -9i32 as u32;
 const EAGAIN: u32 = -11i32 as u32;
@@ -47,6 +54,17 @@ struct Msg { data: Vec<u8>, off: usize, fds: Vec<Fd> }
 #[derive(Default)]
 struct Sock { peer: Option<usize>, rx: VecDeque<Msg>, listening: bool, backlog: VecDeque<usize>, closed: bool, shut_wr: bool }
 
+#[derive(Clone, Copy, PartialEq)]
+enum St { Run, Futex(u32), Vfork(usize), Dead }
+
+struct Thread { cpu: Cpu, tid: u32, poll_deadline: Option<u64>, clear_tid: u32, state: St, wake_at: Option<u64> }
+
+/// A parked process. For the running one, the swapped fields hold placeholders.
+struct Proc {
+    pid: u32, ppid: u32, mem: Mem, fds: HashMap<u32, Fd>, cwd: String, brk: u32, brk_start: u32, maps: BTreeMap<u32, u32>, umask: u32,
+    exe: String, sigact: HashMap<u32, [u32; 5]>, threads: Vec<Thread>, cache: CacheSlot, exit: Option<u32>, reaped: bool,
+}
+
 pub struct LinuxProc {
     pub mem: Mem,
     pub cpu: Cpu,
@@ -64,10 +82,20 @@ pub struct LinuxProc {
     fds: HashMap<u32, Fd>,
     socks: Vec<Sock>,
     brk: u32,
-    mmap_next: u32,
+    brk_start: u32,
+    /// Mapped ranges of the running process (start -> end).
+    maps: BTreeMap<u32, u32>,
     clock_ns: u64,
     poll_deadline: Option<u64>,
     umask: u32,
+    exe: String,
+    sigact: HashMap<u32, [u32; 5]>,
+    procs: Vec<Proc>,
+    cur: (usize, usize),
+    next_pid: u32,
+    resched: bool,
+    /// When every thread is waiting, jump the guest clock to the next timeout instead of reporting `blocked`.
+    pub auto_time: bool,
 }
 
 fn r16(d: &[u8], o: usize) -> u32 { u16::from_le_bytes([d[o], d[o + 1]]) as u32 }
@@ -77,16 +105,196 @@ fn parent(path: &str) -> &str { match path.rfind('/') { Some(0) | None => "/", S
 
 impl LinuxProc {
     pub fn new() -> Self {
-        let mut mem = Mem::new_owned(MEM_SIZE);
-        mem.set_guard(0x1000);
-        let mut cpu = Cpu::new();
-        cpu.linux = true;
         let mut vfs = BTreeMap::new();
         for d in ["/", "/tmp", "/dev", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
-        let mut fds = HashMap::new();
-        for i in 0..3 { fds.insert(i, Rc::new(RefCell::new(Ofd { kind: Kind::Tty, flags: 2, path: "/dev/tty".into() }))); }
-        LinuxProc { mem, cpu, stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), exit_code: None, blocked: false,
-            vfs, cwd: "/".into(), fds, socks: Vec::new(), brk: 0, mmap_next: MMAP_BASE, clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022 }
+        LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), exit_code: None, blocked: false,
+            vfs, cwd: "/".into(), fds: HashMap::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
+            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false }
+    }
+
+    // ---- processes and threads ----
+
+    fn swap_proc(&mut self) {
+        use std::mem::swap;
+        let p = &mut self.procs[self.cur.0];
+        swap(&mut self.mem, &mut p.mem); swap(&mut self.fds, &mut p.fds); swap(&mut self.cwd, &mut p.cwd); swap(&mut self.brk, &mut p.brk);
+        swap(&mut self.brk_start, &mut p.brk_start); swap(&mut self.maps, &mut p.maps); swap(&mut self.umask, &mut p.umask);
+        swap(&mut self.exe, &mut p.exe); swap(&mut self.sigact, &mut p.sigact);
+    }
+    fn swap_thread(&mut self) {
+        let t = &mut self.procs[self.cur.0].threads[self.cur.1];
+        std::mem::swap(&mut self.cpu, &mut t.cpu);
+        std::mem::swap(&mut self.poll_deadline, &mut t.poll_deadline);
+    }
+    /// Make (process, thread) the running one. The decoded-code cache belongs to the process and travels with whichever thread runs.
+    fn switch(&mut self, pi: usize, ti: usize) {
+        if (pi, ti) == self.cur { return; }
+        if self.cur.0 != usize::MAX {
+            let c = self.cpu.take_cache();
+            self.swap_thread();
+            self.procs[self.cur.0].cache = c;
+            if pi != self.cur.0 { self.swap_proc(); }
+        }
+        if pi != self.cur.0 { self.cur.0 = pi; self.swap_proc(); }
+        self.cur.1 = ti;
+        self.swap_thread();
+        let c = std::mem::take(&mut self.procs[pi].cache);
+        self.cpu.put_cache(c);
+    }
+    fn me(&mut self) -> &mut Thread { &mut self.procs[self.cur.0].threads[self.cur.1] }
+    fn pid(&self) -> u32 { self.procs[self.cur.0].pid }
+    fn new_cpu() -> Cpu { let mut c = Cpu::new(); c.linux = true; c }
+    fn blank_proc(&mut self, ppid: u32) -> Proc {
+        let pid = self.next_pid;
+        self.next_pid += 1;
+        let mut mem = Mem::new_owned(MEM_SIZE);
+        mem.set_guard(0x1000);
+        Proc { pid, ppid, mem, fds: HashMap::new(), cwd: "/".into(), brk: 0, brk_start: 0, maps: BTreeMap::new(), umask: 0o022, exe: String::new(), sigact: HashMap::new(),
+            threads: vec![Thread { cpu: Self::new_cpu(), tid: pid, poll_deadline: None, clear_tid: 0, state: St::Run, wake_at: None }], cache: CacheSlot::default(), exit: None, reaped: false }
+    }
+
+    /// Start a new process from an ELF image (a child of "init"). Returns its pid. It becomes the running process.
+    pub fn spawn(&mut self, elf: &[u8], argv: &[&str], envp: &[&str]) -> Result<u32, String> {
+        let mut p = self.blank_proc(1);
+        for i in 0..3 { p.fds.insert(i, Rc::new(RefCell::new(Ofd { kind: Kind::Tty, flags: 2, path: "/dev/tty".into() }))); }
+        let pid = p.pid;
+        self.procs.push(p);
+        self.switch(self.procs.len() - 1, 0);
+        let (argv, envp): (Vec<String>, Vec<String>) = (argv.iter().map(|s| s.to_string()).collect(), envp.iter().map(|s| s.to_string()).collect());
+        self.exec_image(elf, &argv, &envp)?;
+        Ok(pid)
+    }
+
+    /// Load an ELF executable as the first process.
+    pub fn load(&mut self, elf: &[u8], argv: &[&str], envp: &[&str]) -> Result<(), String> { self.spawn(elf, argv, envp).map(|_| ()) }
+
+    fn futex_wake(&mut self, addr: u32, n: u32) -> u32 {
+        let mut k = 0;
+        for t in self.procs[self.cur.0].threads.iter_mut() {
+            if k < n && t.state == St::Futex(addr) { t.state = St::Run; t.wake_at = None; k += 1; }
+        }
+        k
+    }
+
+    fn thread_exit(&mut self, code: u32) {
+        let ct = self.me().clear_tid;
+        self.me().state = St::Dead;
+        self.resched = true;
+        if ct != 0 { let _ = self.mem.w32(ct, 0); self.futex_wake(ct, 1); }
+        if self.procs[self.cur.0].threads.iter().all(|t| t.state == St::Dead) { self.proc_exit(code); }
+    }
+
+    fn proc_exit(&mut self, code: u32) {
+        let pi = self.cur.0;
+        for t in self.procs[pi].threads.iter_mut() { t.state = St::Dead; }
+        let fds: Vec<u32> = self.fds.keys().copied().collect();
+        for fd in fds { self.close(fd); }
+        self.procs[pi].exit = Some(code);
+        if self.procs[pi].ppid == 1 { self.procs[pi].reaped = true; }
+        for p in self.procs.iter_mut() { for t in p.threads.iter_mut() { if t.state == St::Vfork(pi) { t.state = St::Run; } } }
+        if pi == 0 { self.exit_code = Some(code); }
+        self.resched = true;
+    }
+
+    /// fork / vfork / clone without CLONE_THREAD: a new process with a copy of the mapped memory.
+    fn fork(&mut self, stack: u32, wait_exec: bool) -> u32 {
+        let mut p = self.blank_proc(self.pid());
+        for (&s, &e) in self.maps.iter().chain(std::iter::once((&self.brk_start, &self.brk))) {
+            if e > s { if let Ok(b) = self.mem.read_bytes(s, e - s) { let _ = p.mem.write_bytes(s, b); } }
+        }
+        p.fds = self.fds.clone(); p.cwd = self.cwd.clone(); p.brk = self.brk; p.brk_start = self.brk_start; p.maps = self.maps.clone();
+        p.umask = self.umask; p.exe = self.exe.clone(); p.sigact = self.sigact.clone();
+        let mut cpu = self.cpu.clone();
+        cpu.r[EAX] = 0;
+        if stack != 0 { cpu.r[ESP] = stack; }
+        p.threads[0].cpu = cpu;
+        let pid = p.pid;
+        self.procs.push(p);
+        if wait_exec { let ci = self.procs.len() - 1; self.me().state = St::Vfork(ci); self.resched = true; }
+        pid
+    }
+
+    fn clone_call(&mut self, flags: u32, stack: u32, ptid: u32, tls: u32, ctid: u32) -> u32 {
+        if flags & 0x10000 == 0 { // not CLONE_THREAD
+            let pid = self.fork(stack, flags & 0x4000 != 0); // CLONE_VFORK
+            if flags & 0x0010_0000 != 0 { let _ = self.mem.w32(ptid, pid); }
+            if flags & 0x0100_0000 != 0 { let _ = self.procs.last_mut().unwrap().mem.w32(ctid, pid); }
+            if flags & 0x0020_0000 != 0 { self.procs.last_mut().unwrap().threads[0].clear_tid = ctid; }
+            return pid;
+        }
+        let tid = self.next_pid;
+        self.next_pid += 1;
+        let mut cpu = self.cpu.clone();
+        cpu.r[EAX] = 0;
+        cpu.r[ESP] = stack;
+        if flags & 0x80000 != 0 { // CLONE_SETTLS
+            let (entry, base) = (self.mem.r32(tls).unwrap_or(0), self.mem.r32(tls + 4).unwrap_or(0));
+            if (6..=8).contains(&entry) {
+                cpu.tls[(entry - 6) as usize] = base;
+                if cpu.sel_gs >> 3 == entry { cpu.gs_base = base; }
+                if cpu.sel_fs >> 3 == entry { cpu.fs_base = base; }
+            }
+        }
+        if flags & 0x0010_0000 != 0 { let _ = self.mem.w32(ptid, tid); }
+        if flags & 0x0100_0000 != 0 { let _ = self.mem.w32(ctid, tid); }
+        let clear_tid = if flags & 0x0020_0000 != 0 { ctid } else { 0 };
+        self.procs[self.cur.0].threads.push(Thread { cpu, tid, poll_deadline: None, clear_tid, state: St::Run, wake_at: None });
+        tid
+    }
+
+    fn str_vec(&self, mut p: u32) -> Vec<String> {
+        let mut v = Vec::new();
+        while p != 0 { match self.mem.r32(p) { Ok(a) if a != 0 && v.len() < 4096 => v.push(self.cstr(a)), _ => break } p += 4; }
+        v
+    }
+
+    fn execve(&mut self, path: u32, argv: u32, envp: u32) -> u32 {
+        let raw = self.cstr(path);
+        let p = self.resolve(-100i32 as u32, &raw, true);
+        let data = match self.vfs.get(&p) { Some(Node::File(d)) => Some(d.borrow().clone()), _ => self.files.get(&p).cloned() };
+        let Some(data) = data else { self.trace.push(format!("execve {p} -> ENOENT")); return ENOENT };
+        if data.len() < 52 || data[0] != 0x7F { return -8i32 as u32; } // ENOEXEC
+        let (mut argv, envp) = (self.str_vec(argv), self.str_vec(envp));
+        if argv.is_empty() { argv.push(p.clone()); }
+        self.trace.push(format!("pid {} execve {p} {argv:?}", self.pid()));
+        let pi = self.cur.0;
+        let ti = self.cur.1;
+        for (i, t) in self.procs[pi].threads.iter_mut().enumerate() { if i != ti { t.state = St::Dead; } }
+        for pr in self.procs.iter_mut() { for t in pr.threads.iter_mut() { if t.state == St::Vfork(pi) { t.state = St::Run; } } }
+        self.me().clear_tid = 0;
+        let retired = self.cpu.retired;
+        self.mem = Mem::new_owned(MEM_SIZE);
+        self.mem.set_guard(0x1000);
+        self.cpu = Self::new_cpu();
+        self.cpu.retired = retired;
+        self.sigact.clear();
+        self.exe = p;
+        self.resched = true;
+        if let Err(e) = self.exec_image(&data, &argv, &envp) { self.trace.push(format!("execve failed after the point of no return: {e}")); self.proc_exit(127); }
+        0
+    }
+
+    // ---- address space ----
+
+    fn mapped(&self, a: u32, e: u32) -> bool { self.maps.range(..e).next_back().map_or(false, |(_, &en)| en > a) }
+
+    fn unmap(&mut self, a: u32, e: u32) {
+        let hit: Vec<(u32, u32)> = self.maps.range(..e).filter(|(_, &en)| en > a).map(|(&s, &en)| (s, en)).collect();
+        for (s, en) in hit {
+            self.maps.remove(&s);
+            if s < a { self.maps.insert(s, a); }
+            if en > e { self.maps.insert(e, en); }
+        }
+    }
+
+    /// Highest free gap of `len` bytes below the stack.
+    fn find_gap(&self, len: u32) -> Option<u32> {
+        let mut top = STACK_LOW;
+        for (&s, &e) in self.maps.range(..STACK_LOW).rev() {
+            if top >= e && top - e >= len { break; }
+            top = top.min(s);
+        }
+        (top >= MMAP_MIN + len).then(|| top - len)
     }
 
     /// Create a directory in the guest file tree.
@@ -110,14 +318,18 @@ impl LinuxProc {
             if ty == 3 { interp = Some(String::from_utf8_lossy(src).trim_end_matches(char::from(0)).to_string()); }
             if ty != 1 { continue; }
             self.mem.write_bytes(va, src).map_err(|_| "ELF segment outside guest memory")?;
+            self.unmap(va & !0xFFF, (va + memsz + 0xFFF) & !0xFFF);
+            self.maps.insert(va & !0xFFF, (va + memsz + 0xFFF) & !0xFFF);
             end = end.max(va + memsz);
             if off as usize <= phoff && phoff < (off + filesz) as usize { phdr_va = va + (phoff as u32 - off); }
         }
         Ok((entry + bias, phdr_va, phentsize as u32, phnum as u32, end, interp))
     }
 
-    /// Load an ELF executable (static, or dynamic with its interpreter taken from `files`) and build the initial stack.
-    pub fn load(&mut self, elf: &[u8], argv: &[&str], envp: &[&str]) -> Result<(), String> {
+    /// Replace the running process's image: map the ELF (and its interpreter, taken from `files`) and build the initial stack.
+    fn exec_image(&mut self, elf: &[u8], argv: &[String], envp: &[String]) -> Result<(), String> {
+        self.maps.clear();
+        if self.exe.is_empty() { self.exe = argv.first().cloned().unwrap_or_default(); }
         if elf.len() < 52 { return Err("not an i386 ELF".into()); }
         let bias = if r16(elf, 16) == 3 { EXE_BIAS } else { 0 }; // ET_DYN (PIE)
         let (exe_entry, phdr_va, phentsize, phnum, end, interp) = self.map_elf(elf, bias)?;
@@ -128,6 +340,8 @@ impl LinuxProc {
             at_base = INTERP_BIAS;
         }
         self.brk = (end + 0xFFF) & !0xFFF;
+        self.brk_start = self.brk;
+        self.maps.insert(STACK_LOW, STACK_TOP);
         // strings at the top of the stack, then the pointer vectors
         let mut sp = STACK_TOP;
         let mut push_str = |mem: &mut Mem, s: &[u8]| -> u32 { sp -= s.len() as u32 + 1; mem.write_bytes(sp, s).unwrap(); mem.w8(sp + s.len() as u32, 0).unwrap(); sp };
@@ -148,23 +362,73 @@ impl LinuxProc {
         Ok(())
     }
 
-    /// Run until the process exits, blocks, or `max_steps` instructions were executed. Returns the exit code if it ended.
-    pub fn run(&mut self, max_steps: u64) -> Result<Option<u32>, String> {
+    /// Run the current thread for up to `steps` instructions. Returns (instructions used, whether it blocked).
+    fn run_slice(&mut self, steps: u64) -> Result<(u64, bool), String> {
         let start = self.cpu.retired;
         self.blocked = false;
-        while self.exit_code.is_none() {
-            let left = max_steps.saturating_sub(self.cpu.retired - start);
-            if left == 0 { return Ok(None); }
-            match self.cpu.run(&mut self.mem, left) {
-                Exit::Interrupt(0x80) => {
-                    self.syscall();
-                    if self.blocked { return Ok(None); }
-                }
-                Exit::StepLimit => return Ok(None),
-                e => return Err(format!("cpu stopped: {e:?} at eip {:#x}", self.cpu.eip)),
+        self.resched = false;
+        loop {
+            let used = self.cpu.retired.saturating_sub(start);
+            if used >= steps { break; }
+            match self.cpu.run(&mut self.mem, steps - used) {
+                Exit::Interrupt(0x80) => { self.syscall(); if self.blocked || self.resched { break; } }
+                Exit::StepLimit => break,
+                e => return Err(format!("pid {} ({}) cpu stopped: {e:?} at eip {:#x}", self.pid(), self.exe, self.cpu.eip)),
             }
         }
-        Ok(self.exit_code)
+        Ok((self.cpu.retired.saturating_sub(start), self.blocked))
+    }
+
+    fn next_deadline(&self) -> Option<u64> {
+        let mut d = self.poll_deadline;
+        for (pi, p) in self.procs.iter().enumerate() {
+            for (ti, t) in p.threads.iter().enumerate() {
+                if t.state == St::Dead { continue; }
+                let pd = if (pi, ti) == self.cur { None } else { t.poll_deadline };
+                for x in [pd, t.wake_at].into_iter().flatten() { d = Some(d.map_or(x, |y: u64| y.min(x))); }
+            }
+        }
+        d
+    }
+
+    /// Run all processes until the first one exits, every thread is waiting, or about `max_steps` instructions were executed.
+    /// Returns the first process's exit code if it ended; `blocked` tells whether everything is waiting.
+    pub fn run(&mut self, max_steps: u64) -> Result<Option<u32>, String> {
+        let mut budget = max_steps;
+        loop {
+            let (mut progress, mut alive) = (false, false);
+            for pi in 0..self.procs.len() {
+                for ti in 0..self.procs[pi].threads.len() {
+                    if self.exit_code.is_some() { return Ok(self.exit_code); }
+                    let t = &mut self.procs[pi].threads[ti];
+                    match t.state {
+                        St::Dead => continue,
+                        St::Vfork(_) => { alive = true; continue; }
+                        St::Futex(_) => {
+                            alive = true;
+                            if t.wake_at.map_or(true, |d| self.clock_ns < d) { continue; }
+                            t.state = St::Run;
+                            t.wake_at = None;
+                            if (pi, ti) == self.cur { self.cpu.r[EAX] = ETIMEDOUT; } else { t.cpu.r[EAX] = ETIMEDOUT; }
+                        }
+                        St::Run => {}
+                    }
+                    alive = true;
+                    self.switch(pi, ti);
+                    let (used, blocked) = self.run_slice(SLICE.min(budget))?;
+                    if !(blocked && used <= 2) { progress = true; }
+                    budget = budget.saturating_sub(used.max(1));
+                    if budget == 0 { self.blocked = false; return Ok(self.exit_code); }
+                }
+            }
+            if self.exit_code.is_some() || !alive { return Ok(self.exit_code); }
+            if !progress {
+                match self.next_deadline() {
+                    Some(d) if self.auto_time => { self.clock_ns = self.clock_ns.max(d); }
+                    _ => { self.blocked = true; return Ok(None); }
+                }
+            }
+        }
     }
 
     fn cstr(&self, a: u32) -> String {
@@ -532,12 +796,20 @@ impl LinuxProc {
 
     fn mmap(&mut self, addr: u32, len: u32, flags: u32, fd: u32, off: u64) -> u32 {
         let len = (len + 0xFFF) & !0xFFF;
-        let a = if flags & 0x10 != 0 { addr } else { // MAP_FIXED
-            let a = self.mmap_next;
-            if a.checked_add(len).map_or(true, |e| e > STACK_TOP - 0x80_0000) { return ENOMEM; }
-            self.mmap_next += len;
-            a
+        if len == 0 { return EINVAL; }
+        let fits = |a: u32| a >= 0x1000 && a & 0xFFF == 0 && a.checked_add(len).map_or(false, |e| e <= MEM_SIZE);
+        let a = if flags & 0x10 != 0 { // MAP_FIXED
+            if !fits(addr) { return ENOMEM; }
+            self.unmap(addr, addr + len);
+            addr
+        } else if flags & 0x10_0000 != 0 { // MAP_FIXED_NOREPLACE
+            if !fits(addr) { return ENOMEM; }
+            if self.mapped(addr, addr + len) { return EEXIST; }
+            addr
+        } else if fits(addr) && !self.mapped(addr, addr + len) { addr } else {
+            match self.find_gap(len) { Some(a) => a, None => return ENOMEM }
         };
+        self.maps.insert(a, a + len);
         if self.mem.write_bytes(a, &vec![0u8; len as usize]).is_err() { return ENOMEM; }
         if flags & 0x20 == 0 { // file-backed (a private copy; shared writable mappings are not written back yet)
             let Some(o) = self.fds.get(&fd).cloned() else { return EBADF };
@@ -579,7 +851,28 @@ impl LinuxProc {
         let (nr, a, b, c, d, e, f) = (r[EAX], r[EBX], r[ECX], r[EDX], r[ESI], r[EDI], r[EBP]);
         const CWD: u32 = -100i32 as u32;
         let ret: Option<u32> = match nr {
-            1 | 252 => { self.exit_code = Some(a); Some(0) } // exit, exit_group
+            1 => { self.thread_exit(a); Some(0) } // exit (this thread)
+            252 => { self.proc_exit(a); Some(0) } // exit_group
+            2 => Some(self.fork(0, false)), // fork
+            190 => Some(self.fork(0, true)), // vfork
+            120 => Some(self.clone_call(a, b, c, d, e)), // clone(flags, stack, ptid, tls, ctid)
+            11 => { let r = self.execve(a, b, c); if r == 0 { return; } Some(r) }
+            7 | 114 => { // waitpid, wait4(pid, status, options)
+                let me = self.pid();
+                let want = a as i32;
+                let kids: Vec<usize> = (0..self.procs.len()).filter(|&i| self.procs[i].ppid == me && !self.procs[i].reaped && (want <= 0 || self.procs[i].pid == a)).collect();
+                match kids.iter().find(|&&i| self.procs[i].exit.is_some()) {
+                    Some(&i) => {
+                        self.procs[i].reaped = true;
+                        if b != 0 { let _ = self.mem.w32(b, (self.procs[i].exit.unwrap() & 0xFF) << 8); }
+                        Some(self.procs[i].pid)
+                    }
+                    None if kids.is_empty() => Some(ECHILD),
+                    None if c & 1 != 0 => Some(0), // WNOHANG
+                    None => None,
+                }
+            }
+            158 => { self.resched = true; Some(0) } // sched_yield
             3 => self.read(a, b, c, None),
             4 => Some(self.write(a, b, c, None)),
             5 => Some(self.open(CWD, a, b)),
@@ -593,8 +886,9 @@ impl LinuxProc {
             133 => Some(match self.fds.get(&a).map(|o| o.borrow().path.clone()) { Some(p) => { self.cwd = p; 0 } None => EBADF }), // fchdir
             13 => { let (s, _) = self.now(); if a != 0 { let _ = self.mem.w32(a, s as u32); } Some(s as u32) } // time
             15 | 94 | 306 | 207 | 212 | 198 => Some(0), // chmod, fchmod, fchmodat, fchown32, chown32, lchown32
-            20 | 224 => Some(1000), // getpid, gettid
-            64 => Some(1), // getppid
+            20 => Some(self.pid()),
+            224 => Some(self.me().tid), // gettid
+            64 => Some(self.procs[self.cur.0].ppid), // getppid
             33 | 307 => { // access, faccessat
                 let p = if nr == 33 { let s = self.cstr(a); self.resolve(CWD, &s, true) } else { let s = self.cstr(b); self.resolve(a, &s, true) };
                 Some(if self.lookup(&p).is_some() { 0 } else { ENOENT })
@@ -621,7 +915,7 @@ impl LinuxProc {
                 Some(0)
             }
             45 => { // brk
-                if a >= self.brk && a < MMAP_BASE { self.brk = a; }
+                if a >= self.brk_start && a < self.brk_start + 0x0800_0000 && (a <= self.brk || !self.mapped(self.brk, a)) { self.brk = a; }
                 Some(self.brk)
             }
             54 => Some(ENOTTY), // ioctl
@@ -641,10 +935,11 @@ impl LinuxProc {
             85 | 305 => { // readlink, readlinkat
                 let (raw, buf, n) = if nr == 85 { (self.cstr(a), b, c) } else { (self.cstr(b), c, d) };
                 let p = self.resolve(if nr == 85 { CWD } else { a }, &raw, false);
-                let t = match self.vfs.get(&p) { Some(Node::Link(t)) => Some(t.clone()), _ if p == "/proc/self/exe" => Some("/bin/app".to_string()), _ => None };
+                let t = match self.vfs.get(&p) { Some(Node::Link(t)) => Some(t.clone()), _ if p == "/proc/self/exe" => Some(self.exe.clone()), _ => None };
                 Some(match t { Some(t) => { let k = t.len().min(n as usize); let _ = self.mem.write_bytes(buf, &t.as_bytes()[..k]); k as u32 } None => EINVAL })
             }
-            91 | 125 | 219 | 118 | 148 | 36 => Some(0), // munmap, mprotect, madvise, fsync, fdatasync, sync
+            91 => { let e = a.saturating_add((b + 0xFFF) & !0xFFF); self.unmap(a, e); Some(0) } // munmap
+            125 | 219 | 118 | 148 | 36 => Some(0), // mprotect, madvise, fsync, fdatasync, sync
             90 => { // old mmap: args in a struct
                 let g = |i: u32| self.mem.r32(a + i * 4).unwrap_or(0);
                 let (addr, len, flags, fd, off) = (g(0), g(1), g(3), g(4), g(5));
@@ -722,7 +1017,14 @@ impl LinuxProc {
                     else { self.mem.r32(c).unwrap_or(0) as i64 * 1000 + (self.mem.r32(c + 8).unwrap_or(0) / 1_000_000) as i64 };
                 self.poll(a, b, t)
             }
-            174 | 175 | 186 | 37 | 238 | 270 => Some(0), // rt_sigaction, rt_sigprocmask, sigaltstack, kill, tkill, tgkill
+            174 => { // rt_sigaction(sig, act, oldact): remembered, not delivered yet
+                let old = self.sigact.get(&a).copied().unwrap_or([0; 5]);
+                if b != 0 { let mut n = [0u32; 5]; for (i, x) in n.iter_mut().enumerate() { *x = self.mem.r32(b + i as u32 * 4).unwrap_or(0); } self.sigact.insert(a, n); }
+                if c != 0 { for (i, x) in old.iter().enumerate() { let _ = self.mem.w32(c + i as u32 * 4, *x); } }
+                Some(0)
+            }
+            37 => Some(if self.procs.iter().any(|p| p.pid == a && p.exit.is_none()) || (a as i32) <= 0 { 0 } else { ESRCH }), // kill: existence check only
+            175 | 186 | 238 | 270 => Some(0), // rt_sigprocmask, sigaltstack, tkill, tgkill
             180 => self.read(a, b, c, Some(d as u64 | (e as u64) << 32)), // pread64
             181 => Some(self.write(a, b, c, Some(d as u64 | (e as u64) << 32))), // pwrite64
             183 => { // getcwd
@@ -773,7 +1075,23 @@ impl LinuxProc {
                 },
                 None => EBADF,
             }),
-            240 | 422 => Some(0), // futex (single thread: nothing to wait for)
+            240 | 422 => match b & 0x7F { // futex(addr, op, val, timeout)
+                0 | 9 => { // FUTEX_WAIT (relative timeout), FUTEX_WAIT_BITSET (absolute)
+                    if self.mem.r32(a).unwrap_or(0) != c { Some(EAGAIN) } else {
+                        let ts = if d == 0 { None } else if nr == 240 { Some(self.mem.r32(d).unwrap_or(0) as u64 * 1_000_000_000 + self.mem.r32(d + 4).unwrap_or(0) as u64) }
+                            else { Some((self.mem.r32(d).unwrap_or(0) as u64 | (self.mem.r32(d + 4).unwrap_or(0) as u64) << 32) * 1_000_000_000 + self.mem.r32(d + 8).unwrap_or(0) as u64) };
+                        let now = self.clock_ns;
+                        let t = self.me();
+                        t.state = St::Futex(a);
+                        t.wake_at = ts.map(|x| if b & 0x7F == 0 { now + x } else { x });
+                        self.resched = true;
+                        Some(0)
+                    }
+                }
+                1 | 10 => Some(self.futex_wake(a, c)), // FUTEX_WAKE, FUTEX_WAKE_BITSET
+                3 | 4 => Some(self.futex_wake(a, u32::MAX)), // (CMP_)REQUEUE: wake everyone instead (spurious wakeups are allowed)
+                _ => Some(ENOSYS),
+            },
             243 => { // set_thread_area(struct user_desc *)
                 let mut entry = self.mem.r32(a).unwrap_or(0);
                 let base = self.mem.r32(a + 4).unwrap_or(0);
@@ -785,7 +1103,7 @@ impl LinuxProc {
                     0
                 } else { EINVAL })
             }
-            258 => Some(1000), // set_tid_address
+            258 => { self.me().clear_tid = a; Some(self.me().tid) } // set_tid_address
             265 | 403 => { // clock_gettime (32-bit / 64-bit timespec)
                 let (s, ns) = self.now();
                 let _ = self.mem.w32(b, s as u32);
@@ -807,7 +1125,7 @@ impl LinuxProc {
         };
         match ret {
             Some(ret) => {
-                if self.trace.len() < 200_000 { self.trace.push(format!("sys {nr}({a:#x}, {b:#x}, {c:#x}, {d:#x}) = {ret:#x}")); }
+                if self.trace.len() < 400_000 { let pid = self.pid(); self.trace.push(format!("{pid} sys {nr}({a:#x}, {b:#x}, {c:#x}, {d:#x}) = {ret:#x}")); }
                 self.cpu.r[EAX] = ret;
             }
             None => { // would block: re-execute the `int 0x80` when the process is resumed
