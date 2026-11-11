@@ -281,6 +281,17 @@ impl Cpu {
         v ^ (cc & 1 != 0)
     }
 
+    /// Segment register value (es cs ss ds fs gs).
+    fn seg_get(&self, reg: usize) -> u32 {
+        if self.linux { match reg { 1 => 0x73, 4 => self.sel_fs, 5 => self.sel_gs, _ => 0x7B } } else { [0x2B, 0x23, 0x2B, 0x2B, 0x53, 0x2B, 0, 0][reg & 7] }
+    }
+    /// Segment register load: only fs/gs under the Linux personality have an effect (base from the TLS slots).
+    fn seg_set(&mut self, reg: usize, sel: u32) {
+        if !self.linux || (reg != 4 && reg != 5) { return; }
+        let sel = sel & 0xFFFF;
+        let base = match sel >> 3 { i @ 6..=8 if sel & 4 == 0 => self.tls[(i - 6) as usize], _ => 0 };
+        if reg == 4 { self.sel_fs = sel; self.fs_base = base; } else { self.sel_gs = sel; self.gs_base = base; }
+    }
     fn push(&mut self, m: &mut Mem, v: u32) -> R<()> {
         let sp = self.r[ESP].wrapping_sub(4);
         m.w32(sp, v)?;
@@ -411,6 +422,8 @@ impl Cpu {
                 self.setr(i, vw, r);
                 self.eflags = (self.eflags & !CF) | cf;
             }
+            0x06 | 0x0E | 0x16 | 0x1E => { let v = self.seg_get((op >> 3) as usize); self.push(m, v)?; }
+            0x07 | 0x17 | 0x1F => { let v = self.pop(m)?; self.seg_set((op >> 3) as usize, v); }
             0x50..=0x57 => { let v = self.r[(op & 7) as usize]; self.push(m, v)?; }
             0x58..=0x5F => { let v = self.pop(m)?; self.r[(op & 7) as usize] = v; }
             0x60 => {
@@ -475,17 +488,13 @@ impl Cpu {
             }
             0x8C => {
                 let (reg, rm) = self.modrm(m)?;
-                let mut sel = [0x2B, 0x23, 0x2B, 0x2B, 0x53, 0x2B, 0, 0][reg];
-                if self.linux { sel = match reg { 1 => 0x73, 4 => self.sel_fs, 5 => self.sel_gs, _ => 0x7B }; }
+                let sel = self.seg_get(reg);
                 self.wr(m, rm, if matches!(rm, Op::R(_)) { vw } else { 16 }, sel)?;
             }
             0x8E => {
                 let (reg, rm) = self.modrm(m)?;
-                if self.linux && (reg == 4 || reg == 5) {
-                    let sel = self.rd(m, rm, 16)? & 0xFFFF;
-                    let base = match sel >> 3 { i @ 6..=8 if sel & 4 == 0 => self.tls[(i - 6) as usize], _ => 0 };
-                    if reg == 4 { self.sel_fs = sel; self.fs_base = base; } else { self.sel_gs = sel; self.gs_base = base; }
-                }
+                let sel = self.rd(m, rm, 16)?;
+                self.seg_set(reg, sel);
             }
             0x8D => {
                 self.seg = 0;
@@ -502,6 +511,13 @@ impl Cpu {
             0x9B => {}
             0x9C => { let v = self.eflags & FLAGS_MASK | 2; self.push(m, v)?; }
             0x9D => { let v = self.pop(m)?; self.eflags = (v & FLAGS_MASK) | 2; }
+            0xCF => { // iret, same privilege level: eip, cs, eflags
+                let ip = self.pop(m)?;
+                let _cs = self.pop(m)?;
+                let v = self.pop(m)?;
+                self.eflags = (v & FLAGS_MASK) | 2;
+                self.eip = ip;
+            }
             0x9E => { let ah = self.reg8(4); self.eflags = (self.eflags & !(SF | ZF | AF | PF | CF)) | (ah & (SF | ZF | AF | PF | CF)); }
             0x9F => { let v = (self.eflags & (SF | ZF | AF | PF | CF)) | 2; self.set_reg8(4, v); }
             0xA0..=0xA3 => {
@@ -606,6 +622,8 @@ impl Cpu {
                 match op2 {
                     0x0B => return Err(Exit::Undefined(start)),
                     0x0D | 0x18 | 0x1E | 0x1F => { self.modrm(m)?; }
+                    0xA0 | 0xA8 => { let v = self.seg_get(if op2 == 0xA0 { 4 } else { 5 }); self.push(m, v)?; }
+                    0xA1 | 0xA9 => { let v = self.pop(m)?; self.seg_set(if op2 == 0xA1 { 4 } else { 5 }, v); }
                     0x31 => { self.tsc += 1000; self.r[EAX] = self.tsc as u32; self.r[EDX] = (self.tsc >> 32) as u32; }
                     0xA2 => {
                         let leaf = self.r[EAX];

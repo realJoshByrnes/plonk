@@ -273,7 +273,9 @@ impl LinuxProc {
 
     // ---- address space ----
 
-    fn mapped(&self, a: u32, e: u32) -> bool { self.maps.range(..e).next_back().map_or(false, |(_, &en)| en > a) }
+    fn maps_hit(&self, a: u32, e: u32) -> bool { self.maps.range(..e).next_back().map_or(false, |(_, &en)| en > a) }
+    /// Is any part of [a, e) in use (a mapping or the heap)?
+    fn mapped(&self, a: u32, e: u32) -> bool { self.maps_hit(a, e) || (a < ((self.brk + 0xFFF) & !0xFFF) && e > self.brk_start) }
 
     fn unmap(&mut self, a: u32, e: u32) {
         let hit: Vec<(u32, u32)> = self.maps.range(..e).filter(|(_, &en)| en > a).map(|(&s, &en)| (s, en)).collect();
@@ -329,6 +331,8 @@ impl LinuxProc {
     /// Replace the running process's image: map the ELF (and its interpreter, taken from `files`) and build the initial stack.
     fn exec_image(&mut self, elf: &[u8], argv: &[String], envp: &[String]) -> Result<(), String> {
         self.maps.clear();
+        self.brk = 0;
+        self.brk_start = 0;
         if self.exe.is_empty() { self.exe = argv.first().cloned().unwrap_or_default(); }
         if elf.len() < 52 { return Err("not an i386 ELF".into()); }
         let bias = if r16(elf, 16) == 3 { EXE_BIAS } else { 0 }; // ET_DYN (PIE)
@@ -513,6 +517,7 @@ impl LinuxProc {
     fn open(&mut self, dirfd: u32, path: u32, flags: u32) -> u32 {
         let raw = self.cstr(path);
         let p = self.resolve(dirfd, &raw, flags & 0x20000 == 0); // O_NOFOLLOW
+        if self.trace.len() < 400_000 { self.trace.push(format!("path open {p} flags {flags:#x}")); }
         let kind = match self.vfs.get(&p) {
             Some(Node::File(d)) => {
                 if flags & 0xC0 == 0xC0 { return EEXIST; } // O_CREAT|O_EXCL
@@ -564,6 +569,7 @@ impl LinuxProc {
     fn stat_path(&mut self, dirfd: u32, path: u32, buf: u32, follow: bool) -> u32 {
         let raw = self.cstr(path);
         let p = self.resolve(dirfd, &raw, follow);
+        if self.trace.len() < 400_000 { self.trace.push(format!("path stat {p} found={}", self.lookup(&p).is_some())); }
         match self.lookup(&p) { Some((mode, size)) => self.fill_stat(buf, &p, mode, size), None => ENOENT }
     }
 
@@ -916,7 +922,7 @@ impl LinuxProc {
                 Some(0)
             }
             45 => { // brk
-                if a >= self.brk_start && a < self.brk_start + 0x0800_0000 && (a <= self.brk || !self.mapped(self.brk, a)) {
+                if a >= self.brk_start && a < self.brk_start + 0x0800_0000 && (a <= self.brk || !self.maps_hit((self.brk + 0xFFF) & !0xFFF, a)) {
                     let (lo, hi) = ((self.brk + 0xFFF) & !0xFFF, (a + 0xFFF) & !0xFFF);
                     if hi > lo { self.mem.map(lo, hi - lo, true); }
                     self.brk = a;
@@ -1105,7 +1111,7 @@ impl LinuxProc {
             243 => { // set_thread_area(struct user_desc *)
                 let mut entry = self.mem.r32(a).unwrap_or(0);
                 let base = self.mem.r32(a + 4).unwrap_or(0);
-                if entry == u32::MAX { entry = 6; let _ = self.mem.w32(a, entry); }
+                if entry == u32::MAX { entry = 6 + self.cpu.tls.iter().position(|&b| b == 0).unwrap_or(3) as u32; let _ = self.mem.w32(a, entry); } // first free GDT TLS slot
                 Some(if (6..=8).contains(&entry) {
                     self.cpu.tls[(entry - 6) as usize] = base;
                     if self.cpu.sel_gs >> 3 == entry { self.cpu.gs_base = base; }
