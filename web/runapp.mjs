@@ -39,17 +39,21 @@ await send("DOM.setFileInputFiles", { files: [resolve(exe)], nodeId: node });
 await sleep(300);
 await evalJs("document.getElementById('run').click()");
 const origin = await (async () => { await sleep(1500); return evalJs("(() => { const r = document.getElementById('screen').getBoundingClientRect(); return { x: r.left, y: r.top }; })()"); })();
-const list = clicks.split(";").map((s) => (s ? s.split(",").map(Number) : null)); // empty slot = no click that second
+const list = clicks.split(";").map((s) => (s === "E" ? "E" : s ? s.replace(/^D/, "").split(",").map(Number).concat(s.startsWith("D") ? [2] : [1]) : null)); // empty slot = no click that second; "D" prefix = double click
 for (let s = 0; s < Number(secs); s++) {
   if (list[s]) {
-    const [x, y] = list[s];
-    for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: origin.x + x, y: origin.y + y, button: "left", clickCount: 1 });
+    if (list[s] === "E") { await evalJs("document.getElementById('exp').click()"); await sleep(1000); continue; }
+    const [x, y, n] = list[s];
+    for (let c = 1; c <= n; c++) for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", { type, x: origin.x + x, y: origin.y + y, button: "left", clickCount: c });
   }
   await sleep(1000);
 }
+if (process.env.LAUNCH) { await evalJs("window.plonkShell.launch(" + JSON.stringify(process.env.LAUNCH) + ")"); await sleep(Number(process.env.LAUNCH_WAIT ?? 10000)); }
 const { result } = await send("Page.captureScreenshot", { format: "png" });
 writeFileSync(out, Buffer.from(result.data, "base64"));
 console.log("status:", await evalJs("document.getElementById('log').textContent"));
+if (process.env.LISTEXE) { const l = await evalJs("window.plonkShell.list().filter((e) => /[.]exe$/i.test(e.path)).map((e) => e.path + ' ' + e.size).join('|')"); console.log("exes:", l); }
+if (process.env.DEBUGWIN) console.log(await evalJs("(() => { window.plonk.x.plonk_wine_debug(); const x = window.plonk.x; return new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len())); })()"));
 if (process.env.OPENS) {
   const tr = await evalJs("window.plonk ? window.plonk.trace() : ''");
   const opens = [...new Set(String(tr).split("\n").filter((l) => /\(open |unimplemented|Err/.test(l)))];

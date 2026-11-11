@@ -157,7 +157,23 @@ impl WineProc {
         self.values.insert((key.to_string(), name.to_string()), (1, data));
     }
 
-    /// Debug: which loaded image (base, name) contains `addr`.
+    /// Files a user program created or installed (everything outside the system directories and the page-provided program).
+    pub fn is_user_path(path: &str) -> bool {
+        !(path.starts_with("c:\\windows\\system32\\") || path.starts_with("nls\\") || path.starts_with("c:\\windows\\winsxs\\")
+            || path.starts_with("c:\\windows\\resources\\") || path.starts_with("c:\\windows\\~") || path == "c:\\app.exe")
+    }
+
+    /// Create a directory entry (the page restores the previous session's directories).
+    pub fn add_dir(&mut self, path: &str) { self.dirs.insert(path.to_ascii_lowercase()); }
+
+    /// "path	size" lines (size -1 for directories) of the user-visible virtual disk, for the page's desktop and explorer.
+    pub fn list_user_files(&self) -> String {
+        let mut v: Vec<(String, i64)> = self.files.iter().filter(|(k, _)| Self::is_user_path(k)).map(|(k, d)| (k.clone(), d.len() as i64)).collect();
+        v.extend(self.dirs.iter().filter(|d| Self::is_user_path(&format!("{d}\\"))).map(|d| (d.clone(), -1)));
+        v.sort();
+        v.iter().map(|(k, n)| format!("{k}\t{n}")).collect::<Vec<_>>().join("\n")
+    }
+
     /// Names of the loaded images (debugging aid).
     pub fn module_names(&self) -> Vec<String> { self.images.iter().map(|(b, n)| format!("{b:#x} {n}")).collect() }
 
@@ -402,7 +418,8 @@ impl WineProc {
         self.w32(pp + 8, 1)?; // PROCESS_PARAMS_FLAG_NORMALIZED
         self.w32(pp + 0x1C, std_out)?;
         self.w32(pp + 0x20, std_out)?;
-        self.put_ustr(pp + 0x24, "C:\\");
+        let cwd = format!("C:{}", &exe_path[2..=exe_path.rfind('\\').unwrap_or(1)]); // the program's own directory
+        self.put_ustr(pp + 0x24, &cwd);
         self.put_ustr(pp + 0x30, "C:\\windows\\system32");
         self.put_ustr(pp + 0x38, &format!("C:{}", &exe_path[2..]));
         self.put_ustr(pp + 0x40, &format!("C:{}", &exe_path[2..]));

@@ -220,3 +220,30 @@ pub extern "C" fn plonk_wine_set_screen(w: u32, h: u32) { wine().wm.set_screen(w
 /// Guest instructions retired so far (all threads' CPU state is summed by the host as it switches; this is the running CPU's counter).
 #[no_mangle]
 pub extern "C" fn plonk_wine_retired() -> f64 { wine().total_retired() as f64 }
+
+// ---- session disk: the page snapshots user files from one run and restores them into the next (no persistence across page loads) ----
+static mut OUT_LIST: String = String::new();
+/// Tab-separated "path\tsize" lines of the user's virtual disk (size -1 = directory); pointer valid until the next call.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_vfs_list() -> *const u8 { unsafe { OUT_LIST = wine().list_user_files(); OUT_LIST.as_ptr() } }
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_vfs_list_len() -> u32 { unsafe { OUT_LIST.len() as u32 } }
+/// Pointer to a file's bytes (0 if missing); length via `plonk_vfs_get_len`. Valid until the file changes.
+#[no_mangle]
+pub extern "C" fn plonk_vfs_get(p: *const u8, n: u32) -> *const u8 {
+    let path = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(p, n as usize)).to_string() };
+    wine().files.get(&path).map_or(std::ptr::null(), |v| v.as_ptr())
+}
+#[no_mangle]
+pub extern "C" fn plonk_vfs_get_len(p: *const u8, n: u32) -> u32 {
+    let path = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(p, n as usize)).to_string() };
+    wine().files.get(&path).map_or(0, |v| v.len() as u32)
+}
+/// Restore a directory entry of the session disk.
+#[no_mangle]
+pub extern "C" fn plonk_vfs_mkdir(p: *const u8, n: u32) {
+    let path = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(p, n as usize)).to_string() };
+    wine().add_dir(&path);
+}

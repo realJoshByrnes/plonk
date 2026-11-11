@@ -31,6 +31,22 @@ fn main() {
     for _ in 0..40 {
         if let Ok(RunState::Busy) = st { st = p.run_until_idle(50_000_000); } else { break; }
     }
+    // EVENTS="t,ms;d,x,y;u,x,y;k,vk,ch;..." scripted input (t = advance the guest clock), each followed by a run to idle
+    if let Ok(ev) = std::env::var("EVENTS") {
+        for e in ev.split(';').filter(|s| !s.is_empty()) {
+            let f: Vec<&str> = e.split(',').collect();
+            match f[0] {
+                "t" => p.tick(f[1].parse().unwrap()),
+                "d" => p.mouse(0, f[1].parse().unwrap(), f[2].parse().unwrap()),
+                "u" => p.mouse(2, f[1].parse().unwrap(), f[2].parse().unwrap()),
+                "k" => { let (vk, ch): (u32, u32) = (f[1].parse().unwrap(), f[2].parse().unwrap()); p.key(0, vk, ch); p.key(1, vk, 0); }
+                _ => {}
+            }
+            st = p.run_until_idle(50_000_000);
+            for _ in 0..200 { if let Ok(RunState::Busy) = st { st = p.run_until_idle(50_000_000); } else { break; } }
+        }
+    }
+    if std::env::var("WINDOWS").is_ok() { println!("windows: {}", p.debug_windows()); }
     println!("state {:?}", st);
     println!("stdout: {}", String::from_utf8_lossy(&p.stdout));
     if std::env::var("OPENS").is_ok() { for l in p.trace.iter().filter(|l| l.contains("(open ")) { println!("{l}"); } }

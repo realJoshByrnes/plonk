@@ -11,6 +11,22 @@
   select, button { font: inherit; }
   #stage { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #3a6ea5; }
   #screen { position: absolute; inset: 0; width: 100%; height: 100%; display: block; image-rendering: pixelated; }
+  #desktop { position: absolute; left: 14px; top: 14px; display: flex; flex-direction: column; flex-wrap: wrap; gap: 10px; max-height: calc(100% - 28px); align-content: flex-start; }
+  .icon { width: 86px; padding: 6px 4px; border-radius: 10px; text-align: center; color: #fff; font-size: 12px; text-shadow: 0 1px 3px rgba(0,0,0,.75); cursor: default; user-select: none; }
+  .icon svg { display: block; margin: 0 auto 4px; filter: drop-shadow(0 3px 6px rgba(0,0,0,.35)); }
+  .icon:hover { background: rgba(255,255,255,.16); }
+  .icon.sel { background: rgba(255,255,255,.28); box-shadow: inset 0 0 0 1px rgba(255,255,255,.45); }
+  .icon span { display: block; overflow-wrap: anywhere; }
+  #explorer { position: absolute; left: 140px; top: 40px; width: 460px; height: 340px; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; color: #1a1a1a; background: rgba(244,246,250,.92); backdrop-filter: blur(18px); box-shadow: 0 14px 40px rgba(0,0,0,.45), inset 0 0 0 1px rgba(255,255,255,.6); font-size: 13px; }
+  #explorer[hidden] { display: none; }
+  #explorer .exp-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: linear-gradient(#c9bdf5,#b3a5ee); font-weight: 600; }
+  #explorer .exp-path { flex: 1; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #explorer .exp-close { border: 0; background: #e05a6f; color: #fff; border-radius: 6px; width: 24px; height: 20px; cursor: pointer; }
+  #explorer .exp-list { flex: 1; overflow: auto; padding: 4px; }
+  .exp-row { display: grid; grid-template-columns: 26px 1fr auto; align-items: center; padding: 3px 8px; border-radius: 6px; cursor: default; user-select: none; }
+  .exp-row:hover { background: rgba(100,80,200,.10); }
+  .exp-row.sel { background: rgba(100,80,200,.22); }
+  .exp-row i { color: #666; font-style: normal; font-size: 12px; }
   #status { flex: none; display: flex; gap: 16px; padding: 4px 12px; border-top: 1px solid #2c2c33; min-height: 20px; align-items: center; }
   #log { flex: 1; color: #9a9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #out { max-width: 40%; margin: 0; color: #bbb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -21,9 +37,10 @@
   <strong>Plonk</strong>
   <label>App <select id="app"></select></label>
   <button id="run">Run</button>
+  <button id="exp">Explorer</button>
   <label>or your own 32-bit .exe <input type="file" id="file" accept=".exe"></label>
 </div>
-<div id="stage"><canvas id="screen" width="1024" height="768"></canvas><canvas id="glov" style="position:absolute;display:none;pointer-events:none;margin:0"></canvas></div>
+<div id="stage"><canvas id="screen" width="1024" height="768"></canvas><div id="desktop"></div><div id="explorer" hidden><div class="exp-head"><span>Explorer</span><span class="exp-path"></span><button class="exp-close" title="Close">×</button></div><div class="exp-list"></div></div><canvas id="glov" style="position:absolute;display:none;pointer-events:none;margin:0"></canvas></div>
 <div id="status"><div id="log">loading…</div><pre id="out"></pre></div>
 <script type="module">
 let W = 1024, H = 768; // the guest screen = the stage area (viewport minus the top bar and the status bar); follows window resizes
@@ -69,8 +86,41 @@ async function loadAppList() {
   for (const a of [...manifest.apps].sort((p, q) => (q === "gui_stay.exe") - (p === "gui_stay.exe"))) sel.add(new Option(a));
   log("Pick an app and press Run.");
 }
-async function boot(app) {
+// ---- session disk: files a program installed/created stay available to later runs (not across page loads) ----
+import { createShell } from "./shell.mjs";
+const disk = { files: new Map(), dirs: new Set() };
+let exitedHandled = true;
+function readList() {
+  if (!x) return [];
+  const p = x.plonk_vfs_list() >>> 0, n = x.plonk_vfs_list_len();
+  const t = new TextDecoder().decode(new Uint8Array(x.memory.buffer, p, n));
+  return t ? t.split("\n").map((l) => { const i = l.lastIndexOf("\t"); return { path: l.slice(0, i), size: Number(l.slice(i + 1)) }; }) : [];
+}
+function snapshotDisk() { // copy the live VFS's user files out of the running instance (it is about to be replaced)
+  if (!x) return;
+  const list = readList();
+  disk.files.clear(); disk.dirs.clear();
+  for (const e of list) {
+    if (e.size < 0) { disk.dirs.add(e.path); continue; }
+    const n = enc.encode(e.path), p = x.plonk_vfs_get(put(n), n.length) >>> 0;
+    if (p) disk.files.set(e.path, new Uint8Array(x.memory.buffer, p, e.size).slice());
+  }
+}
+const shell = createShell({
+  desktop: document.getElementById("desktop"), explorer: document.getElementById("explorer"),
+  host: {
+    list: () => (x ? readList() : [...disk.dirs].map((path) => ({ path, size: -1 })).concat([...disk.files].map(([path, d]) => ({ path, size: d.length })))),
+    launch: (path) => boot(null, path),
+    isRunning: () => !!x && !exitedHandled,
+  },
+});
+document.getElementById("exp").onclick = () => shell.toggleExplorer();
+window.plonkShell = { list: () => readList(), launch: (p) => boot(null, p) }; // test/automation hook
+setInterval(() => shell.refresh(), 1500);
+
+async function boot(app, installedPath) {
   mark("start");
+  snapshotDisk();
   await ensureGpuc();
   const sel = document.getElementById("app");
   app = app ?? sel.value;
@@ -84,12 +134,15 @@ async function boot(app) {
   x.plonk_wine_reset();
   document.getElementById("glov").style.display = "none";
   x.plonk_wine_set_screen(W, H);
+  for (const d of disk.dirs) { const n = enc.encode(d); x.plonk_vfs_mkdir(put(n), n.length); }
+  for (const [p, b] of disk.files) add(p, b);
+  exitedHandled = false;
   applyWallpaper();
   lastGen = -1;
   log("downloading Wine runtime (compressed, cached)...");
   const [pack, exe] = await Promise.all([
     fetch("/pack").then((r) => r.arrayBuffer()),
-    customExe ? customExe.arrayBuffer() : fetch(`/tests/guests/${app}`).then((r) => r.arrayBuffer()),
+    installedPath ? Promise.resolve(disk.files.get(installedPath).slice().buffer) : customExe ? customExe.arrayBuffer() : fetch(`/tests/guests/${app}`).then((r) => r.arrayBuffer()),
   ]);
   mark("downloaded"); log("loading...");
   const dv = new DataView(pack), u8 = new Uint8Array(pack);
@@ -99,7 +152,7 @@ async function boot(app) {
     const dl = dv.getUint32(o, true); o += 4;
     add(name, u8.subarray(o, o + dl)); o += dl;
   }
-  add("c:\\app.exe", new Uint8Array(exe));
+  if (!installedPath) add("c:\\app.exe", new Uint8Array(exe));
   // prefetch the app's DLL dependency closure so nothing has to be fetched in the middle of a window procedure
   const man = await (await fetch("/manifest.json")).json(), deps = await (await fetch("/deps.json")).json();
   const have = new Set(man.core), want = [], seen = new Set();
@@ -114,7 +167,7 @@ async function boot(app) {
   if (want.length) log("downloading " + want.join(", ") + "...");
   await Promise.all(want.map(async (n) => add("c:\\windows\\system32\\" + n, new Uint8Array(await (await fetch("/file/" + n)).arrayBuffer()))));
   for (const r of (await (await fetch("/manifest.json")).json()).remote) { const n = enc.encode(r); x.plonk_wine_add_remote(put(n), n.length); }
-  const path = enc.encode("c:\\app.exe");
+  const path = enc.encode(installedPath ?? "c:\\app.exe");
   if (x.plonk_wine_boot(put(path), path.length) !== 0) return log("boot failed: " + msg());
   mark("booted"); step(); mark("first-run+draw"); console.info("[timing] " + T.join(" "));
   document.title = "T " + T.join(" ");
@@ -192,6 +245,7 @@ function step() {
   let t0 = performance.now();
   const pr0 = x.plonk_gl_presents();
   const st = x.plonk_wine_run();
+  if (st === 1 && !exitedHandled) { exitedHandled = true; snapshotDisk(); shell.refresh(); } // the program ended: its installed files stay on the session disk
   let t1 = performance.now(); P.run += t1 - t0;
   (P.st ||= {})[st] = (P.st[st] || 0) + 1; P.pres = x.plonk_gl_presents();
   pumpGL();
