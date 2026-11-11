@@ -44,6 +44,19 @@ fn main() {
     let idle: u32 = std::env::var("IDLE").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
     let steps: u64 = std::env::var("STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(2_000_000_000);
     let mut r = p.run(steps);
+    // RT=seconds: run against the real clock, like the browser page does (guest time = wall time)
+    if let Some(secs) = std::env::var("RT").ok().and_then(|v| v.parse::<f64>().ok()) {
+        let (t0, mut last, mut busy) = (std::time::Instant::now(), std::time::Instant::now(), std::time::Duration::ZERO);
+        while t0.elapsed().as_secs_f64() < secs && !matches!(r, Ok(Some(_)) | Err(_)) {
+            let now = std::time::Instant::now();
+            p.advance_ns((now - last).as_nanos() as u64);
+            last = now;
+            r = p.run(20_000_000);
+            busy += now.elapsed();
+            if p.blocked { std::thread::sleep(std::time::Duration::from_millis(2)); }
+        }
+        println!("real-time run: {:.1}s wall, {:.1}s busy, {} M instructions", t0.elapsed().as_secs_f64(), busy.as_secs_f64(), p.retired() / 1_000_000);
+    }
     let mut rounds = 0;
     while matches!(r, Ok(None)) && p.blocked && rounds < idle { p.advance(1000); rounds += 1; r = p.run(2_000_000_000); }
     // EVENTS="t,ms;d,x,y;u,x,y;m,x,y;k,vk": scripted input after startup (t = let guest time pass), each followed by a run

@@ -89,6 +89,8 @@ pub struct LinuxProc {
     /// The process is waiting (poll/read/accept) for something that only time or another party can provide.
     pub blocked: bool,
     vfs: BTreeMap<String, Node>,
+    /// Hard links into `files` (path -> path): lets a saved Wine prefix share the DLLs of the install instead of holding copies.
+    aliases: HashMap<String, String>,
     cwd: String,
     fds: HashMap<u32, Fd>,
     /// Descriptors of the running process that are closed on exec.
@@ -131,7 +133,7 @@ impl LinuxProc {
         let mut vfs = BTreeMap::new();
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
         LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), exit_code: None, blocked: false,
-            vfs, cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
+            vfs, aliases: HashMap::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
             exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, wait_all: false }
     }
 
@@ -272,7 +274,7 @@ impl LinuxProc {
     fn execve(&mut self, path: u32, argv: u32, envp: u32) -> u32 {
         let raw = self.cstr(path);
         let p = self.resolve(-100i32 as u32, &raw, true);
-        let data = match self.vfs.get(&p) { Some(Node::File(d)) => Some(d.borrow().clone()), _ => self.files.get(&p).cloned() };
+        let data = self.file_bytes(&p);
         let Some(data) = data else { self.trace.push(format!("execve {p} -> ENOENT")); return ENOENT };
         if data.len() < 52 || data[0] != 0x7F { return -8i32 as u32; } // ENOEXEC
         let (mut argv, envp) = (self.str_vec(argv), self.str_vec(envp));
@@ -427,7 +429,7 @@ impl LinuxProc {
                 b'0' | 0 => { self.files.insert(name, body.to_vec()); }
                 b'5' => { self.vfs.insert(name, Node::Dir); }
                 b'2' => { self.vfs.insert(name, Node::Link(field(&h[157..257]))); }
-                b'1' => { if let Some(d) = self.files.get(&format!("/{}", field(&h[157..257]))).cloned() { self.files.insert(name, d); } }
+                b'1' => { self.aliases.insert(name, format!("/{}", field(&h[157..257]))); }
                 _ => {}
             }
         }
@@ -485,12 +487,48 @@ impl LinuxProc {
             match n {
                 Node::Dir => entry(&mut out, k, b'5', "", &[]),
                 Node::Link(t) => entry(&mut out, k, b'2', t, &[]),
-                Node::File(d) => entry(&mut out, k, b'0', "", &d.borrow()),
+                Node::File(d) => match self.install_twin(k, &d.borrow()) { Some(t) => entry(&mut out, k, b'1', t.trim_start_matches('/'), &[]), None => entry(&mut out, k, b'0', "", &d.borrow()) },
                 Node::Sock(_) => {}
             }
         }
+        for (k, t) in self.aliases.iter().filter(|(k, _)| k.starts_with(&pre)) { entry(&mut out, k, b'1', t.trim_start_matches('/'), &[]); }
         out.resize(out.len() + 1024, 0);
         out
+    }
+
+    /// The install's file with the same name and contents as this prefix file, if any (Wine copies its DLLs into the prefix).
+    fn install_twin(&self, path: &str, data: &[u8]) -> Option<String> {
+        let base = path.rsplit('/').next()?;
+        for dir in ["/usr/local/lib/wine/i386-windows", "/usr/local/share/wine/fonts", "/usr/local/share/wine/nls"] {
+            let t = format!("{dir}/{base}");
+            let same = match self.vfs.get(&t) { Some(Node::File(d)) => d.borrow().as_slice() == data, _ => self.files.get(&t).map_or(false, |d| d.as_slice() == data) };
+            if same && t.len() < 100 { return Some(t); }
+        }
+        None
+    }
+
+    /// Move a file of the read-only layer into the tree (shared, no copy) and return it. `private`: a hard link gets its own copy.
+    fn promote(&mut self, p: &str, private: bool) -> Option<Data> {
+        if let Some(t) = self.aliases.get(p).cloned() {
+            let target = match self.vfs.get(&t) { Some(Node::File(d)) => d.clone(), _ => self.promote(&t, false)? };
+            let data = if private { Rc::new(RefCell::new(target.borrow().clone())) } else { target };
+            self.aliases.remove(p);
+            self.vfs.insert(p.to_string(), Node::File(data.clone()));
+            return Some(data);
+        }
+        let d = self.files.remove(p)?;
+        let data: Data = Rc::new(RefCell::new(d));
+        self.vfs.insert(p.to_string(), Node::File(data.clone()));
+        Some(data)
+    }
+
+    /// Contents of a regular file anywhere in the tree (a copy).
+    fn file_bytes(&self, p: &str) -> Option<Vec<u8>> {
+        match self.vfs.get(p) {
+            Some(Node::File(d)) => Some(d.borrow().clone()),
+            Some(_) => None,
+            None => self.files.get(p).cloned().or_else(|| self.aliases.get(p).and_then(|t| self.file_bytes(t))),
+        }
     }
 
     /// Create a directory in the guest file tree.
@@ -501,6 +539,13 @@ impl LinuxProc {
 
     /// Advance the guest clock (lets poll timeouts expire).
     pub fn advance(&mut self, ms: u64) { self.clock_ns += ms * 1_000_000; }
+    pub fn advance_ns(&mut self, ns: u64) { self.clock_ns += ns; }
+    /// Instructions executed by all threads of all processes.
+    pub fn retired(&self) -> u64 {
+        let mut n = self.cpu.retired;
+        for (pi, p) in self.procs.iter().enumerate() { for (ti, t) in p.threads.iter().enumerate() { if (pi, ti) != self.cur { n += t.cpu.retired; } } }
+        n
+    }
 
     /// Map an ELF image's PT_LOAD segments at `bias`. Returns (entry, phdr address, phentsize, phnum, end, interpreter path).
     fn map_elf(&mut self, elf: &[u8], bias: u32) -> Result<(u32, u32, u32, u32, u32, Option<String>), String> {
@@ -536,7 +581,7 @@ impl LinuxProc {
         let (exe_entry, phdr_va, phentsize, phnum, end, interp) = self.map_elf(elf, bias)?;
         let (mut entry, mut at_base) = (exe_entry, 0);
         if let Some(path) = interp {
-            let ld = self.files.get(&path).cloned().ok_or(format!("interpreter {path} not in files"))?;
+            let ld = self.file_bytes(&path).ok_or(format!("interpreter {path} not in files"))?;
             entry = self.map_elf(&ld, INTERP_BIAS)?.0;
             at_base = INTERP_BIAS;
         }
@@ -676,7 +721,7 @@ impl LinuxProc {
     fn is_dir(&self, p: &str) -> bool {
         if matches!(self.vfs.get(p), Some(Node::Dir)) { return true; }
         let pre = format!("{}/", p.trim_end_matches('/'));
-        self.files.keys().any(|k| k.starts_with(&pre))
+        self.files.keys().chain(self.aliases.keys()).any(|k| k.starts_with(&pre)) || self.vfs.range(pre.clone()..).next().map_or(false, |(k, _)| k.starts_with(&pre))
     }
 
     /// (mode, size) of a path, if it exists.
@@ -688,7 +733,9 @@ impl LinuxProc {
             Some(Node::Link(t)) => Some((0o120777, t.len() as u64)),
             None => match p {
                 "/dev/null" | "/dev/tty" | "/dev/plonk/events" => Some((0o020666, 0)),
-                _ => self.files.get(p).map(|d| (0o100755, d.len() as u64)).or_else(|| self.is_dir(p).then_some((0o040755, 0))),
+                _ => self.files.get(p).map(|d| (0o100755, d.len() as u64))
+                    .or_else(|| self.aliases.get(p).and_then(|t| self.lookup(t)).map(|(_, n)| (0o100755, n)))
+                    .or_else(|| self.is_dir(p).then_some((0o040755, 0))),
             },
         }
     }
@@ -701,7 +748,7 @@ impl LinuxProc {
             if rest.is_empty() || rest.contains('/') { continue; }
             v.insert(rest.to_string(), match n { Node::Dir => 4, Node::File(_) => 8, Node::Link(_) => 10, Node::Sock(_) => 12 });
         }
-        for k in self.files.keys().filter(|k| k.starts_with(&pre)) {
+        for k in self.files.keys().chain(self.aliases.keys()).filter(|k| k.starts_with(&pre)) {
             let rest = &k[pre.len()..];
             match rest.split_once('/') { Some((d, _)) => { v.entry(d.to_string()).or_insert(4); } None => { v.entry(rest.to_string()).or_insert(8); } }
         }
@@ -732,12 +779,9 @@ impl LinuxProc {
                 "/dev/tty" => Kind::Tty,
                 "/dev/plonk/events" => Kind::Events,
                 _ => {
-                    if let Some(d) = self.files.get(&p) {
-                        if flags & 3 != 0 { // opened for writing: copy up into the writable tree
-                            let data: Data = Rc::new(RefCell::new(if flags & 0x200 != 0 { Vec::new() } else { d.clone() }));
-                            self.vfs.insert(p.clone(), Node::File(data.clone()));
-                            Kind::File { data, pos: 0 }
-                        } else { Kind::File { data: Rc::new(RefCell::new(d.clone())), pos: 0 } }
+                    if let Some(data) = self.promote(&p, flags & 3 != 0) {
+                        if flags & 0x200 != 0 { data.borrow_mut().clear(); }
+                        Kind::File { data, pos: 0 }
                     } else if self.is_dir(&p) { Kind::Dir { pos: 0 } }
                     else if flags & 0x40 != 0 && self.is_dir(parent(&p)) { // O_CREAT
                         let data: Data = Rc::new(RefCell::new(Vec::new()));

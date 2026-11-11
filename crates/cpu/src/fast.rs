@@ -335,7 +335,8 @@ impl Cache {
         while n < BLOCK_MAX {
             if n > 0 && p >= tlo && p < thi { break; }
             let avail = mem.len().saturating_sub(p).min(16);
-            let buf: &[u8] = mem.read_bytes(p, avail).unwrap_or(&[]);
+            // near the end of a mapping only the rest of this page may be readable
+            let buf: &[u8] = match mem.read_bytes(p, avail) { Ok(b) => b, Err(_) => mem.read_bytes(p, avail.min(4096 - (p & 0xFFF))).unwrap_or(&[]) };
             let ins = decode(buf, p);
             n += 1;
             if ins.h == H::Slow { self.insns.push(ins); break; }
