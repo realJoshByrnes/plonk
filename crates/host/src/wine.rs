@@ -36,7 +36,9 @@ pub const STATUS_OBJECT_NAME_NOT_FOUND: u32 = 0xC000_0034;
 pub const STATUS_CONFLICTING_ADDRESSES: u32 = 0xC000_0018;
 
 #[derive(Debug, PartialEq)]
-pub enum RunState { Exited(u32), Idle, /// Step budget used up while the guest is still computing; call again to continue.
+pub enum RunState { Exited(u32), Idle,
+    /// The guest needs a file the shell can supply (lazy download); add it under this VFS key, then run again.
+    Need(String), /// Step budget used up while the guest is still computing; call again to continue.
     Busy }
 
 pub enum Obj {
@@ -64,6 +66,9 @@ pub struct WineProc {
     images: Vec<(u32, String)>,
     keys: std::collections::HashSet<String>,
     exe_path: String,
+    /// Basenames (lowercase) of files the shell can supply on demand.
+    pub remote: std::collections::HashSet<String>,
+    need_file: Option<String>,
     /// Guest is blocked in GetMessage/TrackPopupMenu (waiting for input), as opposed to just yielding.
     parked: bool,
     /// Total ms the guest asked to sleep (the shell may use it to pace ticks).
@@ -97,7 +102,7 @@ impl WineProc {
         let mut p = WineProc {
             mem: Mem::new_owned(GUEST_SIZE), cpu: Cpu::new(), files: HashMap::new(), stdout: Vec::new(),
             trace: VecDeque::new(), regions: Vec::new(), handles: HashMap::new(), next_handle: 0x40,
-            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
+            scratch: SCRATCH, exit: None, ntdll_base: 0, images: Vec::new(), keys: Default::default(), exe_path: String::new(), remote: Default::default(), need_file: None, parked: false, sleep_ms: 0, busy: false, atoms: Vec::new(), took_over: false, idle: false, dcattr_next: 0, gdi_table: 0, step_trace: None, wm: Wm::new(), guest_returned: false, ki_user_callback: 0, callback_ret: None, lenient: false, stubbed: Vec::new(), values: HashMap::new(), ticks: 0, nls: HashMap::new(),
         };
         p.regions.push((SCRATCH, SCRATCH_SIZE));
         p
@@ -402,6 +407,7 @@ impl WineProc {
         self.parked = false;
         for _ in 0..max_traps {
             self.pump()?;
+            if let Some(k) = self.need_file.take() { return Ok(RunState::Need(k)); }
             if let Some(c) = self.exit { return Ok(RunState::Exited(c)); }
             if self.idle { return Ok(RunState::Idle); }
             if std::mem::take(&mut self.busy) { return Ok(RunState::Busy); }
@@ -416,6 +422,7 @@ impl WineProc {
             RunState::Idle if self.parked => Err("idle: waiting for input".into()),
             RunState::Idle => self.run(max_syscalls),
             RunState::Busy => self.run(max_syscalls),
+            RunState::Need(k) => Err(format!("missing file {k}")),
         }
     }
 
@@ -499,6 +506,14 @@ impl WineProc {
             let _ = self.mem.w32(KUSER + off + 4, (v >> 32) as u32);
             let _ = self.mem.w32(KUSER + off + 8, (v >> 32) as u32);
         }
+    }
+
+    /// If `path` is missing locally but the shell can supply it, the VFS key to request.
+    fn remote_key(&self, path: &str) -> Option<String> {
+        let base = path.rsplit('\\').next()?.to_ascii_lowercase();
+        if !self.remote.contains(&base) { return None; }
+        let ok = path.starts_with("nls\\") || (path.starts_with("c:\\windows\\") && (path.ends_with(".dll") || path.ends_with(".msstyles")));
+        if ok { Some(path.to_string()) } else { None }
     }
 
     pub(crate) fn ret_stdcall(&mut self, status: u32) -> Res<()> {
@@ -626,6 +641,7 @@ impl WineProc {
                 self.log(format!("  (open {path})"));
                 let is_dir = self.files.keys().any(|k| k.starts_with(&format!("{path}\\")));
                 if !self.files.contains_key(&path) && !is_dir && !path.is_empty() && path != "c:" {
+                    if let Some(k) = self.remote_key(&path) { self.need_file = Some(k); return Ok(None); } // retried after the shell supplies it
                     self.w32(iosb, STATUS_OBJECT_NAME_NOT_FOUND)?;
                     return Ok(Some(STATUS_OBJECT_NAME_NOT_FOUND));
                 }
@@ -840,7 +856,10 @@ impl WineProc {
                     12 => match id { 1 => "normnfc.nls", 2 => "normnfd.nls", 5 => "normnfkc.nls", 6 => "normnfkd.nls", _ => "normidna.nls" }.to_string(),
                     _ => return Ok(Some(STATUS_INVALID_PARAMETER)),
                 };
-                if !self.files.contains_key(&format!("nls\\{name}")) { return Ok(Some(STATUS_OBJECT_NAME_NOT_FOUND)); }
+                if !self.files.contains_key(&format!("nls\\{name}")) {
+                    if let Some(k) = self.remote_key(&format!("nls\\{name}")) { self.need_file = Some(k); return Ok(None); }
+                    return Ok(Some(STATUS_OBJECT_NAME_NOT_FOUND));
+                }
                 let (p, sz) = self.nls_map(&name)?;
                 self.w32(a[3], p)?;
                 self.w32(a[4], sz)?;

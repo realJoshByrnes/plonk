@@ -28,6 +28,7 @@ const log = (s) => (document.getElementById("log").textContent = s);
 const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
 const enc = new TextEncoder();
 let x, wasm;
+const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
 
 const T = (window.plonkT = []); const mark = (n) => T.push(n + "=" + Math.round(performance.now()));
 async function loadAppList() {
@@ -43,7 +44,6 @@ async function boot(app) {
   wasm = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
   x = wasm.instance.exports;
   window.plonk = { x, trace: () => { const p = x.plonk_wine_trace_ptr() >>> 0; return new TextDecoder().decode(new Uint8Array(x.memory.buffer, p, x.plonk_wine_trace_len())); } };
-  const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
   const add = (name, b) => {
     const n = enc.encode(name);
     x.plonk_wine_add_file(put(n), n.length, put(b), b.length);
@@ -64,6 +64,7 @@ async function boot(app) {
     add(name, u8.subarray(o, o + dl)); o += dl;
   }
   add("c:\\app.exe", new Uint8Array(exe));
+  for (const r of (await (await fetch("/manifest.json")).json()).remote) { const n = enc.encode(r); x.plonk_wine_add_remote(put(n), n.length); }
   const path = enc.encode("c:\\app.exe");
   if (x.plonk_wine_boot(put(path), path.length) !== 0) return log("boot failed: " + msg());
   mark("booted"); step(); mark("first-run+draw");
@@ -73,8 +74,22 @@ const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plo
 
 let lastGen = -1, lastLog = "";
 let stepTimer = 0;
+let fetching = false;
+async function supplyFile(key) { // lazy download: the guest asked for a file we did not ship up front
+  fetching = true;
+  lastLog = ""; // force the status line to refresh once the download is done
+  log("downloading " + key.split("\\").pop() + "...");
+  try {
+    const b = new Uint8Array(await (await fetch("/file/" + key.split("\\").pop())).arrayBuffer());
+    const n = enc.encode(key);
+    x.plonk_wine_add_file(put(n), n.length, put(b), b.length);
+  } finally { fetching = false; }
+  step();
+}
 function step() {
+  if (fetching) return;
   const st = x.plonk_wine_run();
+  if (st === 3) { supplyFile(msg()); return; }
   if (st === 2) { clearTimeout(stepTimer); stepTimer = setTimeout(step, 0); } // busy: yield to the page, then continue
   const g = x.plonk_wine_gen();
   if (g !== lastGen) { // redraw only when something on screen changed

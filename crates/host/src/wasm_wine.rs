@@ -30,12 +30,14 @@ pub unsafe extern "C" fn plonk_wine_boot(path: *const u8, len: u32) -> i32 {
     match wine().boot(&p) { Ok(()) => 0, Err(e) => { MSG = e; -1 } }
 }
 
-/// Runs a slice. Returns 0 = idle, 1 = exited (see exit code), 2 = busy (call again), -1 = error.
+/// Runs a slice. Returns 0 = idle, 1 = exited (see exit code), 2 = busy (call again),
+/// 3 = needs a file (VFS key in the message; add it, then call again), -1 = error.
 #[no_mangle]
 pub extern "C" fn plonk_wine_run() -> i32 {
     match wine().run_until_idle(50_000_000) {
         Ok(RunState::Idle) => 0,
         Ok(RunState::Busy) => 2,
+        Ok(RunState::Need(k)) => { unsafe { MSG = k; } 3 }
         Ok(RunState::Exited(c)) => { unsafe { MSG = format!("{c}"); } 1 }
         Err(e) => { unsafe { MSG = e; } -1 }
     }
@@ -113,3 +115,12 @@ pub extern "C" fn plonk_wine_gen() -> u32 { wine().wm.backend.gen as u32 }
 #[global_allocator]
 static ALLOC: lol_alloc::AssumeSingleThreaded<lol_alloc::FreeListAllocator> =
     unsafe { lol_alloc::AssumeSingleThreaded::new(lol_alloc::FreeListAllocator::new()) };
+
+/// Declare a file (basename) the page can supply lazily.
+///
+/// # Safety
+/// Pointer must be valid for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn plonk_wine_add_remote(name: *const u8, len: u32) {
+    wine().remote.insert(String::from_utf8_lossy(bytes(name, len)).to_ascii_lowercase());
+}

@@ -5,10 +5,12 @@ import { extname, join, normalize } from "node:path";
 import { gzipSync } from "node:zlib";
 const root = new URL("../", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".json": "application/json", ".exe": "application/octet-stream" };
+// Always-needed set shipped in the first download; everything else is fetched on demand via /file/<name>.
+const CORE = ["ntdll.dll", "kernelbase.dll", "kernel32.dll", "win32u.dll", "user32.dll", "gdi32.dll", "msvcrt.dll", "ucrtbase.dll", "advapi32.dll", "sechost.dll", "rpcrt4.dll", "imm32.dll"];
 let pack = null;
 function buildPack() {
-  const out = readdirSync(join(root, "wine/out")).filter((f) => f.endsWith(".dll")).map((f) => [`c:\\windows\\system32\\${f}`, join(root, "wine/out", f)])
-    .concat(readdirSync(join(root, "wine/out/nls")).map((f) => [`nls\\${f}`, join(root, "wine/out/nls", f)]));
+  const out = readdirSync(join(root, "wine/out")).filter((f) => CORE.includes(f)).map((f) => [`c:\\windows\\system32\\${f}`, join(root, "wine/out", f)])
+    .concat(["locale.nls", "l_intl.nls"].map((f) => [`nls\\${f}`, join(root, "wine/out/nls", f)]));
   const parts = [];
   for (const [name, path] of out) {
     const n = Buffer.from(name), d = readFileSync(path), h = Buffer.alloc(4);
@@ -31,7 +33,18 @@ createServer((req, res) => {
   }
   if (url === "/manifest.json") {
     res.setHeader("content-type", "application/json");
-    return res.end(JSON.stringify({ apps: readdirSync(join(root, "tests/guests")).filter((f) => f.endsWith(".exe")) }));
+    const out = join(root, "wine/out");
+    return res.end(JSON.stringify({
+      apps: readdirSync(join(root, "tests/guests")).filter((f) => f.endsWith(".exe")),
+      remote: readdirSync(out).filter((f) => /\.(dll|msstyles)$/.test(f) && !CORE.includes(f)).concat(readdirSync(join(out, "nls"))),
+    }));
+  }
+  if (url.startsWith("/file/")) {
+    const n = url.slice(6).replace(/[\\/]/g, "");
+    const p = [join(root, "wine/out", n), join(root, "wine/out/nls", n)].find((x) => existsSync(x));
+    if (!p) { res.statusCode = 404; return res.end("no such file"); }
+    res.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "public, max-age=3600" });
+    return createReadStream(p).pipe(res);
   }
   const p = normalize(join(root, url));
   if (!p.startsWith(normalize(root)) || !existsSync(p) || statSync(p).isDirectory()) { res.statusCode = 404; return res.end("not found"); }
