@@ -12,15 +12,15 @@ const MF_BYPOSITION: u32 = 0x400;
 
 #[derive(Clone)]
 pub(super) struct Item {
-    id: u32,
-    flags: u32,
-    text: String,
-    sub: u32,
+    pub(super) id: u32,
+    pub(super) flags: u32,
+    pub(super) text: String,
+    pub(super) sub: u32,
 }
 
 #[derive(Clone, Default)]
 pub(super) struct Menu {
-    items: Vec<Item>,
+    pub(super) items: Vec<Item>,
 }
 
 pub(super) struct OpenMenu {

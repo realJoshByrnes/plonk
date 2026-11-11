@@ -5,21 +5,21 @@ use super::*;
 /// A GDI bitmap. Pixels are in guest memory so DIB sections can be written by the app directly.
 #[derive(Clone, Copy)]
 pub(super) struct Bitmap {
-    w: i32,
-    h: i32,
-    bpp: u32,
-    stride: u32,
-    top_down: bool,
-    addr: u32,
+    pub(super) w: i32,
+    pub(super) h: i32,
+    pub(super) bpp: u32,
+    pub(super) stride: u32,
+    pub(super) top_down: bool,
+    pub(super) addr: u32,
     /// DIB sections keep their alpha channel; DDBs are always opaque.
-    dib: bool,
+    pub(super) dib: bool,
 }
 
 impl Bitmap { pub(super) fn addr(&self) -> u32 { self.addr } }
 
 fn align4(v: u32) -> u32 { (v + 3) & !3 }
 
-fn rop_apply(rop8: u32, p: u32, s: u32, d: u32) -> u32 {
+pub(super) fn rop_apply(rop8: u32, p: u32, s: u32, d: u32) -> u32 {
     let mut out = 0;
     for idx in 0..8u32 {
         if rop8 >> idx & 1 == 0 { continue; }
@@ -33,7 +33,7 @@ fn argb_of_colorref(c: u32) -> u32 { 0xFF00_0000 | (c & 0xff) << 16 | (c & 0xff0
 
 /// Decode a BITMAPINFO + bits into top-down ARGB (alpha kept for 32bpp).
 /// Decoded DIB: `pix` is always top row first; `top_down` records the original orientation (it decides how source rows are addressed).
-struct Dib { w: i32, h: i32, pix: Vec<u32>, top_down: bool }
+pub(super) struct Dib { pub(super) w: i32, pub(super) h: i32, pub(super) pix: Vec<u32>, pub(super) top_down: bool }
 
 impl WineProc {
     // ---- bitmap storage ----
@@ -48,7 +48,7 @@ impl WineProc {
 
     fn bmp_row(&self, b: &Bitmap, y: i32) -> u32 { b.addr + b.stride * if b.top_down { y } else { b.h - 1 - y } as u32 }
 
-    fn bmp_get(&self, hbm: u32, x: i32, y: i32) -> u32 {
+    pub(super) fn bmp_get(&self, hbm: u32, x: i32, y: i32) -> u32 {
         let Some(b) = self.wm.bitmaps.get(&hbm).copied() else { return 0 };
         if x < 0 || y < 0 || x >= b.w || y >= b.h { return 0; }
         let row = self.bmp_row(&b, y);
@@ -119,7 +119,7 @@ impl WineProc {
     }
 
     // ---- DC pixel access (client coordinates) ----
-    fn dc_read_rect(&self, hdc: u32, x: i32, y: i32, w: i32, h: i32) -> Vec<u32> {
+    pub(super) fn dc_read_rect(&self, hdc: u32, x: i32, y: i32, w: i32, h: i32) -> Vec<u32> {
         let mut out = vec![0xFF00_0000u32; (w.max(0) * h.max(0)) as usize];
         let Some(dc) = self.wm.dcs.get(&hdc) else { return out };
         if dc.bitmap != 0 {
@@ -170,7 +170,7 @@ impl WineProc {
         self.brush_argb(brush) & 0xFF_FFFF
     }
 
-    fn resample(src: &[u32], sw: i32, sh: i32, dw: i32, dh: i32) -> Vec<u32> {
+    pub(super) fn resample(src: &[u32], sw: i32, sh: i32, dw: i32, dh: i32) -> Vec<u32> {
         if (sw, sh) == (dw, dh) { return src.to_vec(); }
         let mut out = Vec::with_capacity((dw * dh) as usize);
         for y in 0..dh { for x in 0..dw { out.push(src[((y * sh / dh) * sw + x * sw / dw) as usize]); } }
@@ -190,9 +190,9 @@ impl WineProc {
         self.dc_write_rect(dst, x, y, w, h, &out);
     }
 
-    fn rop_needs_src(rop: u32) -> bool { let r = rop >> 16 & 0xff; (0..8u32).any(|i| (r >> i & 1) != (r >> (i ^ 2) & 1)) }
+    pub(super) fn rop_needs_src(rop: u32) -> bool { let r = rop >> 16 & 0xff; (0..8u32).any(|i| (r >> i & 1) != (r >> (i ^ 2) & 1)) }
 
-    fn decode_dib(&self, bmi: u32, bits: u32, usage_rgb: bool) -> Res<Dib> {
+    pub(super) fn decode_dib(&self, bmi: u32, bits: u32, usage_rgb: bool) -> Res<Dib> {
         let (size, w, h) = (self.r32(bmi)?, self.r32(bmi + 4)? as i32, self.r32(bmi + 8)? as i32);
         let bpp = self.mem.r16(bmi + 14).map_err(|_| "dib")? as u32;
         let (clr_used, comp) = (self.r32(bmi + 32)?, self.r32(bmi + 16)?);

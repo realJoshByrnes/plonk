@@ -46,6 +46,12 @@ fn main() {
             for _ in 0..200 { if let Ok(RunState::Busy) = st { st = p.run_until_idle(50_000_000); } else { break; } }
         }
     }
+    if let Ok(q) = std::env::var("LBQ") { // listbox probe: hwnd (hex)
+        let h = u32::from_str_radix(q.trim_start_matches("0x"), 16).unwrap();
+        let count = p.debug_send(h, 0x18B, 0, 0); // LB_GETCOUNT
+        println!("listbox {h:#x}: count={count} itemheight0={} top={} cursel={}", p.debug_send(h, 0x1A1, 0, 0), p.debug_send(h, 0x18E, 0, 0), p.debug_send(h, 0x188, 0, 0));
+        for i in 0..count.min(40) { println!("  item {i}: height={} data={:#x} textlen={}", p.debug_send(h, 0x1A1, i, 0), p.debug_send(h, 0x199, i, 0), p.debug_send(h, 0x18A, i, 0)); }
+    }
     if std::env::var("ALLWIN").is_ok() { println!("{}", p.debug_all_windows()); }
     if std::env::var("WINDOWS").is_ok() { println!("windows: {}", p.debug_windows()); }
     println!("state {:?}", st);

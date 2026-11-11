@@ -516,8 +516,8 @@ impl WineProc {
     // ---- syscall entry ----
     /// Ok(None): not handled here.
     pub(crate) fn win32u_call(&mut self, name: &str, a: &[u32]) -> Res<Option<u32>> {
-        if let Some(v) = self.more_call(name, a)? { return Ok(Some(v)); }
         if let Some(v) = self.gdi_batch_call(name, a)? { return Ok(Some(v)); }
+        if let Some(v) = self.more_call(name, a)? { return Ok(Some(v)); }
         if let Some(v) = self.user_batch_call(name, a)? { return Ok(Some(v)); }
         if let Some(v) = self.misc_batch_call(name, a)? { return Ok(Some(v)); }
         if let Some(v) = self.gl_nt(name, a)? { return Ok(Some(v)); }
@@ -996,6 +996,9 @@ impl WineProc {
     pub fn debug_windows(&self) -> String {
         self.wm.windows.iter().filter(|(h, w)| **h != DESKTOP && w.surface.is_some()).map(|(h, w)| format!("{:#x}:{}:{}:{:?}", h, self.wm.classes[w.class].name, w.visible, w.rect)).collect::<Vec<_>>().join(" ")
     }
+
+    /// Debug: send a message to a window as if the program had (returns the result).
+    pub fn debug_send(&mut self, hwnd: u32, msg: u32, wp: u32, lp: u32) -> u32 { self.send(hwnd, msg, wp, lp).unwrap_or(0xDEAD_BEEF) }
 
     /// Debug: every window (children included) with its class, style and rect.
     pub fn debug_all_windows(&self) -> String {

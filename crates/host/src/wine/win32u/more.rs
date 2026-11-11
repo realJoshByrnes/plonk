@@ -311,7 +311,7 @@ impl WineProc {
                 match codes::CALL_NO_PARAM[a[0] as usize] { "GetDialogBaseUnits" => 0x000F_0007, "DestroyCaret" => 1, _ => 0 }
             }
             "NtGdiRectVisible" | "NtGdiPtVisible" => 1,
-            "NtUserCallOneParam" if matches!(codes::CALL_ONE_PARAM.get(a[1] as usize).copied(), Some("GetCursorPos" | "GetClipCursor" | "GetPrimaryMonitorRect" | "GetVirtualScreenRect" | "MessageBeep" | "RealizePalette" | "ReplyMessage" | "SetKeyboardAutoRepeat" | "EnumClipboardFormats" | "EnableDC" | "EnableThunkLock" | "BeginDeferWindowPos" | "SetProcessDefaultLayout" | "IsWindowRectFullScreen" | "GetIconParam")) => {
+            "NtUserCallOneParam" if matches!(codes::CALL_ONE_PARAM.get(a[1] as usize).copied(), Some("GetCursorPos" | "GetClipCursor" | "GetPrimaryMonitorRect" | "GetVirtualScreenRect" | "MessageBeep" | "RealizePalette" | "ReplyMessage" | "SetKeyboardAutoRepeat" | "EnumClipboardFormats" | "EnableDC" | "EnableThunkLock" |"SetProcessDefaultLayout" | "IsWindowRectFullScreen" | "GetIconParam")) => {
                 match codes::CALL_ONE_PARAM[a[1] as usize] {
                     "GetCursorPos" => { let (x, y) = self.wm.extra.mouse; self.w32(a[0], x as u32)?; self.w32(a[0] + 4, y as u32)?; 1 }
                     "GetClipCursor" | "GetPrimaryMonitorRect" | "GetVirtualScreenRect" => { self.put_rect(a[0], [0, 0, self.wm.screen.0, self.wm.screen.1])?; 1 }
@@ -374,7 +374,8 @@ impl WineProc {
                     "GetWindowThread" => 0x24,
                     "GetWindowRelative" => match a[1] { 0 => self.wm.zorder.last().copied().unwrap_or(0), 5 | 2 => 0, _ => 0 },
                     "MonitorFromWindow" => 0x20001,
-                    "GetClassLongA" | "GetClassLongW" | "GetClassLongPtrA" | "GetClassLongPtrW" | "GetWindowWord" => 0,
+                    "GetClassLongA" | "GetClassLongW" | "GetClassLongPtrA" | "GetClassLongPtrW" => self.ub_class_long(a[0], a[1] as i32),
+                    "GetWindowWord" => self.ub_window_word(a[0], a[1] as i32),
                     "GetWindowInfo" => {
                         let Some(w) = self.wm.windows.get(&a[0]) else { return Ok(Some(0)) };
                         let (r, st, ex) = (w.rect, w.style, w.ex_style);
