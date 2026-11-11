@@ -440,6 +440,7 @@ impl WineProc {
             "NtUserSetCapture" => std::mem::replace(&mut self.wm.capture, a[0]),
             "NtUserQueryInputContext" => 0,
             "NtUserSetCursorIconData" | "NtUserSetCursor" | "NtUserDestroyCursor" => 1,
+            "NtUserFindExistingCursorIcon" => 0,
             "NtGdiOpenDCW" => self.new_dc(DESKTOP, None),
             "NtGdiCreatePatternBrushInternal" => self.gdi_alloc(0x100000, Gdi::Brush(0xFFC0_C0C0)),
             "NtUserSetTimer" => {

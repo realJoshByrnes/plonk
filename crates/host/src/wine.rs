@@ -104,6 +104,15 @@ impl WineProc {
         }
     }
 
+    /// Seed a REG_SZ value (creating the key path) in the in-memory registry.
+    pub fn reg_set_sz(&mut self, key: &str, name: &str, value: &str) {
+        let mut cur = String::new();
+        for part in key.split('\\').filter(|x| !x.is_empty()) { cur = format!("{cur}\\{part}"); self.keys.insert(cur.clone()); }
+        let mut data: Vec<u8> = value.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        data.extend_from_slice(&[0, 0]);
+        self.values.insert((key.to_string(), name.to_string()), (1, data));
+    }
+
     /// Debug: which loaded image (base, name) contains `addr`.
     pub fn module_at(&self, addr: u32) -> Option<(u32, &str)> {
         self.images.iter().filter(|(b, _)| *b <= addr).max_by_key(|(b, _)| *b).map(|(b, n)| (*b, n.as_str()))
@@ -111,7 +120,7 @@ impl WineProc {
 
     // ---- helpers ----
     fn log(&mut self, s: String) {
-        if self.trace.len() >= 400 { self.trace.pop_front(); }
+        if self.trace.len() >= 4000 { self.trace.pop_front(); }
         self.trace.push_back(s);
     }
     fn r32(&self, a: u32) -> Res<u32> { self.mem.r32(a).map_err(|_| format!("read fault @{a:#x}")) }
@@ -241,6 +250,18 @@ impl WineProc {
 
     pub fn boot(&mut self, exe_path: &str) -> Res<()> {
         let exe_path = Self::nt_path(exe_path);
+        if let Some(cc) = self.files.get("c:\\windows\\system32\\comctl32.dll").cloned() {
+            const ID: &str = "x86_microsoft.windows.common-controls_6595b64144ccf1df_6.0.0.0_none_deadbeef";
+            let manifest = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n<assemblyIdentity type=\"win32\" name=\"Microsoft.Windows.Common-Controls\" version=\"6.0.0.0\" processorArchitecture=\"x86\" publicKeyToken=\"6595b64144ccf1df\"/>\n<file name=\"comctl32.dll\"/>\n</assembly>\n";
+            self.files.insert(format!("c:\\windows\\winsxs\\manifests\\{ID}.manifest"), manifest.as_bytes().to_vec());
+            self.files.insert(format!("c:\\windows\\winsxs\\{ID}\\comctl32.dll"), cc);
+        }
+        if self.files.contains_key("c:\\windows\\resources\\themes\\light\\light.msstyles") {
+            let tm = "\\registry\\user\\s-1-5-21-0-0-0-1000\\software\\microsoft\\windows\\currentversion\\thememanager";
+            for (n, v) in [("themeactive", "1"), ("dllname", "C:\\windows\\resources\\themes\\light\\light.msstyles"), ("colorname", "NormalColor"), ("sizename", "NormalSize")] {
+                self.reg_set_sz(tm, n, v);
+            }
+        }
         let ntdll = self.map_image_file("c:\\windows\\system32\\ntdll.dll")?;
         self.ntdll_base = ntdll.base;
         let exp = |n: &str, p: &Self| plonk_pe::find_export(&p.mem, ntdll.base, n).ok_or(format!("ntdll export {n} missing"));
@@ -617,6 +638,8 @@ impl WineProc {
                 let n = match class {
                     5 => { for i in 0..6 { self.w32(buf + i * 4, 0)?; } self.w32(buf + 8, fsz)?; self.w32(buf, fsz)?; self.w32(buf + 16, 1)?; 24 }
                     14 => { self.w32(buf, pos)?; self.w32(buf + 4, 0)?; 8 }
+                    20 | 19 => { self.w32(buf, fsz)?; self.w32(buf + 4, 0)?; 8 } // FileEndOfFile / FileAllocation
+                    34 => { for o in (0..56).step_by(4) { self.w32(buf + o, 0)?; } self.w32(buf + 32, fsz)?; self.w32(buf + 40, fsz)?; self.w32(buf + 48, 0x80)?; 56 } // FileNetworkOpen
                     _ => return Err(format!("QueryInformationFile class {class}")),
                 };
                 if len < n { return Ok(Some(0xC000_0004)); }
@@ -797,6 +820,51 @@ impl WineProc {
                     None => STATUS_OBJECT_NAME_NOT_FOUND,
                 }
             }
+            "NtQueryDirectoryFile" => {
+                // (h, event, apc, apcctx, iosb, buf, len, class, single, filename*, restart)
+                let (h, iosb, buf, len, class, pat_p) = (a[0], a[4], a[5], a[6], a[7], a[9]);
+                let dir = match self.handles.get(&h) { Some(Obj::File { path, dir: true, .. }) => path.clone(), _ => return Ok(Some(STATUS_INVALID_HANDLE)) };
+                let first = matches!(self.handles.get(&h), Some(Obj::File { pos: 0, .. })) || a[10] != 0;
+                if !first { return Ok(Some(0x8000_0006)); } // STATUS_NO_MORE_FILES
+                if class != 3 { return Err(format!("QueryDirectoryFile class {class}")); }
+                let pat = if pat_p != 0 { self.get_ustr(pat_p)?.to_ascii_lowercase() } else { "*".to_string() };
+                let prefix = format!("{dir}\\");
+                let mut names: Vec<(String, bool, u32)> = Vec::new();
+                for (k, v) in &self.files {
+                    if let Some(rest) = k.strip_prefix(&prefix) {
+                        let (comp, is_dir) = match rest.split_once('\\') { Some((c, _)) => (c, true), None => (rest, false) };
+                        if wild_match(&pat, comp) && !names.iter().any(|(n, _, _)| n == comp) { names.push((comp.to_string(), is_dir, v.len() as u32)); }
+                    }
+                }
+                if names.is_empty() { return Ok(Some(0xC000_000F)); } // STATUS_NO_SUCH_FILE
+                let mut off = 0u32;
+                let mut last = 0u32;
+                for (n, is_dir, size) in &names {
+                    let w: Vec<u16> = n.encode_utf16().collect();
+                    let sz = (94 + w.len() as u32 * 2 + 7) & !7;
+                    if off + sz > len { break; }
+                    for o in (0..94).step_by(4) { self.w32(buf + off + o, 0)?; }
+                    self.w32(buf + off + 40, *size)?;
+                    self.w32(buf + off + 56, if *is_dir { 0x10 } else { 0x80 })?;
+                    self.w32(buf + off + 60, w.len() as u32 * 2)?;
+                    for (i, c) in w.iter().enumerate() { self.w16(buf + off + 94 + i as u32 * 2, *c)?; }
+                    last = off;
+                    off += sz;
+                }
+                self.w32(buf + last, 0)?; // last entry: NextEntryOffset = 0
+                // chain earlier entries
+                let mut o2 = 0u32;
+                for (n, _, _) in &names {
+                    let sz = (94 + n.encode_utf16().count() as u32 * 2 + 7) & !7;
+                    if o2 >= last { break; }
+                    self.w32(buf + o2, sz)?;
+                    o2 += sz;
+                }
+                if let Some(Obj::File { pos, .. }) = self.handles.get_mut(&h) { *pos = 1; }
+                self.w32(iosb, 0)?; self.w32(iosb + 4, off)?;
+                0
+            }
+            "NtUnmapViewOfSection" | "NtUnmapViewOfSectionEx" => { self.images.retain(|(b, _)| *b != a[1]); self.vm_release(a[1]); 0 }
             "NtCallbackReturn" => { self.callback_ret = Some((a[0], a[1], a[2])); return Ok(None); }
             "NtTerminateProcess" => { self.exit = Some(a[1]); return Ok(None); }
             "NtClose" => if self.handles.remove(&a[0]).is_some() { 0 } else { STATUS_INVALID_HANDLE },
@@ -807,6 +875,19 @@ impl WineProc {
             _ => return Err("unimplemented syscall".into()),
         }))
     }
+}
+
+/// Case-insensitive `*` / `?` wildcard match (pattern already lowercase).
+fn wild_match(p: &str, n: &str) -> bool {
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('*', rest)) => (0..=n.len()).any(|i| go(rest, &n[i..])),
+            Some(('?', rest)) => !n.is_empty() && go(rest, &n[1..]),
+            Some((c, rest)) => n.first().is_some_and(|x| x.to_ascii_lowercase() == *c) && go(rest, &n[1..]),
+        }
+    }
+    go(&p.chars().collect::<Vec<_>>(), &n.chars().collect::<Vec<_>>())
 }
 
 impl Default for WineProc { fn default() -> Self { Self::new() } }

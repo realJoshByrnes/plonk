@@ -35,31 +35,45 @@ async function boot(app) {
   app = app ?? sel.value;
   wasm = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
   x = wasm.instance.exports;
+  window.plonk = { x, trace: () => { const p = x.plonk_wine_trace_ptr() >>> 0; return new TextDecoder().decode(new Uint8Array(x.memory.buffer, p, x.plonk_wine_trace_len())); } };
   const put = (b) => { const p = x.plonk_alloc(b.length) >>> 0; new Uint8Array(x.memory.buffer, p, b.length).set(b); return p; };
-  const add = async (name, url) => {
-    const b = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const add = (name, b) => {
     const n = enc.encode(name);
     x.plonk_wine_add_file(put(n), n.length, put(b), b.length);
   };
-  log("fetching Wine DLLs…");
-  await Promise.all([
-    ...manifest.dlls.map((f) => add(`c:\\windows\\system32\\${f}`, `/wine/out/${f}`)),
-    ...manifest.nls.map((f) => add(`nls\\${f}`, `/wine/out/nls/${f}`)),
-    add("c:\\app.exe", `/tests/guests/${app}`),
+  log("downloading Wine runtime (compressed, cached)...");
+  const [pack, exe] = await Promise.all([
+    fetch("/pack").then((r) => r.arrayBuffer()),
+    fetch(`/tests/guests/${app}`).then((r) => r.arrayBuffer()),
   ]);
+  log("loading...");
+  const dv = new DataView(pack), u8 = new Uint8Array(pack);
+  for (let o = 0; o < pack.byteLength;) {
+    const nl = dv.getUint32(o, true); o += 4;
+    const name = new TextDecoder().decode(u8.subarray(o, o + nl)); o += nl;
+    const dl = dv.getUint32(o, true); o += 4;
+    add(name, u8.subarray(o, o + dl)); o += dl;
+  }
+  add("c:\\app.exe", new Uint8Array(exe));
   const path = enc.encode("c:\\app.exe");
   if (x.plonk_wine_boot(put(path), path.length) !== 0) return log("boot failed: " + msg());
   step();
 }
 const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len()));
 
+let lastGen = -1, lastLog = "";
 function step() {
   const st = x.plonk_wine_run();
+  const g = x.plonk_wine_gen();
+  if (g !== lastGen) { // redraw only when something on screen changed
+    lastGen = g;
+    const p = x.plonk_wine_compose(W, H) >>> 0;
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer, p, W * H * 4), W, H), 0, 0);
+  }
   const stub = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stubbed_ptr() >>> 0, x.plonk_wine_stubbed_len()));
-  document.getElementById("out").textContent = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stdout_ptr() >>> 0, x.plonk_wine_stdout_len()));
-  const p = x.plonk_wine_compose(W, H) >>> 0;
-  ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer.slice(p, p + W * H * 4)), W, H), 0, 0);
-  log((stub ? "[unimplemented, answered 0: " + stub + "]\n" : "") + (st === 0 ? "running (waiting for input) — drag windows by the title bar, click the red X to close" : st === 1 ? "exited with code " + msg() : "error: " + msg()));
+  const out = new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_stdout_ptr() >>> 0, x.plonk_wine_stdout_len()));
+  const text = (stub ? "[unimplemented, answered 0: " + stub + "]\n" : "") + (st === 0 ? "running (waiting for input) - drag windows by the title bar, click the red X to close" : st === 1 ? "exited with code " + msg() : "error: " + msg());
+  if (text !== lastLog) { lastLog = text; log(text); document.getElementById("out").textContent = out; }
 }
 
 const pos = (e) => {
@@ -74,7 +88,7 @@ const vkOf = (e) => ({ Backspace: 8, Tab: 9, Enter: 13, Escape: 27, " ": 32, Arr
 const chOf = (e) => (e.ctrlKey || e.altKey || e.metaKey ? 0 : e.key.length === 1 ? e.key.charCodeAt(0) : { Backspace: 8, Enter: 13, Tab: 9 }[e.key] ?? 0);
 window.addEventListener("keydown", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(0, vkOf(e), chOf(e)); step(); });
 window.addEventListener("keyup", (e) => { if (!x) return; e.preventDefault(); x.plonk_wine_key(1, vkOf(e), 0); step(); });
-setInterval(() => { if (x) { x.plonk_wine_tick(50); step(); } }, 50);
+setInterval(() => { if (x) { x.plonk_wine_tick(50); step(); } }, 100);
 document.getElementById("run").onclick = () => boot();
 boot();
 </script>

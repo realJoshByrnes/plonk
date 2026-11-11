@@ -1,19 +1,42 @@
 // Dev server: node web/serve.mjs [port]  -> http://localhost:8080/web/index.html
 import { createServer } from "node:http";
-import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
+import { createReadStream, readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
+import { gzipSync } from "node:zlib";
 const root = new URL("../", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
-const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".json": "application/json" };
+const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".json": "application/json", ".exe": "application/octet-stream" };
+let pack = null;
+function buildPack() {
+  const out = readdirSync(join(root, "wine/out")).filter((f) => f.endsWith(".dll")).map((f) => [`c:\\windows\\system32\\${f}`, join(root, "wine/out", f)])
+    .concat(NLS.filter((f) => existsSync(join(root, "wine/out/nls", f))).map((f) => [`nls\\${f}`, join(root, "wine/out/nls", f)]));
+  const parts = [];
+  for (const [name, path] of out) {
+    const n = Buffer.from(name), d = readFileSync(path), h = Buffer.alloc(4);
+    h.writeUInt32LE(n.length); parts.push(h);
+    parts.push(n);
+    const l = Buffer.alloc(4); l.writeUInt32LE(d.length); parts.push(l, d);
+  }
+  const raw = Buffer.concat(parts), gz = gzipSync(raw, { level: 6 });
+  const etag = `"${gz.length}-${out.length}-${Math.max(...out.map(([, p]) => statSync(p).mtimeMs))}"`;
+  console.log(`pack: ${out.length} files, ${(raw.length / 1048576).toFixed(1)} MB -> ${(gz.length / 1048576).toFixed(1)} MB gzip`);
+  return { gz, etag };
+}
 createServer((req, res) => {
   const url = decodeURIComponent(req.url.split("?")[0]);
+  if (url === "/pack") {
+    pack ??= buildPack();
+    if (req.headers["if-none-match"] === pack.etag) { res.statusCode = 304; return res.end(); }
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": "gzip", etag: pack.etag, "cache-control": "no-cache", "content-length": pack.gz.length });
+    return res.end(pack.gz);
+  }
   if (url === "/manifest.json") {
-    const dlls = readdirSync(join(root, "wine/out")).filter((f) => f.endsWith(".dll"));
-    const nls = readdirSync(join(root, "wine/out/nls"));
     res.setHeader("content-type", "application/json");
-    return res.end(JSON.stringify({ dlls, nls, apps: readdirSync(join(root, "tests/guests")).filter((f) => f.endsWith(".exe")) }));
+    return res.end(JSON.stringify({ apps: readdirSync(join(root, "tests/guests")).filter((f) => f.endsWith(".exe")) }));
   }
   const p = normalize(join(root, url));
   if (!p.startsWith(normalize(root)) || !existsSync(p) || statSync(p).isDirectory()) { res.statusCode = 404; return res.end("not found"); }
-  res.setHeader("content-type", types[extname(p)] ?? "application/octet-stream");
-  res.end(readFileSync(p));
+  const st = statSync(p), etag = `"${st.size}-${st.mtimeMs}"`;
+  if (req.headers["if-none-match"] === etag) { res.statusCode = 304; return res.end(); }
+  res.writeHead(200, { "content-type": types[extname(p)] ?? "application/octet-stream", etag, "cache-control": "no-cache", "content-length": st.size });
+  createReadStream(p).pipe(res);
 }).listen(Number(process.argv[2] ?? 8080), () => console.log("plonk dev server on http://localhost:" + (process.argv[2] ?? 8080) + "/web/index.html"));

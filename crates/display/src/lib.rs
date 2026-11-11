@@ -47,6 +47,8 @@ pub struct SoftBackend {
     /// Stacking order, bottom to top.
     order: Vec<SurfaceId>,
     wall: std::cell::RefCell<Option<(u32, u32, Vec<u32>)>>,
+    /// Bumped by every mutation; lets a shell skip composing/drawing unchanged frames.
+    pub gen: u64,
     /// Count of present() calls, handy in tests.
     pub presents: u32,
 }
@@ -107,12 +109,14 @@ impl SoftBackend {
 
 impl Backend for SoftBackend {
     fn create_surface(&mut self, w: u32, h: u32) -> SurfaceId {
+        self.gen += 1;
         self.surfaces.push(Some(Surface { w, h, pix: vec![0xFF00_0000; (w * h) as usize], x: 0, y: 0, visible: false, radius: 0, blur: 0, shadow: 0 }));
         let id = self.surfaces.len() as SurfaceId;
         self.order.push(id);
         id
     }
     fn resize_surface(&mut self, id: SurfaceId, w: u32, h: u32) {
+        self.gen += 1;
         if let Some(s) = self.get(id) {
             let mut pix = vec![0xFF00_0000; (w * h) as usize];
             for y in 0..h.min(s.h) { for x in 0..w.min(s.w) { pix[(y * w + x) as usize] = s.pix[(y * s.w + x) as usize]; } }
@@ -120,16 +124,19 @@ impl Backend for SoftBackend {
         }
     }
     fn destroy_surface(&mut self, id: SurfaceId) {
+        self.gen += 1;
         if let Some(slot) = self.surfaces.get_mut((id as usize).wrapping_sub(1)) { *slot = None; }
         self.order.retain(|i| *i != id);
     }
     fn fill_rect(&mut self, id: SurfaceId, x: i32, y: i32, w: i32, h: i32, argb: u32) {
+        self.gen += 1;
         let Some(s) = self.get(id) else { return };
         let (x0, y0) = (x.max(0), y.max(0));
         let (x1, y1) = ((x + w).min(s.w as i32), (y + h).min(s.h as i32));
         for yy in y0..y1 { for xx in x0..x1 { s.pix[(yy as u32 * s.w + xx as u32) as usize] = argb; } }
     }
     fn draw_text_px(&mut self, id: SurfaceId, x: i32, y: i32, text: &str, argb: u32, px: f32, bold: bool) {
+        self.gen += 1;
         let Some(s) = self.get(id) else { return };
         let ca = (argb >> 24) as f32 / 255.0;
         plonk_fonts::with(|f| {
@@ -157,6 +164,7 @@ impl Backend for SoftBackend {
     }
     /// 8x8 bitmap font (font8x8, public domain), 8px advance. Non-ASCII renders as '?'.
     fn draw_text(&mut self, id: SurfaceId, x: i32, y: i32, text: &str, argb: u32) {
+        self.gen += 1;
         let mut cx = x;
         for c in text.chars() {
             let g = font8x8::legacy::BASIC_LEGACY[if (c as u32) < 128 { c as usize } else { b'?' as usize }];
@@ -169,6 +177,7 @@ impl Backend for SoftBackend {
         }
     }
     fn blit(&mut self, id: SurfaceId, x: i32, y: i32, w: u32, h: u32, pixels: &[u32], stride: u32) {
+        self.gen += 1;
         let Some(s) = self.get(id) else { return };
         for yy in 0..h as i32 {
             for xx in 0..w as i32 {
@@ -180,12 +189,15 @@ impl Backend for SoftBackend {
         }
     }
     fn place(&mut self, id: SurfaceId, x: i32, y: i32, visible: bool) {
+        self.gen += 1;
         if let Some(s) = self.get(id) { s.x = x; s.y = y; s.visible = visible; }
     }
     fn set_glass(&mut self, id: SurfaceId, radius: i32, blur: i32, shadow: i32) {
+        self.gen += 1;
         if let Some(s) = self.get(id) { s.radius = radius; s.blur = blur; s.shadow = shadow; }
     }
     fn raise(&mut self, id: SurfaceId) {
+        self.gen += 1;
         if self.order.contains(&id) { self.order.retain(|i| *i != id); self.order.push(id); }
     }
     fn present(&mut self) { self.presents += 1; }

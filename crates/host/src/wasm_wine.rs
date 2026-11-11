@@ -80,3 +80,22 @@ pub extern "C" fn plonk_wine_stubbed_ptr() -> *const u8 { unsafe { OUT_STUB = wi
 #[allow(static_mut_refs)]
 pub extern "C" fn plonk_wine_stubbed_len() -> u32 { unsafe { OUT_STUB.len() as u32 } }
 static mut OUT_STUB: String = String::new();
+
+/// Last 80 trace lines (debugging aid for the browser console / e2e).
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_wine_trace_ptr() -> *const u8 {
+    unsafe {
+        let t = &wine().trace;
+        OUT_TRACE = t.iter().skip(t.len().saturating_sub(80)).cloned().collect::<Vec<_>>().join("\n");
+        OUT_TRACE.as_ptr()
+    }
+}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_wine_trace_len() -> u32 { unsafe { OUT_TRACE.len() as u32 } }
+static mut OUT_TRACE: String = String::new();
+
+/// Display generation (low 32 bits); changes whenever anything on screen changed.
+#[no_mangle]
+pub extern "C" fn plonk_wine_gen() -> u32 { wine().wm.backend.gen as u32 }
