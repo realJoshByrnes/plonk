@@ -28,7 +28,7 @@ const log = (s) => (document.getElementById("log").textContent = s);
 const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
 const enc = new TextEncoder();
 let x, wasm, gpuc = null;
-if (!new URLSearchParams(location.search).has("cpu")) import("./compositor_gpu.mjs").then((m) => { gpuc = m.createGpuCompositor(1024, 768); window.__gpuc = !!gpuc; if (gpuc && wall) gpuc.setWallpaper(wall); lastGen = -1; }).catch((e) => console.info("GPU compositor unavailable, using CPU", e));
+if (!new URLSearchParams(location.search).has("cpu")) import("./compositor_gpu.mjs").then((m) => { const tg = performance.now(); gpuc = m.createGpuCompositor(1024, 768); console.info(`[timing] GPU compositor ${gpuc ? "ready" : "unavailable"} in ${Math.round(performance.now() - tg)} ms (shader compile)`); window.__gpuc = !!gpuc; if (gpuc && wall) gpuc.setWallpaper(wall); lastGen = -1; }).catch((e) => console.info("GPU compositor unavailable, using CPU", e));
 // ---- boot intro: a glass ball rolls in; its final frame becomes the desktop wallpaper (pre-saved web/wallpaper.png without WebGL2) ----
 let wall = null, introRun = false;
 function applyWallpaper() { // CPU compositor path: hand the image to the host
@@ -116,7 +116,7 @@ async function boot(app) {
   for (const r of (await (await fetch("/manifest.json")).json()).remote) { const n = enc.encode(r); x.plonk_wine_add_remote(put(n), n.length); }
   const path = enc.encode("c:\\app.exe");
   if (x.plonk_wine_boot(put(path), path.length) !== 0) return log("boot failed: " + msg());
-  mark("booted"); step(); mark("first-run+draw");
+  mark("booted"); step(); mark("first-run+draw"); console.info("[timing] " + T.join(" "));
   document.title = "T " + T.join(" ");
 }
 const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_wine_msg_ptr() >>> 0, x.plonk_wine_msg_len()));
@@ -146,6 +146,7 @@ let glb = null, glInit = null;
 function ensureGL() {
   if (glInit) return;
   const prefer = new URLSearchParams(location.search).get("gl") || "webgpu";
+  const tgl = performance.now();
   glInit = import("./gl_backend.mjs").then((m) => m.createGLBackend({ prefer, direct: !new URLSearchParams(location.search).has("nodirect") })).then((b) => {
     b.onPresent = (w, h, rgba) => { // a finished frame: copy it into the guest window
       const p = x.plonk_gl_frame_buf(w, h) >>> 0;
@@ -160,6 +161,7 @@ function ensureGL() {
       ovctx.transferFromImageBitmap(bmp);
       window.__glDirect = (window.__glDirect || 0) + 1;
     };
+    console.info(`[timing] 3D backend ${b.kind} ready in ${Math.round(performance.now() - tgl)} ms`);
     glb = b; window.__glKind = b.kind;
   }).catch((e) => { console.error("3D backend failed", e); glInit = null; x.plonk_gl_clear(); });
 }
