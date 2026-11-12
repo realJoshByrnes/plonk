@@ -68,7 +68,7 @@ createServer((req, res) => {
   }
   // The real-Wine path (web/real.html): the packed Wine install and the saved prefix, gzip-compressed once and cached on disk.
   if (url === "/" || url === "/real") { res.writeHead(302, { location: "/web/real.html" }); return res.end(); }
-  if (url === "/real/root.tar" || url === "/real/prefix.tar") {
+  if (url === "/real/root.tar" || url === "/real/prefix.tar" || url === "/real/snapshot.bin") {
     const src = join(root, "wine", url.slice(6));
     if (!existsSync(src)) { res.statusCode = 404; return res.end("missing " + url.slice(6) + " (see wine/build32.sh)"); }
     const st = statSync(src), etag = `"${st.size}-${Math.round(st.mtimeMs)}"`;
@@ -80,7 +80,7 @@ createServer((req, res) => {
       writeFileSync(gzFile, gzipSync(readFileSync(src), { level: 6 }));
       console.log(`${url}: ${(st.size / 1048576).toFixed(0)} MB -> ${(statSync(gzFile).size / 1048576).toFixed(0)} MB gzip in ${Math.round(performance.now() - t0)} ms`);
     }
-    res.writeHead(200, { "content-type": "application/x-tar", "content-encoding": "gzip", etag, "cache-control": "no-cache", "content-length": statSync(gzFile).size, "x-size": st.size });
+    res.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": "gzip", etag, "cache-control": "no-cache", "content-length": statSync(gzFile).size, "x-size": st.size });
     return createReadStream(gzFile).pipe(res);
   }
   if (url.startsWith("/file/")) {

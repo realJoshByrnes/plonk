@@ -108,6 +108,20 @@ impl Mem {
             self.tbl[p] = mine as usize | (e & P_OK);
         }
     }
+    /// Paged: visit every page that has host memory: (page index, accessible, its 4096 bytes).
+    pub fn each_page(&self, mut f: impl FnMut(u32, bool, &[u8])) {
+        for (i, &e) in self.tbl.iter().enumerate() {
+            if e & !0xFFF != 0 { f(i as u32, e & P_OK != 0, unsafe { core::slice::from_raw_parts((e & !0xFFF) as *const u8, 4096) }); }
+        }
+    }
+    /// Paged: give page `idx` these contents and accessibility (snapshot restore).
+    pub fn set_page(&mut self, idx: u32, accessible: bool, data: &[u8]) {
+        let i = idx as usize;
+        if i >= self.tbl.len() || data.len() != 4096 { return; }
+        let p = if self.tbl[i] & !0xFFF != 0 { (self.tbl[i] & !0xFFF) as *mut u8 } else { self.take_page() };
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p, 4096) };
+        self.tbl[i] = p as usize | if accessible { P_OK } else { 0 };
+    }
     /// Make accesses to [0, n) fault (flat memories).
     pub fn set_guard(&mut self, n: u32) { self.guard = n; }
     pub fn len(&self) -> u32 { self.len }

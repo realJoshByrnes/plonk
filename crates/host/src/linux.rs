@@ -8,6 +8,13 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
+mod snap;
+
+/// Environment for Wine processes. The overrides switch off parts of Wine's session start-up that cost a lot of emulated
+/// time and that the desktop does not need yet: Mono/Gecko prompts, menu building, driver hosts, service hosts, COM activation.
+pub const WINE_ENV: [&str; 7] = ["HOME=/home/user", "WINEPREFIX=/home/user/.wine", "PATH=/usr/local/bin:/usr/bin:/bin", "WINELOADERNOEXEC=1", "USER=user",
+    "WINEDLLOVERRIDES=mscoree,mshtml,winemenubuilder.exe,winedevice.exe,svchost.exe,rpcss.exe=d", "WINEDEBUG=-all"];
+
 const MEM_SIZE: u32 = 0xC000_0000; // 3 GB sparse address space per process, like Linux on i386
 const STACK_TOP: u32 = 0xBFF0_0000;
 const STACK_LOW: u32 = STACK_TOP - 0x80_0000;
@@ -73,7 +80,7 @@ struct Thread { cpu: Cpu, tid: u32, poll_deadline: Option<u64>, clear_tid: u32, 
 /// A parked process. For the running one, the swapped fields hold placeholders.
 struct Proc {
     pid: u32, ppid: u32, mem: Mem, fds: HashMap<u32, Fd>, cloexec: HashSet<u32>, cwd: String, brk: u32, brk_start: u32, maps: BTreeMap<u32, u32>, umask: u32,
-    exe: String, sigact: HashMap<u32, [u32; 5]>, threads: Vec<Thread>, cache: CacheSlot, exit: Option<u32>, reaped: bool,
+    exe: String, cmd: String, sigact: HashMap<u32, [u32; 5]>, threads: Vec<Thread>, cache: CacheSlot, exit: Option<u32>, reaped: bool,
 }
 
 pub struct LinuxProc {
@@ -95,6 +102,12 @@ pub struct LinuxProc {
     vfs: BTreeMap<String, Node>,
     /// Hard links into `files` (path -> path): lets a saved Wine prefix share the DLLs of the install instead of holding copies.
     aliases: HashMap<String, String>,
+    /// Tree files that came from the read-only layer and were never opened for writing (snapshots store them by name).
+    pristine: HashSet<String>,
+    /// Fingerprint of everything loaded with `add_tar` (names and sizes): a snapshot only fits the archives it was taken with.
+    layer_sig: u64,
+    /// Paths that came from `add_tar` (only those may be stored by name in a snapshot).
+    layer_names: HashSet<String>,
     cwd: String,
     fds: HashMap<u32, Fd>,
     /// Descriptors of the running process that are closed on exec.
@@ -137,7 +150,7 @@ impl LinuxProc {
         let mut vfs = BTreeMap::new();
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
         LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, exit_code: None, blocked: false,
-            vfs, aliases: HashMap::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
+            vfs, aliases: HashMap::new(), pristine: HashSet::new(), layer_sig: 0, layer_names: HashSet::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
             exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, wait_all: false }
     }
 
@@ -178,7 +191,7 @@ impl LinuxProc {
         let pid = self.next_pid;
         self.next_pid += 1;
         let mut mem = Mem::new_sparse(MEM_SIZE);
-        Proc { pid, ppid, mem, fds: HashMap::new(), cloexec: HashSet::new(), cwd: "/".into(), brk: 0, brk_start: 0, maps: BTreeMap::new(), umask: 0o022, exe: String::new(), sigact: HashMap::new(),
+        Proc { pid, ppid, mem, fds: HashMap::new(), cloexec: HashSet::new(), cwd: "/".into(), brk: 0, brk_start: 0, maps: BTreeMap::new(), umask: 0o022, exe: String::new(), cmd: String::new(), sigact: HashMap::new(),
             threads: vec![Thread { cpu: Self::new_cpu(), tid: pid, poll_deadline: None, clear_tid: 0, state: St::Run, wake_at: None }], cache: CacheSlot::default(), exit: None, reaped: false }
     }
 
@@ -292,6 +305,8 @@ impl LinuxProc {
         let (mut argv, envp) = (self.str_vec(argv), self.str_vec(envp));
         if argv.is_empty() { argv.push(p.clone()); }
         self.tr(format!("pid {} execve {p} {argv:?}", self.pid()));
+        let pi0 = self.cur.0;
+        self.procs[pi0].cmd = argv.iter().skip(2).map(|a| a.rsplit(['/', char::from(92)]).next().unwrap_or(a)).collect::<Vec<_>>().join(" ");
         let pi = self.cur.0;
         let ti = self.cur.1;
         for (i, t) in self.procs[pi].threads.iter_mut().enumerate() { if i != ti { t.state = St::Dead; } }
@@ -437,11 +452,12 @@ impl LinuxProc {
             if h[156] == b'L' { long = Some(field(body)); continue; }
             let mut name = long.take().unwrap_or_else(|| { let (n, pre) = (field(&h[..100]), field(&h[345..500])); if pre.is_empty() { n } else { format!("{pre}/{n}") } });
             name = format!("/{}", name.trim_start_matches("./").trim_end_matches('/'));
+            self.layer_sig = name.bytes().fold(self.layer_sig ^ size as u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)).rotate_left(7);
             match h[156] {
-                b'0' | 0 => { self.files.insert(name, body.to_vec()); }
+                b'0' | 0 => { self.layer_names.insert(name.clone()); self.files.insert(name, body.to_vec()); }
                 b'5' => { self.vfs.insert(name, Node::Dir); }
                 b'2' => { self.vfs.insert(name, Node::Link(field(&h[157..257]))); }
-                b'1' => { self.aliases.insert(name, format!("/{}", field(&h[157..257]))); }
+                b'1' => { self.layer_names.insert(name.clone()); self.aliases.insert(name, format!("/{}", field(&h[157..257]))); }
                 _ => {}
             }
         }
@@ -451,9 +467,10 @@ impl LinuxProc {
     pub fn ps(&self) -> String {
         let mut out = String::new();
         for (pi, p) in self.procs.iter().enumerate() {
-            if p.exit.is_some() { continue; }
             let exe = if pi == self.cur.0 { &self.exe } else { &p.exe };
-            out.push_str(&format!("pid {} ppid {} {exe}:", p.pid, p.ppid));
+            let mi: u64 = p.threads.iter().enumerate().map(|(ti, t)| if (pi, ti) == self.cur { self.cpu.retired } else { t.cpu.retired }).sum::<u64>() / 1_000_000;
+            if let Some(c) = p.exit { out.push_str(&format!("pid {} ppid {} {exe} {} [{mi} M instr] exited {c}{}", p.pid, p.ppid, p.cmd, char::from(10))); continue; }
+            out.push_str(&format!("pid {} ppid {} {exe} {} [{mi} M instr, {} MB]:", p.pid, p.ppid, p.cmd, (if pi == self.cur.0 { &self.mem } else { &p.mem }).committed() >> 20));
             for (ti, t) in p.threads.iter().enumerate() {
                 let cpu = if (pi, ti) == self.cur { &self.cpu } else { &t.cpu };
                 match t.state {
@@ -526,11 +543,13 @@ impl LinuxProc {
             let data = if private { Rc::new(RefCell::new(target.borrow().clone())) } else { target };
             self.aliases.remove(p);
             self.vfs.insert(p.to_string(), Node::File(data.clone()));
+            if !private && self.layer_names.contains(p) { self.pristine.insert(p.to_string()); }
             return Some(data);
         }
         let d = self.files.remove(p)?;
         let data: Data = Rc::new(RefCell::new(d));
         self.vfs.insert(p.to_string(), Node::File(data.clone()));
+        if !private && self.layer_names.contains(p) { self.pristine.insert(p.to_string()); }
         Some(data)
     }
 
@@ -787,7 +806,9 @@ impl LinuxProc {
             Some(Node::File(d)) => {
                 if flags & 0xC0 == 0xC0 { return EEXIST; } // O_CREAT|O_EXCL
                 if flags & 0x200 != 0 { d.borrow_mut().clear(); } // O_TRUNC
-                Kind::File { data: d.clone(), pos: 0 }
+                let d = d.clone();
+                if flags & 0x203 != 0 { self.pristine.remove(&p); }
+                Kind::File { data: d, pos: 0 }
             }
             Some(Node::Dir) => Kind::Dir { pos: 0 },
             Some(_) => return -6i32 as u32, // ENXIO
@@ -1170,6 +1191,7 @@ impl LinuxProc {
             6 => Some(self.close(a)),
             10 | 40 | 301 => { // unlink, rmdir, unlinkat
                 let p = if nr == 301 { let s = self.cstr(b); self.resolve(a, &s, false) } else { let s = self.cstr(a); self.resolve(CWD, &s, false) };
+                self.pristine.remove(&p);
                 Some(if self.vfs.remove(&p).is_some() { 0 } else { ENOENT })
             }
             12 => { let s = self.cstr(a); let p = self.resolve(CWD, &s, true); Some(if self.is_dir(&p) { self.cwd = p; 0 } else { ENOENT }) } // chdir
@@ -1186,6 +1208,8 @@ impl LinuxProc {
             38 | 302 => { // rename, renameat
                 let (from, to) = if nr == 38 { (self.cstr(a), self.cstr(b)) } else { (self.cstr(b), self.cstr(d)) };
                 let (from, to) = (self.resolve(CWD, &from, false), self.resolve(CWD, &to, false));
+                self.pristine.remove(&from);
+                self.pristine.remove(&to);
                 Some(match self.vfs.remove(&from) { Some(n) => { self.vfs.insert(to, n); 0 } None => ENOENT })
             }
             39 | 296 => { // mkdir, mkdirat
@@ -1311,6 +1335,15 @@ impl LinuxProc {
                 self.poll(0, 0, ms.max(1))
             }
             168 => self.poll(a, b, c as i32 as i64), // poll
+            142 | 308 | 413 => { // _newselect, pselect6(_time64): only the "no descriptors" form, i.e. a sleep (Wine's infinite Sleep)
+                if a != 0 && (b != 0 || c != 0 || d != 0) { Some(ENOSYS) } else {
+                    let ms = if e == 0 { -1 } else {
+                        let (s0, s1, s2) = (self.mem.r32(e).unwrap_or(0) as i64, self.mem.r32(e + 4).unwrap_or(0) as i64, self.mem.r32(e + 8).unwrap_or(0) as i64);
+                        match nr { 142 => s0 * 1000 + s1 / 1000, 308 => s0 * 1000 + s1 / 1_000_000, _ => s0 * 1000 + s2 / 1_000_000 }
+                    };
+                    self.poll(0, 0, if ms < 0 { -1 } else { ms.max(1) })
+                }
+            }
             309 | 414 => { // ppoll, ppoll_time64 (timespec pointer in c)
                 let t = if c == 0 { -1 } else if nr == 309 { self.mem.r32(c).unwrap_or(0) as i64 * 1000 + (self.mem.r32(c + 4).unwrap_or(0) / 1_000_000) as i64 }
                     else { self.mem.r32(c).unwrap_or(0) as i64 * 1000 + (self.mem.r32(c + 8).unwrap_or(0) / 1_000_000) as i64 };
@@ -1322,7 +1355,20 @@ impl LinuxProc {
                 if c != 0 { for (i, x) in old.iter().enumerate() { let _ = self.mem.w32(c + i as u32 * 4, *x); } }
                 Some(0)
             }
-            37 => Some(if self.procs.iter().any(|p| p.pid == a && p.exit.is_none()) || (a as i32) <= 0 { 0 } else { ESRCH }), // kill: existence check only
+            37 => { // kill: existence check, and SIGKILL (how wineserver ends a process); other signals are not delivered yet
+                match self.procs.iter().position(|p| p.pid == a && p.exit.is_none()) {
+                    Some(pi) => {
+                        if b == 9 {
+                            let me = self.cur;
+                            self.switch(pi, 0);
+                            self.proc_exit(137);
+                            self.switch(me.0, me.1);
+                        }
+                        Some(0)
+                    }
+                    None => Some(if (a as i32) <= 0 { 0 } else { ESRCH }),
+                }
+            }
             238 | 270 => { // tkill, tgkill: signals are not delivered yet, but a fatal one aimed at ourselves ends the process
                 let (tid, sig) = if nr == 238 { (a, b) } else { (b, c) };
                 if matches!(sig, 6 | 9 | 15) && self.procs[self.cur.0].threads.iter().any(|t| t.tid == tid) { self.tr(format!("pid {} killed by signal {sig}", self.pid())); self.proc_exit(128 + sig); }

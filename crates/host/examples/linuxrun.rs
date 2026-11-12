@@ -32,13 +32,17 @@ fn main() {
     }
     // PREFIX=file.tar: start from a saved Wine prefix; SAVE=file.tar: save the prefix afterwards (waits for all processes to end)
     if let Ok(f) = std::env::var("PREFIX") { p.add_tar(&std::fs::read(f).expect("prefix tar")); }
-    p.wait_all = std::env::var("SAVE").is_ok();
-    let elf = p.files.get(&a[1]).cloned().unwrap_or_else(|| std::fs::read(&a[1]).expect("read elf"));
+
+    // RESTORE=file: start from a snapshot, then start the program inside that session
+    let restored = if let Ok(f) = std::env::var("RESTORE") { if let Err(e) = p.restore(&std::fs::read(f).expect("snapshot")) { println!("restore failed: {e}"); std::process::exit(1); } true } else { false };
     let argv: Vec<&str> = a[1..].iter().map(|s| s.as_str()).collect();
     let extra = std::env::var("ENV").unwrap_or_default();
-    let mut env = vec!["HOME=/home/user", "WINEPREFIX=/home/user/.wine", "PATH=/usr/local/bin:/usr/bin:/bin", "WINELOADERNOEXEC=1", "USER=user"];
+    // STD=1: the standard Wine environment of the web page (overrides that skip slow start-up work) instead of a bare one
+    let mut env = if std::env::var("STD").is_ok() { plonk_host::linux::WINE_ENV.to_vec() } else { vec!["HOME=/home/user", "WINEPREFIX=/home/user/.wine", "PATH=/usr/local/bin:/usr/bin:/bin", "WINELOADERNOEXEC=1", "USER=user"] };
     env.extend(extra.split(';').filter(|s| !s.is_empty()));
-    p.load(&elf, &argv, &env).unwrap();
+    // the program is a guest path, or failing that a host file
+    if p.spawn_path(&argv, &env).is_err() { p.load(&std::fs::read(&a[1]).expect("program not found in the guest tree or on the host"), &argv, &env).unwrap(); }
+    p.wait_all = restored || std::env::var("SAVE").is_ok();
     p.auto_time = std::env::var("AUTO").is_ok(); // jump the guest clock whenever everything waits on a timeout
     // run; whenever everything blocks, let a second of guest time pass (up to IDLE rounds)
     let idle: u32 = std::env::var("IDLE").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
@@ -46,13 +50,14 @@ fn main() {
     let mut r = p.run(steps);
     // RT=seconds: run against the real clock, like the browser page does (guest time = wall time)
     if let Some(secs) = std::env::var("RT").ok().and_then(|v| v.parse::<f64>().ok()) {
-        let (t0, mut last, mut busy) = (std::time::Instant::now(), std::time::Instant::now(), std::time::Duration::ZERO);
+        let (t0, mut last, mut busy, mut shown) = (std::time::Instant::now(), std::time::Instant::now(), std::time::Duration::ZERO, false);
         while t0.elapsed().as_secs_f64() < secs && !matches!(r, Ok(Some(_)) | Err(_)) {
             let now = std::time::Instant::now();
             p.advance_ns((now - last).as_nanos() as u64);
             last = now;
             r = p.run(20_000_000);
             busy += now.elapsed();
+            if !shown && p.windows.values().any(|w| w.visible && !w.pixels.is_empty() && w.sw > 50) { shown = true; println!("first window after {:.1}s wall, {:.1}s busy, {} M instructions", t0.elapsed().as_secs_f64(), busy.as_secs_f64(), p.retired() / 1_000_000); }
             if p.blocked { std::thread::sleep(std::time::Duration::from_millis(2)); }
         }
         println!("real-time run: {:.1}s wall, {:.1}s busy, {} M instructions", t0.elapsed().as_secs_f64(), busy.as_secs_f64(), p.retired() / 1_000_000);
@@ -76,6 +81,19 @@ fn main() {
     println!("result {r:?} blocked={} after {rounds} idle seconds", p.blocked);
     println!("stdout: {}", String::from_utf8_lossy(&p.stdout));
     println!("unknown: {:?}", p.unknown);
+    // SNAP=file: save a snapshot of the whole session (take it when the program has exited and the rest is idle)
+    if let Ok(f) = std::env::var("SNAP") {
+        print!("{}", p.ps());
+        let t = p.snapshot(); println!("snapshot: {} MB", t.len() >> 20);
+        std::fs::write(f, t).unwrap();
+    }
+    if std::env::var("SAVE").is_ok() { // shut Wine down cleanly so wineserver writes the registry files
+        p.auto_time = true;
+        let pid = p.spawn_path(&["/usr/local/bin/wine", "wineboot", "--shutdown"], &env);
+        let r2 = p.run(30_000_000_000);
+        println!("shutdown: {pid:?} {r2:?} blocked={}", p.blocked);
+        print!("{}", p.ps());
+    }
     if let Ok(f) = std::env::var("SAVE") { let t = p.export_tar("/home/user/.wine"); println!("saved prefix: {} bytes", t.len()); std::fs::write(f, t).unwrap(); }
     for h in &p.zorder { let w = &p.windows[h]; println!("window {:#x} {:?} visible={} surface {}x{} {:?}", w.hwnd, w.rect, w.visible, w.sw, w.sh, w.title); }
     if let Ok(f) = std::env::var("SHOT") { // SHOT=out.ppm: screenshot of the composed windows

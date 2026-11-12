@@ -55,7 +55,7 @@ try {
     await sleep(2000);
   }
   console.log("status:", await evalJs(`document.getElementById("stxt").textContent`));
-  console.log("log:", ((await evalJs(`document.getElementById("log").textContent`)) ?? "").slice(-1500));
+  console.log("log:", ((await evalJs(`document.getElementById("log").textContent`)) ?? "").slice(0, 700));
   const shot = await send("Page.captureScreenshot", { format: "png" });
   if (shot.result?.data) { writeFileSync(out, Buffer.from(shot.result.data, "base64")); console.log("wrote", out); } else console.log("screenshot failed", shot.error);
   if (errors.length) console.log("page errors:", errors.join("\n"));

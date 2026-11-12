@@ -135,11 +135,23 @@ try {
   status("loading wasm…");
   const { instance } = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
   x = instance.exports;
-  const rootTar = await fetchBytes("/real/root.tar", "Wine", 0.95, 0);
+  const rootTar = await fetchBytes("/real/root.tar", "Wine", 0.7, 0);
   x.plonk_lx_add_tar(put(rootTar), rootTar.length);
-  const prefixTar = await fetchBytes("/real/prefix.tar", "prefix", 0.05, 0.95);
+  const prefixTar = await fetchBytes("/real/prefix.tar", "prefix", 0.02, 0.7);
   x.plonk_lx_add_tar(put(prefixTar), prefixTar.length);
   x.plonk_lx_set_screen(W, H);
+  // A snapshot of a booted, idle Wine session (wineserver, services, explorer and the invisible keeper process) skips
+  // Wine's own start-up. Without one (or with a stale one) the session is booted here, which takes much longer.
+  let warm = false;
+  try {
+    const snap = await fetchBytes("/real/snapshot.bin", "session", 0.28, 0.72);
+    warm = x.plonk_lx_restore(put(snap), snap.length) === 0;
+    if (!warm) log("snapshot not used: " + msg() + "\n");
+  } catch (e) { log("no snapshot (" + e.message + "): cold start\n"); }
+  if (!warm) {
+    addFile("/home/user/keeper.exe", new Uint8Array(await (await fetch("/tests/guests/keeper.exe")).arrayBuffer()));
+    spawn("/home/user/keeper.exe"); // keeps the Wine session alive between programs
+  }
   $("prog").remove();
   status("ready");
   for (const b of document.querySelectorAll("#bar button")) { b.disabled = false; b.onclick = () => { spawn(b.dataset.cmd); canvas.focus(); }; }

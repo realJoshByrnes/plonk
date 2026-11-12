@@ -49,9 +49,19 @@ pub unsafe extern "C" fn plonk_lx_add_file(name: *mut u8, nlen: u32, data: *mut 
 pub unsafe extern "C" fn plonk_lx_spawn(cmd: *const u8, len: u32) -> i32 {
     let s = String::from_utf8_lossy(core::slice::from_raw_parts(cmd, len as usize)).into_owned();
     let argv: Vec<&str> = s.split('\n').filter(|a| !a.is_empty()).collect();
-    let env = ["HOME=/home/user", "WINEPREFIX=/home/user/.wine", "PATH=/usr/local/bin:/usr/bin:/bin", "WINELOADERNOEXEC=1", "USER=user",
-        "WINEDLLOVERRIDES=mscoree,mshtml=d", "WINEDEBUG=-all"];
+    let env = crate::linux::WINE_ENV;
     match lx().spawn_path(&argv, &env) { Ok(pid) => pid as i32, Err(e) => { MSG = e; -1 } }
+}
+
+/// Replace the kernel state with a snapshot taken by `linuxrun` (SNAP=...): a booted, idle Wine session. The tar archives
+/// must be loaded first. Returns 0, or -1 (see the message). Takes ownership of the buffer (from `plonk_alloc`).
+///
+/// # Safety
+/// `data` must be an exact-size allocation returned by `plonk_alloc` and not used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn plonk_lx_restore(data: *mut u8, len: u32) -> i32 {
+    let v = Vec::from_raw_parts(data, len as usize, len as usize);
+    match lx().restore(&v) { Ok(()) => 0, Err(e) => { MSG = e; -1 } }
 }
 
 /// Let `dt_us` microseconds of guest time pass, then run up to `steps` instructions.
