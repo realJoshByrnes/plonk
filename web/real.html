@@ -1,0 +1,166 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Plonk · real Wine</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #14171c; color: #d8dde6; font: 13px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #bar { display: flex; gap: 6px; align-items: center; padding: 6px 10px; background: #1d2129; border-bottom: 1px solid #2c323d; flex-wrap: wrap; }
+  #bar button, #bar label.btn { background: #2b3240; color: inherit; border: 1px solid #3a4354; border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; }
+  #bar button:hover, #bar label.btn:hover { background: #364055; }
+  #bar button:disabled { opacity: .45; cursor: default; }
+  #status { margin-left: auto; opacity: .8; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #wrap { flex: 1; display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 10px; }
+  canvas { background: #3a6ea5; outline: none; image-rendering: pixelated; box-shadow: 0 8px 30px #0008; }
+  #log { max-height: 110px; overflow: auto; margin: 0; padding: 4px 10px; background: #0f1115; color: #9aa4b5; font: 11px/1.35 ui-monospace, Consolas, monospace; white-space: pre-wrap; border-top: 1px solid #2c323d; }
+  progress { width: 160px; }
+</style>
+<div id="bar">
+  <strong>Plonk · real Wine</strong>
+  <button data-cmd="notepad" disabled>Notepad</button>
+  <button data-cmd="winemine" disabled>Minesweeper</button>
+  <button data-cmd="regedit" disabled>Regedit</button>
+  <button data-cmd="winefile" disabled>File manager</button>
+  <button data-cmd="winecfg" disabled>Wine config</button>
+  <select id="guests" disabled><option value="">Test programs…</option></select>
+  <label class="btn">Run your own .exe…<input id="upload" type="file" multiple hidden></label>
+  <span id="status"><progress id="prog" max="1" value="0"></progress> <span id="stxt">loading…</span></span>
+</div>
+<div id="wrap"><canvas id="screen" width="1024" height="768" tabindex="0"></canvas></div>
+<pre id="log"></pre>
+<script type="module">
+// The real-Wine path: unmodified Wine (wine, wineserver, ntdll.so, win32u.so, PE DLLs) on the Linux personality of the
+// interpreter (crates/host/src/linux.rs), drawing through wineplonk.drv. See crates/host/src/wasm_linux.rs for the exports.
+const $ = (id) => document.getElementById(id);
+const canvas = $("screen"), ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
+const logEl = $("log");
+const log = (s) => { logEl.textContent += s; if (logEl.textContent.length > 20000) logEl.textContent = logEl.textContent.slice(-15000); logEl.scrollTop = logEl.scrollHeight; };
+const status = (s) => { $("stxt").textContent = s; };
+
+async function fetchBytes(url, label, share, base) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  const total = +(r.headers.get("x-size") || r.headers.get("content-length") || 0);
+  const reader = r.body.getReader(), parts = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value); got += value.length;
+    if (total) $("prog").value = base + share * Math.min(1, got / total);
+    status(`${label} ${(got / 1048576).toFixed(0)} MB`);
+  }
+  const out = new Uint8Array(got);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+let x; // wasm exports
+const put = (bytes) => { const p = x.plonk_alloc(bytes.length); new Uint8Array(x.memory.buffer, p, bytes.length).set(bytes); return p; };
+const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_lx_msg(), x.plonk_lx_msg_len()));
+const enc = new TextEncoder();
+function addFile(path, bytes) { const n = enc.encode(path); x.plonk_lx_add_file(put(n), n.length, put(bytes), bytes.length); }
+function spawn(...args) {
+  const c = enc.encode(["/usr/local/bin/wine", ...args].join("\n")), p = put(c);
+  const pid = x.plonk_lx_spawn(p, c.length);
+  if (pid < 0) log("spawn failed: " + msg() + "\n"); else log(`started ${args.join(" ")} (pid ${pid})\n`);
+  kick();
+}
+
+// ---- main loop: run the guest in ~10 ms slices against the real clock; repaint when the driver reported changes ----
+let steps = 400000, last = performance.now(), lastFrame = -1, dead = false, timer = 0, idleSince = 0;
+function kick() { if (!timer && !dead) timer = setTimeout(pump, 0); }
+function pump() {
+  timer = 0;
+  if (dead) return;
+  const t0 = performance.now();
+  let r = 0;
+  // several slices per turn while the guest is busy, but never more than ~14 ms so input and painting stay live
+  do {
+    const now = performance.now();
+    r = x.plonk_lx_run(steps, Math.min(250000, Math.round((now - last) * 1000)));
+    last = now;
+    const took = performance.now() - now;
+    if (r === 0) steps = Math.max(50000, Math.min(4000000, Math.round(steps * (took < 3 ? 1.5 : took > 8 ? 0.6 : 1))));
+  } while (r === 0 && performance.now() - t0 < 14);
+  x.plonk_lx_take_stdout();
+  const out = msg();
+  if (out) log(out);
+  if (r < 0) { dead = true; log("kernel error: " + msg() + "\n"); status("stopped"); return; }
+  const f = x.plonk_lx_frame();
+  if (f !== lastFrame) { lastFrame = f; paint(); }
+  timer = setTimeout(pump, r === 1 ? 8 : 0); // everything waiting: poll timers/input at a relaxed rate
+}
+function paint() {
+  const p = x.plonk_lx_compose();
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer, p, W * H * 4), W, H), 0, 0);
+  const k = x.plonk_lx_cursor();
+  canvas.style.cursor = ["default", "text", "wait", "crosshair", "nwse-resize", "nesw-resize", "ew-resize", "ns-resize", "move", "not-allowed", "pointer"][k] ?? (k < 0 ? "none" : "default");
+}
+let mipsAt = 0, mipsT = performance.now();
+setInterval(() => {
+  if (!x || dead) return;
+  const m = x.plonk_lx_mips_total(), t = performance.now();
+  status(`${Math.round((m - mipsAt) / ((t - mipsT) / 1000))} MIPS · ${(x.memory.buffer.byteLength / 1048576) | 0} MB`);
+  mipsAt = m; mipsT = t;
+}, 1000);
+
+// ---- input ----
+const pos = (e) => { const r = canvas.getBoundingClientRect(); return [Math.round((e.clientX - r.left) * W / r.width), Math.round((e.clientY - r.top) * H / r.height)]; };
+const btn = (e) => (e.button === 2 ? 1 : e.button === 1 ? 2 : 0);
+canvas.addEventListener("pointerdown", (e) => { canvas.focus(); canvas.setPointerCapture(e.pointerId); const [px, py] = pos(e); x.plonk_lx_mouse(1, px, py, 0); x.plonk_lx_mouse(0, px, py, btn(e)); kick(); e.preventDefault(); });
+canvas.addEventListener("pointerup", (e) => { const [px, py] = pos(e); x.plonk_lx_mouse(2, px, py, btn(e)); kick(); e.preventDefault(); });
+let moveQueued = null;
+canvas.addEventListener("pointermove", (e) => { // at most one move per pump turn
+  const had = moveQueued; moveQueued = pos(e);
+  if (!had) queueMicrotask(() => { const [px, py] = moveQueued; moveQueued = null; x.plonk_lx_mouse(1, px, py, 0); });
+});
+canvas.addEventListener("wheel", (e) => { const [px, py] = pos(e); x.plonk_lx_wheel(px, py, e.deltaY < 0 ? 120 : -120); e.preventDefault(); }, { passive: false });
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+// KeyboardEvent.keyCode is the Windows virtual-key code for nearly every key; scan codes come from this table (set 1).
+const SCAN = { Escape: 1, Digit1: 2, Digit2: 3, Digit3: 4, Digit4: 5, Digit5: 6, Digit6: 7, Digit7: 8, Digit8: 9, Digit9: 10, Digit0: 11, Minus: 12, Equal: 13, Backspace: 14, Tab: 15,
+  KeyQ: 16, KeyW: 17, KeyE: 18, KeyR: 19, KeyT: 20, KeyY: 21, KeyU: 22, KeyI: 23, KeyO: 24, KeyP: 25, BracketLeft: 26, BracketRight: 27, Enter: 28, ControlLeft: 29,
+  KeyA: 30, KeyS: 31, KeyD: 32, KeyF: 33, KeyG: 34, KeyH: 35, KeyJ: 36, KeyK: 37, KeyL: 38, Semicolon: 39, Quote: 40, Backquote: 41, ShiftLeft: 42, Backslash: 43,
+  KeyZ: 44, KeyX: 45, KeyC: 46, KeyV: 47, KeyB: 48, KeyN: 49, KeyM: 50, Comma: 51, Period: 52, Slash: 53, ShiftRight: 54, AltLeft: 56, Space: 57, CapsLock: 58,
+  F1: 59, F2: 60, F3: 61, F4: 62, F5: 63, F6: 64, F7: 65, F8: 66, F9: 67, F10: 68, F11: 87, F12: 88,
+  ControlRight: 0x11d, AltRight: 0x138, Home: 0x147, ArrowUp: 0x148, PageUp: 0x149, ArrowLeft: 0x14b, ArrowRight: 0x14d, End: 0x14f, ArrowDown: 0x150, PageDown: 0x151, Insert: 0x152, Delete: 0x153 };
+const key = (down) => (e) => { if (!x) return; x.plonk_lx_key(down, e.keyCode, SCAN[e.code] ?? 0); kick(); e.preventDefault(); };
+canvas.addEventListener("keydown", key(1));
+canvas.addEventListener("keyup", key(0));
+
+// ---- boot ----
+try {
+  status("loading wasm…");
+  const { instance } = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
+  x = instance.exports;
+  const rootTar = await fetchBytes("/real/root.tar", "Wine", 0.95, 0);
+  x.plonk_lx_add_tar(put(rootTar), rootTar.length);
+  const prefixTar = await fetchBytes("/real/prefix.tar", "prefix", 0.05, 0.95);
+  x.plonk_lx_add_tar(put(prefixTar), prefixTar.length);
+  x.plonk_lx_set_screen(W, H);
+  $("prog").remove();
+  status("ready");
+  for (const b of document.querySelectorAll("#bar button")) { b.disabled = false; b.onclick = () => { spawn(b.dataset.cmd); canvas.focus(); }; }
+  const man = await (await fetch("/manifest.json")).json();
+  const sel = $("guests");
+  for (const a of man.apps) sel.add(new Option(a, a));
+  sel.disabled = false;
+  sel.onchange = async () => {
+    const a = sel.value; sel.value = "";
+    if (!a) return;
+    addFile("/home/user/" + a, new Uint8Array(await (await fetch("/tests/guests/" + a)).arrayBuffer()));
+    spawn("/home/user/" + a); canvas.focus();
+  };
+  $("upload").onchange = async (e) => { // all chosen files land in one folder; the first .exe is started there
+    const files = [...e.target.files];
+    for (const f of files) addFile("/home/user/app/" + f.name, new Uint8Array(await f.arrayBuffer()));
+    const exe = files.find((f) => /\.exe$/i.test(f.name));
+    if (exe) { spawn("/home/user/app/" + exe.name); canvas.focus(); } else log("no .exe among the chosen files\n");
+    e.target.value = "";
+  };
+  const want = new URLSearchParams(location.search).get("run");
+  if (want) spawn(...want.split(" "));
+} catch (err) { status("failed"); log(String(err.stack || err) + "\n"); }
+</script>

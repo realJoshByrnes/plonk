@@ -66,6 +66,23 @@ createServer((req, res) => {
       remote: readdirSync(out).filter((f) => /\.(dll|drv|msstyles)$/.test(f) && !CORE.includes(f)).concat(readdirSync(join(out, "nls"))),
     }));
   }
+  // The real-Wine path (web/real.html): the packed Wine install and the saved prefix, gzip-compressed once and cached on disk.
+  if (url === "/" || url === "/real") { res.writeHead(302, { location: "/web/real.html" }); return res.end(); }
+  if (url === "/real/root.tar" || url === "/real/prefix.tar") {
+    const src = join(root, "wine", url.slice(6));
+    if (!existsSync(src)) { res.statusCode = 404; return res.end("missing " + url.slice(6) + " (see wine/build32.sh)"); }
+    const st = statSync(src), etag = `"${st.size}-${Math.round(st.mtimeMs)}"`;
+    if (req.headers["if-none-match"] === etag) { res.statusCode = 304; return res.end(); }
+    const gzFile = join(root, "wine", "." + url.slice(6) + "-" + st.size + "-" + Math.round(st.mtimeMs) + ".gz");
+    if (!existsSync(gzFile)) {
+      const t0 = performance.now();
+      for (const f of readdirSync(join(root, "wine"))) if (f.startsWith("." + url.slice(6) + "-")) unlinkSync(join(root, "wine", f));
+      writeFileSync(gzFile, gzipSync(readFileSync(src), { level: 6 }));
+      console.log(`${url}: ${(st.size / 1048576).toFixed(0)} MB -> ${(statSync(gzFile).size / 1048576).toFixed(0)} MB gzip in ${Math.round(performance.now() - t0)} ms`);
+    }
+    res.writeHead(200, { "content-type": "application/x-tar", "content-encoding": "gzip", etag, "cache-control": "no-cache", "content-length": statSync(gzFile).size, "x-size": st.size });
+    return createReadStream(gzFile).pipe(res);
+  }
   if (url.startsWith("/file/")) {
     const n = url.slice(6).replace(/[\\/]/g, "");
     const p = [join(root, "wine/out", n), join(root, "wine/out/nls", n)].find((x) => existsSync(x));
@@ -79,4 +96,4 @@ createServer((req, res) => {
   if (req.headers["if-none-match"] === etag) { res.statusCode = 304; return res.end(); }
   res.writeHead(200, { "content-type": types[extname(p)] ?? "application/octet-stream", etag, "cache-control": "no-cache", "content-length": st.size });
   createReadStream(p).pipe(res);
-}).listen(Number(process.argv[2] ?? 8080), () => console.log("plonk dev server on http://localhost:" + (process.argv[2] ?? 8080) + "/web/index.html"));
+}).listen(Number(process.argv[2] ?? 8080), () => console.log("plonk dev server on http://localhost:" + (process.argv[2] ?? 8080) + "/ (real Wine: /web/real.html, original desktop: /web/index.html)"));

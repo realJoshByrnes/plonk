@@ -6,3 +6,4 @@ tests/linux/root/
 wine/out32/
 wine/root.tar
 wine/prefix.tar
+wine/.*.gz
