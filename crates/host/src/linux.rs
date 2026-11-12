@@ -69,6 +69,9 @@ pub struct Ofd { kind: Kind, flags: u32, path: String }
 
 struct Msg { data: Vec<u8>, off: usize, fds: Vec<Fd> }
 
+/// The page store of a file with shared mappings (pages are 4KB-aligned host blocks, created on first use, never moved).
+struct SharedFile { data: Data, pages: Vec<*mut u8> }
+
 /// One end of a Unix stream socket or pipe.
 #[derive(Default)]
 struct Sock { peer: Option<usize>, rx: VecDeque<Msg>, listening: bool, backlog: VecDeque<usize>, closed: bool, shut_wr: bool }
@@ -133,6 +136,9 @@ pub struct LinuxProc {
     /// OpenGL: the command stream for the page (see linux/gl.rs) and where the GL window is: top-level hwnd, hwnd, client x, y, w, h.
     pub gl: gl::Gl,
     pub gl_rect: [i32; 6],
+    /// Files that are mapped MAP_SHARED: their pages live here and every mapping aliases them (Wine's server shares its
+    /// clock/session pages with every process this way).
+    shared: Vec<SharedFile>,
     /// Set when a GL frame was presented: `run` returns so the page can draw it.
     frame_break: bool,
     gl_pid: u32,
@@ -143,6 +149,9 @@ pub struct LinuxProc {
     resched: bool,
     /// When every thread is waiting, jump the guest clock to the next timeout instead of reporting `blocked`.
     pub auto_time: bool,
+    /// Guest time added by every clock read. Non-zero keeps programs that poll the clock moving when the host does not
+    /// advance time itself (tests); hosts that follow the real clock set it to 0.
+    pub clock_step_ns: u64,
     /// Keep running after the first process has exited, until every process is gone.
     pub wait_all: bool,
 }
@@ -158,7 +167,7 @@ impl LinuxProc {
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
         LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, exit_code: None, blocked: false,
             vfs, aliases: HashMap::new(), pristine: HashSet::new(), layer_sig: 0, layer_names: HashSet::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
-            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, wait_all: false }
+            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], shared: Vec::new(), frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, clock_step_ns: 20_000, wait_all: false }
     }
 
     // ---- processes and threads ----
@@ -379,8 +388,10 @@ impl LinuxProc {
             }
             5 => self.cursor = a[1] as i32,
             6 => { // where the GL window is, and whose it is
+                let old = self.gl_rect;
                 for i in 0..6 { self.gl_rect[i] = self.mem.r32(a[0] + i as u32 * 4).unwrap_or(0) as i32; }
                 self.gl_pid = self.pid();
+                if old == self.gl_rect { self.frame -= 1; } // sent with every frame: only a move is a change for the 2D screen
             }
             _ => return ENOSYS,
         }
@@ -1134,8 +1145,21 @@ impl LinuxProc {
             match self.find_gap(len) { Some(a) => a, None => return ENOMEM }
         };
         self.maps.insert(a, a + len);
+        if flags & 0x21 == 1 { // MAP_SHARED of a file: alias the file's shared pages (not written back to the file contents)
+            let Some(o) = self.fds.get(&fd).cloned() else { return EBADF };
+            let file = match &o.borrow().kind { Kind::File { data, .. } => Some(data.clone()), _ => None };
+            if let Some(data) = file {
+                let si = match self.shared.iter().position(|s| Rc::ptr_eq(&s.data, &data)) { Some(i) => i, None => { self.shared.push(SharedFile { data: data.clone(), pages: Vec::new() }); self.shared.len() - 1 } };
+                for i in 0..len / 4096 {
+                    let pg = (off / 4096) as usize + i as usize;
+                    let ptr = self.shared_page(si, pg);
+                    self.mem.map_ext(a + i * 4096, ptr, prot != 0);
+                }
+                return a;
+            }
+        }
         self.mem.map(a, len, prot != 0 || flags & 0x20 == 0);
-        if flags & 0x20 == 0 { // file-backed (a private copy; shared writable mappings are not written back yet)
+        if flags & 0x20 == 0 { // file-backed, private: a copy
             let Some(o) = self.fds.get(&fd).cloned() else { return EBADF };
             let o = o.borrow();
             if let Kind::File { data, .. } = &o.kind {
@@ -1148,8 +1172,23 @@ impl LinuxProc {
         a
     }
 
+    /// Page `pg` of a shared file's page store, created from the file contents on first use.
+    fn shared_page(&mut self, si: usize, pg: usize) -> *mut u8 {
+        let s = &mut self.shared[si];
+        while s.pages.len() <= pg {
+            let p = unsafe { std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align(4096, 4096).unwrap()) };
+            assert!(!p.is_null(), "out of host memory");
+            let d = s.data.borrow();
+            let at = s.pages.len() * 4096;
+            if at < d.len() { let k = (d.len() - at).min(4096); unsafe { core::ptr::copy_nonoverlapping(d[at..].as_ptr(), p, k) }; }
+            drop(d);
+            s.pages.push(p);
+        }
+        s.pages[pg]
+    }
+
     fn now(&mut self) -> (u64, u32) {
-        self.clock_ns += 20_000;
+        self.clock_ns += self.clock_step_ns;
         (self.clock_ns / 1_000_000_000, (self.clock_ns % 1_000_000_000) as u32)
     }
 

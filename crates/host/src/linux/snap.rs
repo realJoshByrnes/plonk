@@ -4,7 +4,7 @@
 //! stored by name; identical memory pages are stored once.
 use super::*;
 
-const MAGIC: &[u8; 8] = b"PLNKSNP3";
+const MAGIC: &[u8; 8] = b"PLNKSNP4";
 
 #[derive(Default)]
 struct W(Vec<u8>);
@@ -120,6 +120,15 @@ impl LinuxProc {
                 Kind::Events => of.u8(5),
             }
         }
+        // shared-mapping page stores (their pages are referenced from the process page lists below)
+        let mut sh = W::default();
+        let mut ext: HashMap<usize, (u32, u32)> = HashMap::new();
+        sh.u32(self.shared.len() as u32);
+        for (si, s) in self.shared.iter().enumerate() {
+            sh.u32(data_id(&s.data, &mut datas));
+            sh.u32(s.pages.len() as u32);
+            for (pi, &p) in s.pages.iter().enumerate() { ext.insert(p as usize, (si as u32, pi as u32)); sh.0.extend_from_slice(unsafe { core::slice::from_raw_parts(p, 4096) }); }
+        }
         // contents of the files that are not stored by name
         let pristine_data: std::collections::HashSet<*const RefCell<Vec<u8>>> =
             self.vfs.iter().filter_map(|(p, n)| match n { Node::File(d) if self.pristine.contains(p) => Some(Rc::as_ptr(d)), _ => None }).collect();
@@ -127,6 +136,7 @@ impl LinuxProc {
         for d in &datas { if pristine_data.contains(&Rc::as_ptr(d)) { w.u8(0); } else { w.u8(1); w.bytes(&d.borrow()); } }
         w.0.extend_from_slice(&tree.0);
         w.0.extend_from_slice(&of.0);
+        w.0.extend_from_slice(&sh.0);
 
         w.u32(self.socks.len() as u32);
         for s in &self.socks {
@@ -169,7 +179,12 @@ impl LinuxProc {
             let mut pages = W::default();
             let mut n = 0u32;
             if p.exit.is_none() {
-                p.mem.each_page(|idx, ok, bytes| {
+                p.mem.each_page(|idx, ok, ext_ptr, bytes| {
+                    if let Some((si, pi)) = ext_ptr.and_then(|a| ext.get(&a)) { // an alias of a shared page
+                        pages.u32(idx); pages.u32(u32::MAX); pages.u32(*si); pages.u32(*pi << 1 | ok as u32);
+                        n += 1;
+                        return;
+                    }
                     let bucket = seen.entry(page_hash(bytes)).or_default();
                     let id = match bucket.iter().find(|&&i| &pool[i as usize * 4096..i as usize * 4096 + 4096] == bytes) {
                         Some(&i) => i,
@@ -252,6 +267,17 @@ impl LinuxProc {
             };
             ofds.push(Rc::new(RefCell::new(Ofd { kind, flags, path })));
         }
+        self.shared.clear();
+        for _ in 0..r.u32()? {
+            let data = datas.get(r.u32()? as usize).cloned().flatten().ok_or("shared mapping of a file without contents")?;
+            let mut pages = Vec::new();
+            for _ in 0..r.u32()? {
+                let p = unsafe { std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align(4096, 4096).unwrap()) };
+                unsafe { core::ptr::copy_nonoverlapping(r.take(4096)?.as_ptr(), p, 4096) };
+                pages.push(p);
+            }
+            self.shared.push(SharedFile { data, pages });
+        }
         for _ in 0..r.u32()? {
             let peer = r.u32()?;
             let fl = r.u8()?;
@@ -291,6 +317,12 @@ impl LinuxProc {
             }
             for _ in 0..r.u32()? {
                 let (idx, v) = (r.u32()?, r.u32()?);
+                if v == u32::MAX {
+                    let (si, w) = (r.u32()? as usize, r.u32()?);
+                    let ptr = *self.shared.get(si).and_then(|s| s.pages.get((w >> 1) as usize)).ok_or("bad shared page")?;
+                    p.mem.map_ext(idx << 12, ptr, w & 1 != 0);
+                    continue;
+                }
                 let id = (v >> 1) as usize;
                 p.mem.set_page(idx, v & 1 != 0, pool.get(id * 4096..id * 4096 + 4096).ok_or("bad page id")?);
             }

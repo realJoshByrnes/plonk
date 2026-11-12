@@ -28,6 +28,8 @@ pub struct Mem {
 }
 
 const P_OK: usize = 1;
+/// The page belongs to someone else (a shared file mapping): never recycled by this memory.
+const P_EXT: usize = 2;
 const CHUNK_PAGES: usize = 256;
 
 fn chunk_layout() -> std::alloc::Layout { std::alloc::Layout::from_size_align(CHUNK_PAGES * 4096, 4096).unwrap() }
@@ -84,8 +86,7 @@ impl Mem {
         if n == 0 || !self.sparse { return; }
         if self.code_in(a, n) { self.smc = true; }
         for p in (a >> 12) as usize..=((a + n - 1) >> 12) as usize {
-            let old = self.tbl[p] & !0xFFF;
-            if old != 0 { self.free.push(old as *mut u8); }
+            self.drop_page(p);
             self.tbl[p] = if accessible { self.take_page() as usize | P_OK } else { 0 };
         }
     }
@@ -103,16 +104,33 @@ impl Mem {
         for p in (a >> 12) as usize..=((a + n - 1) >> 12) as usize {
             let e = o.tbl[p];
             if e & !0xFFF == 0 { continue; }
-            let mine = if self.tbl[p] & !0xFFF != 0 { (self.tbl[p] & !0xFFF) as *mut u8 } else { self.take_page() };
+            if e & P_EXT != 0 { self.drop_page(p); self.tbl[p] = e; continue; } // shared mappings stay shared
+            let mine = if self.tbl[p] & !0xFFF != 0 && self.tbl[p] & P_EXT == 0 { (self.tbl[p] & !0xFFF) as *mut u8 } else { self.take_page() };
             unsafe { core::ptr::copy_nonoverlapping((e & !0xFFF) as *const u8, mine, 4096) };
             self.tbl[p] = mine as usize | (e & P_OK);
         }
     }
-    /// Paged: visit every page that has host memory: (page index, accessible, its 4096 bytes).
-    pub fn each_page(&self, mut f: impl FnMut(u32, bool, &[u8])) {
+    /// Paged: visit every page that has host memory: (page index, accessible, the external page's address if it is a shared
+    /// one, its 4096 bytes).
+    pub fn each_page(&self, mut f: impl FnMut(u32, bool, Option<usize>, &[u8])) {
         for (i, &e) in self.tbl.iter().enumerate() {
-            if e & !0xFFF != 0 { f(i as u32, e & P_OK != 0, unsafe { core::slice::from_raw_parts((e & !0xFFF) as *const u8, 4096) }); }
+            let ptr = e & !0xFFF;
+            if ptr != 0 { f(i as u32, e & P_OK != 0, (e & P_EXT != 0).then_some(ptr), unsafe { core::slice::from_raw_parts(ptr as *const u8, 4096) }); }
         }
+    }
+    /// Give the page back to the free list (unless it is an external one) and clear its entry.
+    fn drop_page(&mut self, p: usize) {
+        let e = self.tbl[p];
+        if e & !0xFFF != 0 && e & P_EXT == 0 { self.free.push((e & !0xFFF) as *mut u8); }
+        self.tbl[p] = 0;
+    }
+    /// Paged: make the page at `a` an alias of an external 4KB block (4KB aligned, must outlive this memory): shared mappings.
+    pub fn map_ext(&mut self, a: u32, ptr: *mut u8, accessible: bool) {
+        let p = (a >> 12) as usize;
+        if !self.sparse || p >= self.tbl.len() || ptr as usize & 0xFFF != 0 { return; }
+        if self.cf[p] != 0 { self.smc = true; }
+        self.drop_page(p);
+        self.tbl[p] = ptr as usize | P_EXT | if accessible { P_OK } else { 0 };
     }
     /// Paged: give page `idx` these contents and accessibility (snapshot restore).
     pub fn set_page(&mut self, idx: u32, accessible: bool, data: &[u8]) {

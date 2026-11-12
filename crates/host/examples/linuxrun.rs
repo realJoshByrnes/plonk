@@ -50,6 +50,7 @@ fn main() {
     let mut r = p.run(steps);
     // RT=seconds: run against the real clock, like the browser page does (guest time = wall time)
     if let Some(secs) = std::env::var("RT").ok().and_then(|v| v.parse::<f64>().ok()) {
+        p.clock_step_ns = 0;
         let (t0, mut last, mut busy, mut shown) = (std::time::Instant::now(), std::time::Instant::now(), std::time::Duration::ZERO, false);
         while t0.elapsed().as_secs_f64() < secs && !matches!(r, Ok(Some(_)) | Err(_)) {
             let now = std::time::Instant::now();

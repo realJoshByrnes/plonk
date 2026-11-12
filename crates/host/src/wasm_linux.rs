@@ -14,6 +14,7 @@ fn lx() -> &'static mut LinuxProc {
             let mut p = LinuxProc::new();
             p.wait_all = true; // the kernel keeps going after the first program ends
             p.trace_cap = 0;
+            p.clock_step_ns = 0; // guest time is the page's real clock
             p.mkdir("/home/user/.wine");
             p
         })

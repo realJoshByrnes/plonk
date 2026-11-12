@@ -73,12 +73,14 @@ function spawn(...args) {
 
 // ---- main loop: run the guest in ~10 ms slices against the real clock; repaint when the driver reported changes ----
 let steps = 400000, last = performance.now(), lastFrame = -1, dead = false, timer = 0, idleSince = 0;
-function kick() { if (!timer && !dead) timer = setTimeout(pump, 0); }
+const again = new MessageChannel();
+again.port1.onmessage = () => { if (timer === -1) pump(); };
+function kick() { if (dead || timer === -1) return; clearTimeout(timer); timer = -1; again.port2.postMessage(0); }
 function pump() {
   timer = 0;
   if (dead) return;
-  const t0 = performance.now(), presents = x.plonk_lx_gl_presents();
-  let r = 0;
+  const t0 = performance.now();
+  let r = 0, presents = x.plonk_lx_gl_presents();
   // several slices per turn while the guest is busy, but never more than ~14 ms so input and painting stay live
   do {
     const now = performance.now();
@@ -86,7 +88,10 @@ function pump() {
     last = now;
     const took = performance.now() - now;
     if (r === 0) steps = Math.max(50000, Math.min(4000000, Math.round(steps * (took < 3 ? 1.5 : took > 8 ? 0.6 : 1))));
-  } while (r === 0 && performance.now() - t0 < 14 && x.plonk_lx_gl_presents() === presents);
+    // a 3D program returns once per frame: replay that frame right away and keep going, so the frame rate is not tied to timers
+    const pr = x.plonk_lx_gl_presents();
+    if (pr !== presents) { presents = pr; pumpGL(); }
+  } while (r === 0 && performance.now() - t0 < 12);
   x.plonk_lx_take_stdout();
   const out = msg();
   if (out) log(out);
@@ -94,7 +99,8 @@ function pump() {
   const f = x.plonk_lx_frame();
   if (f !== lastFrame) { lastFrame = f; paint(); }
   pumpGL();
-  timer = setTimeout(pump, r === 1 ? 8 : 0); // everything waiting: poll timers/input at a relaxed rate
+  // everything waiting: poll timers/input at a relaxed rate; busy: go again at once (a message, since timers are clamped to 4 ms)
+  if (r === 1) timer = setTimeout(pump, 8); else { timer = -1; again.port2.postMessage(0); }
 }
 // ---- 3D: the kernel emits a canonical GL command stream (docs/GL_PROTOCOL.md); the backend replays it on WebGPU/WebGL2 and
 // the finished frame is shown on an overlay canvas placed over the GL window's client area ----
