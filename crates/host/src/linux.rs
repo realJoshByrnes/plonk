@@ -272,7 +272,6 @@ impl LinuxProc {
         self.procs[pi].exit = Some(code);
         // give its memory back now: the entry stays (as a zombie, and so that process indices stay valid) but holds nothing
         self.mem = Mem::new_sparse(0); self.maps.clear(); self.sigact.clear(); drop(self.cpu.take_cache());
-        self.procs[pi].threads.truncate(1);
         if self.procs[pi].pid == self.gl_pid { self.gl = gl::Gl::default(); self.gl_rect = [0; 6]; self.gl_pid = 0; self.frame += 1; } // its GL window is gone
         if self.procs[pi].ppid == 1 { self.procs[pi].reaped = true; }
         for p in self.procs.iter_mut() { for t in p.threads.iter_mut() { if t.state == St::Vfork(pi) { t.state = St::Run; } } }
@@ -795,6 +794,7 @@ impl LinuxProc {
             let (mut progress, mut alive) = (false, false);
             for pi in 0..self.procs.len() {
                 for ti in 0..self.procs[pi].threads.len() {
+                    if ti >= self.procs[pi].threads.len() { break; }
                     if self.exit_code.is_some() && !self.wait_all { return Ok(self.exit_code); }
                     let t = &mut self.procs[pi].threads[ti];
                     match t.state {

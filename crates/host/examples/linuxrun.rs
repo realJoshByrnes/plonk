@@ -39,7 +39,9 @@ fn main() {
     let extra = std::env::var("ENV").unwrap_or_default();
     // STD=1: the standard Wine environment of the web page (overrides that skip slow start-up work) instead of a bare one
     let mut env = if std::env::var("STD").is_ok() { plonk_host::linux::WINE_ENV.to_vec() } else { vec!["HOME=/home/user", "WINEPREFIX=/home/user/.wine", "PATH=/usr/local/bin:/usr/bin:/bin", "WINELOADERNOEXEC=1", "USER=user"] };
-    env.extend(extra.split(';').filter(|s| !s.is_empty()));
+    let extra: Vec<&str> = extra.split(';').filter(|s| !s.is_empty()).collect();
+    env.retain(|e| !extra.iter().any(|x| x.split('=').next() == e.split('=').next())); // ENV overrides the standard variables
+    env.extend(extra);
     // the program is a guest path, or failing that a host file
     if p.spawn_path(&argv, &env).is_err() { p.load(&std::fs::read(&a[1]).expect("program not found in the guest tree or on the host"), &argv, &env).unwrap(); }
     p.wait_all = restored || std::env::var("SAVE").is_ok();
