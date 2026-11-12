@@ -752,6 +752,18 @@ void PLONK_WindowPosChanged( HWND hwnd, HWND insert_after, UINT swp_flags,
            style, insert_after, swp_flags );
 
     if (toplevel) send_host_window( hwnd, window_rect, client_rect, style, ex_style, first );
+
+    /* A window that made itself active before it was shown (SetFocus on a child
+     * in WM_CREATE, dialogs) drew its caption inactive, because it was not the
+     * foreground window yet; win32u makes it the foreground window right after
+     * this call but does not repaint the caption. Ask for that once it is done. */
+    if (toplevel && (swp_flags & SWP_SHOWWINDOW) && !(swp_flags & SWP_NOACTIVATE) &&
+        !(style & (WS_CHILD | WS_DISABLED)) && !(ex_style & WS_EX_NOACTIVATE))
+    {
+        GUITHREADINFO info = { .cbSize = sizeof(info) };
+        if (NtUserGetGUIThreadInfo( GetCurrentThreadId(), &info ) && info.hwndActive == hwnd)
+            NtUserPostMessage( hwnd, WM_NCACTIVATE, TRUE, 0 );
+    }
 }
 
 
