@@ -56,6 +56,7 @@ struct plonk_window
 #define PLONK_EVENT_KEY_UP        6
 #define PLONK_EVENT_CLOSE         7
 #define PLONK_EVENT_SCREEN_RESIZE 8
+#define PLONK_EVENT_ACTIVATE      9  /* hwnd; data 1: bring to front (restore if minimized), 2: minimize (taskbar) */
 
 struct plonk_event
 {

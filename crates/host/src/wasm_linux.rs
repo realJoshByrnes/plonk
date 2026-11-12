@@ -120,6 +120,24 @@ pub extern "C" fn plonk_lx_set_screen(w: u32, h: u32) {
 }
 
 static mut SCENE: Vec<u32> = Vec::new();
+/// The windows for a taskbar, one per line "hwnd<TAB>state<TAB>title" ordered by creation (state: 2 minimized, 4 the front one), as the
+/// message (`plonk_lx_msg`).
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_lx_tasks() {
+    let p = lx();
+    let task = |w: &crate::linux::HostWin| w.visible && w.owner == 0 && w.cap[0] & 1 != 0 && !w.title.is_empty() && (w.ex_style & 0x80 == 0 || w.ex_style & 0x4_0000 != 0);
+    let front = p.zorder.iter().find(|h| p.windows.get(h).map_or(false, |w| task(w) && w.style & 0x2000_0000 == 0)).copied();
+    let mut out = String::new();
+    for w in p.windows.values().filter(|w| task(w)) {
+        let st = if w.style & 0x2000_0000 != 0 { 2 } else { 0 } | if Some(w.hwnd) == front { 4 } else { 0 };
+        out.push_str(&format!("{}\t{}\t{}\n", w.hwnd, st, w.title.replace(['\t', '\n'], " ")));
+    }
+    unsafe { MSG = out; }
+}
+/// Bring a window to the front (action 1) or minimize it (2).
+#[no_mangle]
+pub extern "C" fn plonk_lx_activate(hwnd: u32, action: u32) { lx().push_event(9, hwnd, 0, 0, action, 0); }
 /// The title of a window, as the message (`plonk_lx_msg`).
 #[no_mangle]
 #[allow(static_mut_refs)]
@@ -136,7 +154,7 @@ pub extern "C" fn plonk_lx_scene() -> *const u32 {
         let mut n = 0;
         for h in p.zorder.iter().rev() {
             let Some(w) = p.windows.get(h) else { continue };
-            if !w.visible || w.pixels.is_empty() { continue; }
+            if !w.visible || w.pixels.is_empty() || w.style & 0x2000_0000 != 0 { continue; } // minimized windows are not drawn
             SCENE.extend_from_slice(&[w.hwnd, w.rect[0] as u32, w.rect[1] as u32, w.sw, w.sh, w.pixels.as_ptr() as u32,
                 w.dirty[0] as u32, w.dirty[1] as u32, w.dirty[2] as u32, w.dirty[3] as u32,
                 w.cap[0] as u32, w.cap[1] as u32, w.cap[2] as u32, w.cap[3] as u32, w.cap[4] as u32, w.cap[5] as u32, w.cap[6] as u32, w.title_gen]);

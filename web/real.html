@@ -17,6 +17,20 @@
   #screen { background: #3a6ea5; outline: none; image-rendering: pixelated; display: block; }
   #log { max-height: 110px; overflow: auto; margin: 0; padding: 4px 10px; background: #0f1115; color: #9aa4b5; font: 11px/1.35 ui-monospace, Consolas, monospace; white-space: pre-wrap; border-top: 1px solid #2c323d; }
   progress { width: 160px; }
+  #taskbar { --tb: #202020f2; --tbl: #3a3a3a; --fg: #fff; --hv: #ffffff1a; --ac: #4cc2ff; display: flex; align-items: center; gap: 4px; height: 48px; padding: 0 8px; background: var(--tb); border-top: 1px solid var(--tbl); color: var(--fg); position: relative; user-select: none; }
+  #taskbar.light { --tb: #f3f3f3f2; --tbl: #d6d6d6; --fg: #1b1b1b; --hv: #0000000d; --ac: #0067c0; }
+  #taskbar button { background: none; border: 0; border-radius: 6px; color: inherit; font: 13px system-ui, "Segoe UI", sans-serif; height: 38px; padding: 0 10px; cursor: pointer; position: relative; }
+  #taskbar button:hover { background: var(--hv); }
+  #tasks { display: flex; gap: 4px; flex: 1; min-width: 0; overflow: hidden; }
+  #tasks .task { max-width: 190px; min-width: 56px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+  #tasks .task::after { content: ""; position: absolute; left: 50%; bottom: 2px; width: 6px; height: 3px; margin-left: -3px; border-radius: 2px; background: #888; }
+  #tasks .task.active { background: var(--hv); }
+  #tasks .task.active::after { width: 18px; margin-left: -9px; background: var(--ac); }
+  #tasks .task.min { opacity: .7; }
+  #clock { font-size: 12px; text-align: right; line-height: 1.25; padding: 0 8px; white-space: pre; }
+  #startmenu { position: absolute; left: 8px; bottom: 54px; min-width: 220px; padding: 8px; border-radius: 10px; background: var(--tb); border: 1px solid var(--tbl); box-shadow: 0 8px 28px #0008; display: none; flex-direction: column; }
+  #startmenu.open { display: flex; }
+  #startmenu button { text-align: left; height: 34px; }
 </style>
 <div id="bar">
   <strong>Plonk · real Wine</strong>
@@ -30,11 +44,42 @@
   <span id="status"><progress id="prog" max="1" value="0"></progress> <span id="stxt">loading…</span></span>
 </div>
 <div id="wrap"><div id="stage"><canvas id="screen" width="1024" height="768" tabindex="0"></canvas><canvas id="glov"></canvas></div></div>
+<div id="taskbar"><button id="start" title="Start"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4cc2ff" d="M0 2.5 7.5 1.5v6.8H0zM8.6 1.4 18 0v8.3H8.6zM0 9.7h7.5v6.8L0 15.5zM8.6 9.7H18V18l-9.4-1.3z"/></svg></button><div id="tasks"></div><div id="clock"></div><div id="startmenu"></div></div>
 <pre id="log"></pre>
 <script type="module">
 // The real-Wine path: unmodified Wine (wine, wineserver, ntdll.so, win32u.so, PE DLLs) on the Linux personality of the
 // interpreter (crates/host/src/linux.rs), drawing through wineplonk.drv. See crates/host/src/wasm_linux.rs for the exports.
 const $ = (id) => document.getElementById(id);
+// ---- taskbar (HTML under the desktop canvas): a button per application window, Start menu, clock ----
+const themeQ = new URLSearchParams(location.search).get("theme");
+const isDark = themeQ === "dark" || themeQ === "light" ? themeQ === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+$("taskbar").classList.toggle("light", !isDark);
+let tasksKey = "";
+function updateTasks() {
+  if (!x) return;
+  x.plonk_lx_tasks();
+  const s = msg();
+  if (s === tasksKey) return;
+  tasksKey = s;
+  $("tasks").replaceChildren(...s.split("\n").filter(Boolean).map((line) => {
+    const [h, st, ...t] = line.split("\t"), b = document.createElement("button"), state = +st;
+    b.textContent = t.join(" "); b.title = b.textContent;
+    b.className = "task" + (state & 4 ? " active" : "") + (state & 2 ? " min" : "");
+    b.onclick = () => { x.plonk_lx_activate(+h, state & 4 ? 2 : 1); kick(); canvas.focus(); };
+    return b;
+  }));
+}
+const tick = () => { const d = new Date(); $("clock").textContent = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + "\n" + d.toLocaleDateString(); };
+tick(); setInterval(tick, 10000);
+$("start").onclick = (e) => {
+  e.stopPropagation();
+  const m = $("startmenu");
+  if (!m.classList.toggle("open")) return;
+  m.replaceChildren(...[...document.querySelectorAll("#bar button[data-cmd]")].map((src) => {
+    const b = document.createElement("button"); b.textContent = src.textContent; b.onclick = () => { m.classList.remove("open"); src.click(); }; return b;
+  }));
+};
+document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#startmenu, #start")) $("startmenu").classList.remove("open"); });
 const canvas = $("screen");
 // The desktop is composed on the GPU (web/compositor.mjs) on this one canvas; without WebGL2 (or with ?cpu) the kernel composes
 // it on the CPU and it is drawn with putImageData.
@@ -147,7 +192,7 @@ function pump() {
   if (out) log(out);
   if (r < 0) { dead = true; log("kernel error: " + msg() + "\n"); status("stopped"); return; }
   const f = x.plonk_lx_frame();
-  if (f !== lastFrame) { lastFrame = f; paint(); }
+  if (f !== lastFrame) { lastFrame = f; paint(); updateTasks(); }
   pumpGL();
   // everything waiting: poll timers/input at a relaxed rate; busy: go again at once (a message, since timers are clamped to 4 ms)
   if (r === 1) timer = setTimeout(pump, 8); else { timer = -1; again.port2.postMessage(0); }

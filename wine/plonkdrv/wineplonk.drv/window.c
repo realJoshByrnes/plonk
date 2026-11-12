@@ -557,6 +557,16 @@ static void handle_close_event( const struct plonk_event *event )
     NtUserPostMessage( hwnd, WM_SYSCOMMAND, SC_CLOSE, 0 );
 }
 
+static void handle_activate_event( const struct plonk_event *event )
+{
+    HWND hwnd = ULongToHandle( event->hwnd );
+
+    if (!hwnd) return;
+    if (event->data == 2) { NtUserPostMessage( hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0 ); return; }
+    if (NtUserGetWindowLongW( hwnd, GWL_STYLE ) & WS_MINIMIZE) NtUserPostMessage( hwnd, WM_SYSCOMMAND, SC_RESTORE, 0 );
+    NtUserSetForegroundWindow( hwnd );
+}
+
 static BOOL process_events( struct plonk_thread_data *data, DWORD mask )
 {
     struct plonk_queued_event *queued, *next;
@@ -606,6 +616,9 @@ static BOOL process_events( struct plonk_thread_data *data, DWORD mask )
             break;
         case PLONK_EVENT_CLOSE:
             handle_close_event( event );
+            break;
+        case PLONK_EVENT_ACTIVATE:
+            handle_activate_event( event );
             break;
         case PLONK_EVENT_SCREEN_RESIZE:
             TRACE( "screen resized to %dx%d\n", event->x, event->y );
