@@ -255,6 +255,9 @@ impl LinuxProc {
         let fds: Vec<u32> = self.fds.keys().copied().collect();
         for fd in fds { self.close(fd); }
         self.procs[pi].exit = Some(code);
+        // give its memory back now: the entry stays (as a zombie, and so that process indices stay valid) but holds nothing
+        self.mem = Mem::new_sparse(0); self.maps.clear(); self.sigact.clear(); drop(self.cpu.take_cache());
+        self.procs[pi].threads.truncate(1);
         if self.procs[pi].pid == self.gl_pid { self.gl = gl::Gl::default(); self.gl_rect = [0; 6]; self.gl_pid = 0; self.frame += 1; } // its GL window is gone
         if self.procs[pi].ppid == 1 { self.procs[pi].reaped = true; }
         for p in self.procs.iter_mut() { for t in p.threads.iter_mut() { if t.state == St::Vfork(pi) { t.state = St::Run; } } }
