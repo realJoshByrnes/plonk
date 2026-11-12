@@ -307,6 +307,16 @@ impl Cpu {
                 for h in 0..2 { put(&mut r, h, 64, (0..8).map(|i| (lane(a, h * 8 + i, 8) as i64 - lane(s, h * 8 + i, 8) as i64).unsigned_abs()).sum()); }
                 self.xmm[reg] = r;
             }
+            0xC4 => { // pinsrw xmm, r32/m16, imm8
+                let v = match rm { Op::R(i) => self.r[i] & 0xFFFF, Op::M(ad) => m.r16(ad)? as u32 };
+                let imm = m.r8(self.eip)? as u32; self.eip += 1;
+                put(&mut self.xmm[reg], imm & 7, 16, v as u64);
+            }
+            0xC5 => { // pextrw r32, xmm, imm8
+                let Op::R(i) = rm else { return Err(bad) };
+                let imm = m.r8(self.eip)? as u32; self.eip += 1;
+                self.r[reg] = lane(self.xmm[i], imm & 7, 16) as u32;
+            }
             0xD7 => {
                 let Op::R(i) = rm else { return Err(bad) };
                 let v = self.xmm[i];
