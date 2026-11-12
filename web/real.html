@@ -11,10 +11,10 @@
   #bar button:hover, #bar label.btn:hover { background: #364055; }
   #bar button:disabled { opacity: .45; cursor: default; }
   #status { margin-left: auto; opacity: .8; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  #wrap { flex: 1; display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 10px; }
+  #wrap { flex: 1; min-height: 0; overflow: hidden; }
   #stage { position: relative; line-height: 0; }
   #glov { position: absolute; display: none; pointer-events: none; }
-  #screen { background: #3a6ea5; outline: none; image-rendering: pixelated; box-shadow: 0 8px 30px #0008; }
+  #screen { background: #3a6ea5; outline: none; image-rendering: pixelated; display: block; }
   #log { max-height: 110px; overflow: auto; margin: 0; padding: 4px 10px; background: #0f1115; color: #9aa4b5; font: 11px/1.35 ui-monospace, Consolas, monospace; white-space: pre-wrap; border-top: 1px solid #2c323d; }
   progress { width: 160px; }
 </style>
@@ -35,7 +35,8 @@
 // The real-Wine path: unmodified Wine (wine, wineserver, ntdll.so, win32u.so, PE DLLs) on the Linux personality of the
 // interpreter (crates/host/src/linux.rs), drawing through wineplonk.drv. See crates/host/src/wasm_linux.rs for the exports.
 const $ = (id) => document.getElementById(id);
-const canvas = $("screen"), ctx = canvas.getContext("2d"), W = canvas.width, H = canvas.height;
+const canvas = $("screen"), ctx = canvas.getContext("2d");
+let W = canvas.width, H = canvas.height;
 const logEl = $("log");
 const log = (s) => { logEl.textContent += s; if (logEl.textContent.length > 20000) logEl.textContent = logEl.textContent.slice(-15000); logEl.scrollTop = logEl.scrollHeight; };
 const status = (s) => { $("stxt").textContent = s; };
@@ -153,6 +154,19 @@ setInterval(() => {
   mipsAt = m; mipsT = t;
 }, 1000);
 
+// ---- the desktop is as large as the page area, one guest pixel per device pixel (so text is never rescaled) ----
+let fitTimer = 0;
+function fitScreen() {
+  const r = $("wrap").getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(640, Math.floor(r.width * dpr)), h = Math.max(480, Math.floor(r.height * dpr));
+  canvas.style.width = w / dpr + "px"; canvas.style.height = h / dpr + "px";
+  if (w === W && h === H) return;
+  W = w; H = h; canvas.width = W; canvas.height = H;
+  if (x) { x.plonk_lx_set_screen(W, H); lastFrame = -1; paint(); kick(); }
+}
+new ResizeObserver(() => { clearTimeout(fitTimer); fitTimer = setTimeout(fitScreen, 120); }).observe($("wrap"));
+window.matchMedia("(resolution: 1dppx)").addEventListener?.("change", fitScreen); // browser zoom / moving to another monitor
+
 // ---- input ----
 const pos = (e) => { const r = canvas.getBoundingClientRect(); return [Math.round((e.clientX - r.left) * W / r.width), Math.round((e.clientY - r.top) * H / r.height)]; };
 const btn = (e) => (e.button === 2 ? 1 : e.button === 1 ? 2 : 0);
@@ -186,7 +200,7 @@ try {
   x.plonk_lx_add_tar(put(rootTar), rootTar.length);
   const prefixTar = await fetchBytes("/real/prefix.tar", "prefix", 0.02, 0.7);
   x.plonk_lx_add_tar(put(prefixTar), prefixTar.length);
-  x.plonk_lx_set_screen(W, H);
+  fitScreen();
   // A snapshot of a booted, idle Wine session (wineserver, services, explorer and the invisible keeper process) skips
   // Wine's own start-up. Without one (or with a stale one) the session is booted here, which takes much longer.
   let warm = false;
@@ -195,6 +209,7 @@ try {
     warm = x.plonk_lx_restore(put(snap), snap.length) === 0;
     if (!warm) log("snapshot not used: " + msg() + "\n");
   } catch (e) { log("no snapshot (" + e.message + "): cold start\n"); }
+  x.plonk_lx_set_screen(W, H); // the snapshot was taken at 1024x768: tell Wine the real size
   if (!warm) {
     addFile("/home/user/keeper.exe", new Uint8Array(await (await fetch("/tests/guests/keeper.exe")).arrayBuffer()));
     spawn("/home/user/keeper.exe"); // keeps the Wine session alive between programs
