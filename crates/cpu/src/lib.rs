@@ -115,24 +115,30 @@ impl Cpu {
         Ok(match w { 8 => self.f8(m)? as u32, 16 => self.f16(m)? as u32, _ => self.f32(m)? })
     }
 
+    #[inline(always)]
     fn reg8(&self, i: usize) -> u32 { if i < 4 { self.r[i] & 0xff } else { (self.r[i - 4] >> 8) & 0xff } }
+    #[inline(always)]
     fn set_reg8(&mut self, i: usize, v: u32) {
         let v = v & 0xff;
         if i < 4 { self.r[i] = (self.r[i] & !0xff) | v } else { self.r[i - 4] = (self.r[i - 4] & !0xff00) | (v << 8) }
     }
+    #[inline(always)]
     fn getr(&self, i: usize, w: u32) -> u32 {
         match w { 8 => self.reg8(i), 16 => self.r[i] & 0xffff, _ => self.r[i] }
     }
+    #[inline(always)]
     fn setr(&mut self, i: usize, w: u32, v: u32) {
         match w { 8 => self.set_reg8(i, v), 16 => self.r[i] = (self.r[i] & 0xffff_0000) | (v & 0xffff), _ => self.r[i] = v }
     }
 
+    #[inline(always)]
     fn rd(&self, m: &Mem, o: Op, w: u32) -> R<u32> {
         Ok(match o {
             Op::R(i) => self.getr(i, w),
             Op::M(a) => match w { 8 => m.r8(a)? as u32, 16 => m.r16(a)? as u32, _ => m.r32(a)? },
         })
     }
+    #[inline(always)]
     fn wr(&mut self, m: &mut Mem, o: Op, w: u32, v: u32) -> R<()> {
         match o {
             Op::R(i) => self.setr(i, w, v),

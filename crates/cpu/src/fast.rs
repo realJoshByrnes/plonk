@@ -661,8 +661,14 @@ impl Cpu {
             cache.flush();
             mem.clear_code();
         }
-        cache.epoch = cache.epoch.wrapping_add(1).max(1);
-        mem.smc = false;
+        if self.linux {
+            // Every write of the Linux kernel goes through `Mem` (which notes writes to pages with cached code), so the cache
+            // stays valid across calls unless such a write happened: no re-validation of every block after each system call.
+            if mem.smc { cache.flush(); mem.clear_code(); }
+        } else {
+            cache.epoch = cache.epoch.wrapping_add(1).max(1);
+            mem.smc = false;
+        }
         let mut left = max_steps;
         let mut prev = usize::MAX;
         let exit = loop {

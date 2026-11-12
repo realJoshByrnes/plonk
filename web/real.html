@@ -215,23 +215,29 @@ canvas.addEventListener("keyup", key(0));
 // ---- boot ----
 try {
   status("loading wasm…");
+  const tLoad = performance.now();
+  // everything is requested at once; the results are used in order below
+  const hold = (pr) => { pr.catch(() => {}); return pr; };
+  const dl = { index: hold(fetchBytes("/real/index", "Wine index", 0.02, 0)), prefix: hold(fetchBytes("/real/prefix.tar", "prefix", 0.03, 0.02)),
+    boot: hold(fetchBytes("/real/boot.tar", "Wine", 0.45, 0.05)), snap: hold(fetchBytes("/real/snapshot.bin", "session", 0.5, 0.5)),
+    wine: hold(fetch("/real/f/usr/local/bin/wine").then((r) => r.arrayBuffer())) };
   const { instance } = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
   x = instance.exports;
   window.__lx = { x, msg }; // for debugging from the console / headless checks
   // The Wine install is only declared (names and sizes); a file's contents are fetched when the guest first opens it
   // (fetchWanted). The files the snapshot's processes already have open come in one archive up front.
-  const index = await fetchBytes("/real/index", "Wine index", 0.02, 0);
+  const index = await dl.index;
   x.plonk_lx_add_index(put(index), index.length);
-  const prefixTar = await fetchBytes("/real/prefix.tar", "prefix", 0.03, 0.02);
+  const prefixTar = await dl.prefix;
   x.plonk_lx_add_tar(put(prefixTar), prefixTar.length);
-  try { const boot = await fetchBytes("/real/boot.tar", "Wine", 0.45, 0.05); x.plonk_lx_provide_tar(put(boot), boot.length); } catch (e) { log("no boot archive (" + e.message + ")\n"); }
-  await fetchFile("/usr/local/bin/wine"); // what every program is started with
+  try { const boot = await dl.boot; x.plonk_lx_provide_tar(put(boot), boot.length); } catch (e) { log("no boot archive (" + e.message + ")\n"); }
+  addFile("/usr/local/bin/wine", new Uint8Array(await dl.wine)); // what every program is started with
   fitScreen();
   // A snapshot of a booted, idle Wine session (wineserver, services, explorer and the invisible keeper process) skips
   // Wine's own start-up. Without one (or with a stale one) the session is booted here, which takes much longer.
   let warm = false;
   try {
-    const snap = await fetchBytes("/real/snapshot.bin", "session", 0.5, 0.5);
+    const snap = await dl.snap;
     warm = x.plonk_lx_restore(put(snap), snap.length) === 0;
     if (!warm) log("snapshot not used: " + msg() + "\n");
   } catch (e) { log("no snapshot (" + e.message + "): cold start\n"); }
@@ -251,6 +257,8 @@ try {
   }
   $("prog").remove();
   status("ready");
+  log(`ready in ${((performance.now() - tLoad) / 1000).toFixed(1)} s
+`);
   for (const b of document.querySelectorAll("#bar button")) { b.disabled = false; b.onclick = () => { spawn(b.dataset.cmd); canvas.focus(); }; }
   const man = await (await fetch("/manifest.json")).json();
   const sel = $("guests");

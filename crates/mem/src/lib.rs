@@ -209,11 +209,14 @@ impl Mem {
         }
         Ok(())
     }
+    #[inline(always)]
     pub fn r8(&self, a: u32) -> Result<u8, Fault> { Ok(unsafe { *self.chk(a, 1)? }) }
+    #[inline(always)]
     pub fn r16(&self, a: u32) -> Result<u16, Fault> {
         if self.crosses(a, 2) { let mut b = [0u8; 2]; self.read_slow(a, &mut b)?; return Ok(u16::from_le_bytes(b)); }
         Ok(unsafe { (self.chk(a, 2)? as *const u16).read_unaligned() })
     }
+    #[inline(always)]
     pub fn r32(&self, a: u32) -> Result<u32, Fault> {
         if self.crosses(a, 4) { let mut b = [0u8; 4]; self.read_slow(a, &mut b)?; return Ok(u32::from_le_bytes(b)); }
         Ok(unsafe { (self.chk(a, 4)? as *const u32).read_unaligned() })
@@ -236,12 +239,15 @@ impl Mem {
     }
     /// Forget all code flags (the CPU dropped its cache).
     pub fn clear_code(&mut self) { self.cf.fill(0); self.smc = false; }
+    #[inline(always)]
     pub fn w8(&mut self, a: u32, v: u8) -> Result<(), Fault> { unsafe { *self.chkw(a, 1)? = v }; Ok(()) }
+    #[inline(always)]
     pub fn w16(&mut self, a: u32, v: u16) -> Result<(), Fault> {
         if self.crosses(a, 2) { return self.write_slow(a, &v.to_le_bytes()); }
         unsafe { (self.chkw(a, 2)? as *mut u16).write_unaligned(v) };
         Ok(())
     }
+    #[inline(always)]
     pub fn w32(&mut self, a: u32, v: u32) -> Result<(), Fault> {
         if self.crosses(a, 4) { return self.write_slow(a, &v.to_le_bytes()); }
         unsafe { (self.chkw(a, 4)? as *mut u32).write_unaligned(v) };
