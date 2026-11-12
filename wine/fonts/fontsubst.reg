@@ -1,0 +1,11 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion\FontSubstitutes]
+"Segoe UI"="Selawik"
+"MS Shell Dlg"="Selawik"
+"MS Shell Dlg 2"="Selawik"
+"Tahoma"="Selawik"
+"Microsoft Sans Serif"="Selawik"
+"MS Sans Serif"="Selawik"
+"Arial"="Selawik"
+"Helvetica"="Selawik"
