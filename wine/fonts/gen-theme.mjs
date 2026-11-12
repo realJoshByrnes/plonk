@@ -13,7 +13,7 @@ function logfont(height, weight, face) {
 }
 const F = "Segoe UI";
 const metrics = {
-  BorderWidth: "-15", PaddedBorderWidth: "0", CaptionHeight: String(-15 * 32), CaptionWidth: String(-15 * 46),
+  BorderWidth: "-15", PaddedBorderWidth: "0", CaptionHeight: String(-15 * 26), CaptionWidth: String(-15 * 30),
   SmCaptionHeight: String(-15 * 24), SmCaptionWidth: String(-15 * 24), ScrollWidth: "-255", ScrollHeight: "-255",
   MenuHeight: String(-15 * 24), MenuWidth: String(-15 * 24), IconSpacing: "-1125", IconVerticalSpacing: "-1125",
 };

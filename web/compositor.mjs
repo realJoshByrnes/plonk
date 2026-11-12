@@ -116,7 +116,7 @@ let dark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)
     g.fillRect(0, 0, w, h);
     const fg = dark ? (active ? "#ffffff" : "#9d9d9d") : (active ? "#1b1b1b" : "#808080");
     const btns = btnLayout(c);
-    g.fillStyle = fg; g.font = `${Math.max(10, Math.round(h * 0.375))}px ${FONT}`; g.textBaseline = "middle";
+    g.fillStyle = fg; g.font = `${Math.max(12, Math.round(h * 0.46))}px ${FONT}`; g.textBaseline = "middle";
     const left = Math.round(12 * k), avail = (btns.length ? btns[btns.length - 1].x : w) - left - 8;
     let t = title;
     while (t.length > 1 && g.measureText(t).width > avail) t = t.slice(0, -2) + "…";
