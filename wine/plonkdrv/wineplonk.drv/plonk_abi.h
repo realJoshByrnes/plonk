@@ -15,6 +15,8 @@
 #define PLONK_SYS_FLUSH   (0x504C0000 + 3) /* (unsigned hwnd, const void *bits, int width, int height, const int dirty[4] l,t,r,b);
                                               bits = whole surface, 32bpp BGRX, top-down, stride width*4 */
 #define PLONK_SYS_TITLE   (0x504C0000 + 4) /* (unsigned hwnd, const unsigned short *utf16, int len) */
+#define PLONK_SYS_CAPTION (0x504C0000 + 7) /* (int a[8]: hwnd, flags, caption left, top, right, bottom (screen), button width): the host draws the title bar.
+                                              flags: 1 has a caption, 2 minimize, 4 maximize, 8 close (enabled), 16 maximized, 32 tool window */
 #define PLONK_SYS_CURSOR  (0x504C0000 + 5) /* (unsigned hwnd, int kind) */
 
 /* cursor kinds for PLONK_SYS_CURSOR */

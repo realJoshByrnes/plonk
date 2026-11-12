@@ -126,6 +126,27 @@ static void send_host_title( HWND hwnd, const WCHAR *text )
     plonk_syscall3( PLONK_SYS_TITLE, host_hwnd( hwnd ), (long)text, len );
 }
 
+static void send_host_caption( HWND hwnd, UINT style, UINT ex_style )
+{
+    int a[8];
+    TITLEBARINFO tb = { .cbSize = sizeof(tb) };
+
+    memset( a, 0, sizeof(a) );
+    a[0] = host_hwnd( hwnd );
+    if ((style & WS_CAPTION) == WS_CAPTION && NtUserGetTitleBarInfo( hwnd, &tb ))
+    {
+        int cx = NtUserGetSystemMetrics( SM_CXSIZE );
+        BOOL tool = (ex_style & WS_EX_TOOLWINDOW) != 0;
+        a[1] = 1 | ((style & WS_MINIMIZEBOX) ? 2 : 0) | ((style & WS_MAXIMIZEBOX) ? 4 : 0) |
+               ((style & WS_SYSMENU) && !(tb.rgstate[5] & STATE_SYSTEM_UNAVAILABLE) ? 8 : 0) |
+               ((style & WS_MAXIMIZE) ? 16 : 0) | (tool ? 32 : 0);
+        a[2] = tb.rcTitleBar.left - (tool ? 0 : cx); /* the icon area is part of the bar */
+        a[3] = tb.rcTitleBar.top; a[4] = tb.rcTitleBar.right; a[5] = tb.rcTitleBar.bottom;
+        a[6] = cx;
+    }
+    plonk_syscall1( PLONK_SYS_CAPTION, (long)a );
+}
+
 static void send_host_window( HWND hwnd, const RECT *window_rect, const RECT *client_rect,
                               UINT style, UINT ex_style, BOOL first )
 {
@@ -155,6 +176,7 @@ static void send_host_window( HWND hwnd, const RECT *window_rect, const RECT *cl
 
     if (plonk_syscall1( PLONK_SYS_WINDOW, (long)&info ) < 0)
         ERR( "PLONK_SYS_WINDOW failed for %p, errno %d\n", hwnd, errno );
+    send_host_caption( hwnd, style, ex_style );
 
     if (first)
     {

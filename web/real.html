@@ -42,6 +42,7 @@ let comp = null, ctx = null;
 const wantGpu = !new URLSearchParams(location.search).has("cpu");
 if (wantGpu) { try { comp = (await import("./compositor.mjs")).createCompositor(canvas); } catch (e) { console.warn(e); } }
 if (!comp) ctx = canvas.getContext("2d");
+if (comp) { const q = new URLSearchParams(location.search).get("theme"); if (q === "dark" || q === "light") comp.setDark(q === "dark"); }
 const inCanvas = new URLSearchParams(location.search).has("incanvas"); // default: 3D on its own canvas over the desktop (faster); ?incanvas draws it into the desktop canvas
 let glFrame = null, glDirty = false; // the latest 3D frame, drawn by the compositor
 let W = canvas.width, H = canvas.height;
@@ -201,7 +202,7 @@ function paint() {
     const ptr = x.plonk_lx_scene() >>> 0, n = new Uint32Array(x.memory.buffer, ptr, 1)[0];
     let over = null;
     if (inCanvas && glFrame && glOn()) { const r = new Int32Array(x.memory.buffer, x.plonk_lx_gl_rect() >>> 0, 4); over = { source: glFrame, x: r[0], y: r[1], w: r[2], h: r[3] }; }
-    comp.frame(x.memory.buffer, new Uint32Array(x.memory.buffer, ptr, 1 + n * 10), W, H, over);
+    comp.frame(x.memory.buffer, new Uint32Array(x.memory.buffer, ptr, 1 + n * 17), W, H, over, (h) => { x.plonk_lx_title(h); return msg(); });
     x.plonk_lx_scene_done();
     glDirty = false;
     return;
@@ -240,8 +241,9 @@ canvas.addEventListener("pointerup", (e) => { const [px, py] = pos(e); x.plonk_l
 let moveQueued = null;
 canvas.addEventListener("pointermove", (e) => { // at most one move per pump turn
   const had = moveQueued; moveQueued = pos(e);
-  if (!had) queueMicrotask(() => { const [px, py] = moveQueued; moveQueued = null; x.plonk_lx_mouse(1, px, py, 0); });
+  if (!had) queueMicrotask(() => { const [px, py] = moveQueued; moveQueued = null; x.plonk_lx_mouse(1, px, py, 0); if (comp && comp.setPointer(px, py)) paint(); });
 });
+canvas.addEventListener("pointerleave", () => { if (comp && comp.setPointer(null)) paint(); });
 canvas.addEventListener("wheel", (e) => { const [px, py] = pos(e); x.plonk_lx_wheel(px, py, e.deltaY < 0 ? 120 : -120); e.preventDefault(); }, { passive: false });
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 // KeyboardEvent.keyCode is the Windows virtual-key code for nearly every key; scan codes come from this table (set 1).

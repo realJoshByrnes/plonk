@@ -64,6 +64,8 @@ pub struct HostWin {
     pub sw: u32, pub sh: u32, pub pixels: Vec<u8>,
     /// The part of the surface changed since the page last took it (l, t, r, b; empty when r <= l).
     pub dirty: [i32; 4],
+    /// The host-drawn title bar: flags (see PLONK_SYS_CAPTION), caption rectangle l, t, r, b (screen), button width; changes of the title.
+    pub cap: [i32; 7], pub title_gen: u32,
 }
 
 /// An open file description (shared by dup'ed descriptors and descriptors passed over sockets).
@@ -404,9 +406,16 @@ impl LinuxProc {
                     w.pixels[off as usize..off as usize + src.len()].copy_from_slice(src);
                 }
             }
+            7 => { // caption(hwnd, flags, l, t, r, b, button width)
+                let v: Vec<i32> = (0..7).map(|i| self.mem.r32(a[0] + (i + 1) * 4).unwrap_or(0) as i32).collect();
+                let hw = self.mem.r32(a[0]).unwrap_or(0);
+                if let Some(w) = self.windows.get_mut(&hw) { w.cap.copy_from_slice(&v); w.title_gen += 1; }
+                self.frame += 1;
+            }
             4 => { // title(hwnd, utf16, len)
                 let u: Vec<u16> = (0..a[2].min(1024)).map(|i| self.mem.r16(a[1] + i * 2).unwrap_or(0)).collect();
-                if let Some(w) = self.windows.get_mut(&a[0]) { w.title = String::from_utf16_lossy(&u); }
+                if let Some(w) = self.windows.get_mut(&a[0]) { w.title = String::from_utf16_lossy(&u); w.title_gen += 1; }
+                self.frame += 1;
             }
             5 => self.cursor = a[1] as i32,
             6 => { // where the GL window is, and whose it is
