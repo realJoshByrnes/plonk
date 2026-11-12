@@ -389,7 +389,7 @@ struct Jit {
     pending: Vec<(Key, u32, Vec<u8>)>,
     batches: HashMap<u32, Vec<(Key, u32)>>,
     next_batch: u32,
-    stats: [u64; 3],
+    stats: [u64; 8],
 }
 
 thread_local! { static JIT: RefCell<Jit> = RefCell::new(Jit::default()); }
@@ -467,3 +467,34 @@ pub(super) unsafe fn call(idx: u32, cpu: *mut Cpu, tbl: usize, cf: usize, lim: u
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) unsafe fn call(_idx: u32, _cpu: *mut Cpu, _tbl: usize, _cf: usize, _lim: u32) -> u32 { 0 }
+
+// ---- profiling: which instructions take the slow path ----
+thread_local! { static PROF: RefCell<Option<HashMap<String, u64>>> = RefCell::new(None); }
+pub fn profile(on: bool) { PROF.with(|p| *p.borrow_mut() = on.then(HashMap::new)); }
+pub(super) fn profiling() -> bool { PROF.with(|p| p.borrow().is_some()) }
+pub(super) fn count_op(mem: &plonk_mem::Mem, pc: u32) {
+    let mut b = [0u8; 4];
+    for (k, x) in b.iter_mut().enumerate() { *x = mem.r8(pc.wrapping_add(k as u32)).unwrap_or(0); }
+    let mut p = 0;
+    let mut pre = String::new();
+    while p < 3 && matches!(b[p], 0x66 | 0xF2 | 0xF3 | 0x64 | 0x65 | 0xF0 | 0x2E | 0x36 | 0x3E | 0x26) { if matches!(b[p], 0x66 | 0xF2 | 0xF3) { pre += &format!("{:02x} ", b[p]); } p += 1; }
+    let key = if b[p] == 0x0F { format!("{pre}0f {:02x}", b[p + 1]) } else { format!("{pre}{:02x}", b[p]) };
+    PROF.with(|m| if let Some(m) = m.borrow_mut().as_mut() { *m.entry(key).or_insert(0) += 1; });
+}
+/// The histogram, most frequent first, as lines "count opcode".
+pub fn profile_report() -> String {
+    PROF.with(|m| {
+        let m = m.borrow();
+        let Some(m) = m.as_ref() else { return String::new() };
+        let mut v: Vec<_> = m.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        let st = JIT.with(|j| j.borrow().stats);
+        format!("blocks {} (with translation {}, bailed {}), instructions translated {} interpreted {}
+", st[7], st[6], st[5], st[3], st[4])
+            + &v.iter().take(40).map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join("
+")
+    })
+}
+pub(super) fn tally(jit_insns: u64, interp_insns: u64, bailed: bool, has_jit: bool) {
+    JIT.with(|j| { let mut j = j.borrow_mut(); j.stats[3] += jit_insns; j.stats[4] += interp_insns; j.stats[5] += bailed as u64; j.stats[6] += has_jit as u64; j.stats[7] += 1; });
+}

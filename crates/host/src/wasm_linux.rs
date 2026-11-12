@@ -188,6 +188,11 @@ pub extern "C" fn plonk_lx_jit_id() -> u32 { unsafe { JIT_MOD.0 } }
 pub extern "C" fn plonk_lx_jit_count() -> u32 { unsafe { JIT_MOD.1 } }
 #[no_mangle]
 pub extern "C" fn plonk_lx_jit_installed(id: u32, first: u32) { plonk_cpu::jit::installed(id, first); }
+/// Profiling of the slow path: on/off, and the report (as the message).
+#[no_mangle]
+pub extern "C" fn plonk_lx_prof(on: u32) { plonk_cpu::jit::profile(on != 0); }
+#[no_mangle]
+pub extern "C" fn plonk_lx_prof_report() { unsafe { MSG = plonk_cpu::jit::profile_report(); } }
 /// Functions installed so far.
 #[no_mangle]
 pub extern "C" fn plonk_lx_jit_stats() -> u32 { plonk_cpu::jit::stats().0 as u32 }

@@ -643,10 +643,15 @@ impl Cpu {
     }
 
     #[inline(never)]
-    fn do_step(&mut self, mem: &mut Mem) -> R<()> { self.nsteps += 1; self.step(mem) }
+    fn do_step(&mut self, mem: &mut Mem) -> R<()> {
+        self.nsteps += 1;
+        if jit::profiling() { jit::count_op(mem, self.eip); }
+        self.step(mem)
+    }
 
     #[inline(never)]
     fn do_fpu(&mut self, mem: &mut Mem, i: &Insn, pc: u32) -> R<()> {
+        if jit::profiling() { jit::count_op(mem, pc); }
         self.insn_start = pc;
         self.seg = match i.seg { 0 => 0, 1 => self.fs_base, _ => self.gs_base };
         self.eip = pc.wrapping_add(i.reg as u32);
@@ -670,6 +675,8 @@ impl Cpu {
             cache.epoch = cache.epoch.wrapping_add(1).max(1);
             mem.smc = false;
         }
+        let (jit_on, prof) = (jit::enabled(), jit::profiling());
+        let jview = mem.jit_view();
         let mut left = max_steps;
         let mut prev = usize::MAX;
         let exit = loop {
@@ -704,7 +711,7 @@ impl Cpu {
             let blk = cache.blocks[bi];
             let n = (blk.n as u64).min(left) as usize;
             let ip = unsafe { cache.insns.as_ptr().add(blk.start as usize) };
-            if jit::enabled() && blk.jit == 0 {
+            if jit_on && blk.jit == 0 {
                 let b = &mut cache.blocks[bi];
                 b.hot += 1;
                 if b.hot >= 40 && b.hot % 64 == 40 {
@@ -716,7 +723,7 @@ impl Cpu {
             let mut o = BlockOut { done: 0, pc: pc0, last: pc0, st: ST_OK };
             let mut jd = 0usize;
             if blk.jit != 0 && blk.jn as u64 <= left {
-                if let Some((t, c, l)) = mem.jit_view() {
+                if let Some((t, c, l)) = jview {
                     jd = unsafe { jit::call(blk.jit, self as *mut Cpu, t, c, l) } as usize;
                     o.done = jd as u32;
                     o.pc = if jd == blk.jn as usize { self.eip } else {
@@ -726,6 +733,7 @@ impl Cpu {
                     };
                 }
             }
+            if prof { jit::tally(jd as u64, (n - jd.min(n)) as u64, blk.jit != 0 && jd < blk.jn as usize, blk.jit != 0); }
             if jd < n {
                 let r = unsafe { self.exec(mem, ip.add(jd), n - jd, o.pc) };
                 o = BlockOut { done: o.done + r.done, pc: r.pc, last: if r.done > 0 { r.last } else { o.last }, st: r.st };

@@ -21,6 +21,7 @@ function jitPump() {
   for (let i = 0; i < count; i++) table.set(first + i, inst.exports[i]);
   x.plonk_lx_jit_installed(id, first);
 }
+if (process.env.PROF) x.plonk_lx_prof(1);
 const args = (process.argv[2] || "notepad").split(" ");
 for (const a of args) if (a.startsWith("/home/user/")) { const n = new TextEncoder().encode(a), d = readFileSync(new URL("tests/guests/" + a.slice(11), root)); x.plonk_lx_add_file(put(n), n.length, put(d), d.length); }
 const cmd = new TextEncoder().encode(["/usr/local/bin/wine", ...args].join("\n"));
@@ -53,5 +54,6 @@ x.plonk_lx_mouse(0, 300, 300, 0); x.plonk_lx_mouse(2, 300, 300, 0);
 show("click in the client area", settle(20000));
 for (const vk of [72, 73]) { x.plonk_lx_key(1, vk, 0); x.plonk_lx_key(0, vk, 0); }
 show("two key presses", settle(20000));
+if (process.env.PROF) { x.plonk_lx_prof_report(); console.log(msg()); }
 if (jitOn) console.log("jit functions:", x.plonk_lx_jit_stats());
 x.plonk_lx_ps(); console.log(msg().split("\n").filter((l) => !l.includes("exited")).map((l) => l.slice(0, 110)).join("\n"));
