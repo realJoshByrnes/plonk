@@ -8,7 +8,7 @@ const put = (bytes) => { const p = x.plonk_alloc(bytes.length); new Uint8Array(x
 const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_lx_msg(), x.plonk_lx_msg_len()));
 const mb = () => (x.memory.buffer.byteLength / 1048576) | 0;
 // files come from the dev server the way the page gets them: an index, the snapshot's files, the rest on demand
-const get = async (u) => { const r = await fetch("http://localhost:8080" + u); if (!r.ok) throw new Error(u + ": " + r.status); return new Uint8Array(await r.arrayBuffer()); };
+const get = async (u, tries = 3) => { try { const r = await fetch("http://localhost:8080" + u); if (!r.ok) throw new Error(u + ": " + r.status); return new Uint8Array(await r.arrayBuffer()); } catch (e) { if (tries > 1 && !/: \d+$/.test(e.message)) return get(u, tries - 1); throw e; } };
 const addFile = (path, d) => { const n = new TextEncoder().encode(path); x.plonk_lx_add_file(put(n), n.length, put(d), d.length); };
 const ix = await get("/real/index"); x.plonk_lx_add_index(put(ix), ix.length);
 const pre = readFileSync(new URL("wine/prefix.tar", root)); x.plonk_lx_add_tar(put(pre), pre.length);
@@ -16,6 +16,7 @@ console.log(`index + prefix: ${mb()} MB`);
 const boot = await get("/real/boot.tar"); x.plonk_lx_provide_tar(put(boot), boot.length);
 addFile("/usr/local/bin/wine", await get("/real/f/usr/local/bin/wine"));
 for (const f of readdirSync(new URL("tests/guests", root)).filter((f) => f.endsWith(".exe"))) addFile("/home/user/" + f, readFileSync(new URL("tests/guests/" + f, root)));
+if (process.env.DIR) { const [h, g] = process.env.DIR.split("="); for (const f of readdirSync(h, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name)) addFile(g + "/" + f, readFileSync(h + "/" + f)); } // DIR=hostdir=/guest/dir
 console.log(`boot files (${boot.length >> 20} MB): ${mb()} MB`);
 const wanted = async () => { if (x.plonk_lx_wanted()) for (const p of msg().split("\n")) addFile(p, await get("/real/f" + p)); };
 const snap = readFileSync(new URL("wine/snapshot.bin", root));
@@ -37,6 +38,6 @@ for (let i = 1; i <= rounds; i++) {
     await wanted();
     if (r === 1) await new Promise((res) => setTimeout(res, 2));
   }
-  x.plonk_lx_take_stdout();
+  x.plonk_lx_take_stdout(); if (msg()) console.log(msg());
   console.log(`run ${i}: ${mb()} MB after ${((performance.now() - t0) / 1000).toFixed(1)} s${x.plonk_lx_alive(pid) ? " (still running)" : ""}`);
 }

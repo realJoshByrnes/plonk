@@ -70,11 +70,18 @@ const fetching = new Set();
 async function fetchFile(path) {
   if (fetching.has(path)) return;
   fetching.add(path);
-  try {
-    const r = await fetch("/real/f" + path.split("/").map(encodeURIComponent).join("/"));
-    if (!r.ok) throw new Error(r.status);
-    addFile(path, new Uint8Array(await r.arrayBuffer()));
-  } catch (e) { log(`could not load ${path}: ${e.message}\n`); addFile(path, new Uint8Array(0)); }
+  // The guest waits until the file is there, so a failed fetch (server restarting, network blip) is retried, not given up on:
+  // an empty file would look like a broken DLL to Wine for the rest of the session.
+  for (let wait = 250; ; wait = Math.min(wait * 2, 5000)) {
+    try {
+      const r = await fetch("/real/f" + path.split("/").map(encodeURIComponent).join("/"));
+      if (r.status === 404) { log(`${path} is not on the server\n`); addFile(path, new Uint8Array(0)); break; }
+      if (!r.ok) throw new Error(r.status);
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      addFile(path, bytes);
+      break;
+    } catch (e) { status(`retrying ${path.split("/").pop()}…`); await new Promise((res) => setTimeout(res, wait)); }
+  }
   kick();
 }
 function fetchWanted() { if (x.plonk_lx_wanted()) for (const p of msg().split("\n")) fetchFile(p); }
