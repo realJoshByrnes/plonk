@@ -106,6 +106,13 @@ pub struct LinuxProc {
     vfs: BTreeMap<String, Node>,
     /// Hard links into `files` (path -> path): lets a saved Wine prefix share the DLLs of the install instead of holding copies.
     aliases: HashMap<String, String>,
+    /// Files of the read-only layer that are known (path -> size) but whose contents have not been supplied yet
+    /// (`add_index` / `provide`). A system call that needs one is retried until the host has provided it.
+    lazy: HashMap<String, u32>,
+    /// The not-yet-supplied files that something asked for (see `take_wanted`).
+    wanted: RefCell<Vec<String>>,
+    /// Set when the running system call hit such a file: it is then retried instead of returning.
+    lazy_hit: std::cell::Cell<bool>,
     /// Tree files that came from the read-only layer and were never opened for writing (snapshots store them by name).
     pristine: HashSet<String>,
     /// Fingerprint of everything loaded with `add_tar` (names and sizes): a snapshot only fits the archives it was taken with.
@@ -139,6 +146,12 @@ pub struct LinuxProc {
     /// Files that are mapped MAP_SHARED: their pages live here and every mapping aliases them (Wine's server shares its
     /// clock/session pages with every process this way).
     shared: Vec<SharedFile>,
+    /// Read-only page copies of files that are mapped privately (keyed by the address of the file's contents): every such
+    /// mapping in every process refers to these pages until it writes to one (copy on write). Dropped from here when the
+    /// file is written to; the pages themselves are never freed (mappings may still refer to them).
+    cow: HashMap<usize, SharedFile>,
+    /// The page contents of the restored snapshot: processes refer to them copy-on-write. (address, pages)
+    snap_pool: (usize, usize),
     /// Set when a GL frame was presented: `run` returns so the page can draw it.
     frame_break: bool,
     gl_pid: u32,
@@ -166,8 +179,8 @@ impl LinuxProc {
         let mut vfs = BTreeMap::new();
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
         LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, exit_code: None, blocked: false,
-            vfs, aliases: HashMap::new(), pristine: HashSet::new(), layer_sig: 0, layer_names: HashSet::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
-            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], shared: Vec::new(), frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, clock_step_ns: 20_000, wait_all: false }
+            vfs, aliases: HashMap::new(), lazy: HashMap::new(), wanted: RefCell::new(Vec::new()), lazy_hit: std::cell::Cell::new(false), pristine: HashSet::new(), layer_sig: 0, layer_names: HashSet::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
+            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], shared: Vec::new(), cow: HashMap::new(), snap_pool: (0, 0), frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, clock_step_ns: 20_000, wait_all: false }
     }
 
     // ---- processes and threads ----
@@ -320,6 +333,7 @@ impl LinuxProc {
         let raw = self.cstr(path);
         let p = self.resolve(-100i32 as u32, &raw, true);
         let data = self.file_bytes(&p);
+        if self.lazy_target("/lib/ld-linux.so.2") { return ENOENT; } // the loader must be here before the old image goes
         let Some(data) = data else { self.tr(format!("execve {p} -> ENOENT")); return ENOENT };
         if data.len() < 52 || data[0] != 0x7F { return -8i32 as u32; } // ENOEXEC
         let (mut argv, envp) = (self.str_vec(argv), self.str_vec(envp));
@@ -489,6 +503,65 @@ impl LinuxProc {
         }
     }
 
+    /// Declare the contents of a tar archive without its file bodies: one line per entry, in archive order,
+    /// `type<TAB>size<TAB>name<TAB>link target` (type as in tar: 0 file, 1 hard link, 2 symlink, 5 directory). Files are
+    /// asked for through `take_wanted` when first used and supplied with `provide`.
+    pub fn add_index(&mut self, index: &str) {
+        for line in index.lines() {
+            let mut f = line.split(char::from(9));
+            let (Some(ty), Some(size), Some(name)) = (f.next(), f.next().and_then(|s| s.parse::<u32>().ok()), f.next()) else { continue };
+            let link = f.next().unwrap_or("");
+            let name = format!("/{}", name.trim_start_matches("./").trim_end_matches('/'));
+            self.layer_sig = name.bytes().fold(self.layer_sig ^ size as u64, |h, b| (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)).rotate_left(7);
+            match ty {
+                "0" => { self.layer_names.insert(name.clone()); if !self.files.contains_key(&name) { self.lazy.insert(name, size); } }
+                "5" => { self.vfs.insert(name, Node::Dir); }
+                "2" => { self.vfs.insert(name, Node::Link(link.to_string())); }
+                "1" => { self.layer_names.insert(name.clone()); self.aliases.insert(name, format!("/{link}")); }
+                _ => {}
+            }
+        }
+    }
+
+    /// Supply a file: the contents of one declared by `add_index`, or a new file of the read-only layer.
+    pub fn provide(&mut self, name: String, data: Vec<u8>) {
+        self.lazy.remove(&name);
+        self.wanted.borrow_mut().retain(|w| *w != name);
+        self.files.insert(name, data);
+    }
+
+    /// Supply the files of a tar archive (regular files only; see `provide`).
+    pub fn provide_tar(&mut self, tar: &[u8]) {
+        let field = |b: &[u8]| String::from_utf8_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]).into_owned();
+        let (mut off, mut long): (usize, Option<String>) = (0, None);
+        while off + 512 <= tar.len() && tar[off] != 0 {
+            let h = &tar[off..off + 512];
+            let size = usize::from_str_radix(field(&h[124..136]).trim(), 8).unwrap_or(0);
+            let body = &tar[off + 512..(off + 512 + size).min(tar.len())];
+            off += 512 + (size + 511) / 512 * 512;
+            if h[156] == b'L' { long = Some(field(body)); continue; }
+            let name = long.take().unwrap_or_else(|| { let (n, pre) = (field(&h[..100]), field(&h[345..500])); if pre.is_empty() { n } else { format!("{pre}/{n}") } });
+            if matches!(h[156], b'0' | 0) { self.provide(format!("/{}", name.trim_start_matches("./")), body.to_vec()); }
+        }
+    }
+
+    /// The declared files that the guest (or `spawn_path`) needs now. Whatever asked is waiting for `provide`.
+    pub fn take_wanted(&mut self) -> Vec<String> { self.wanted.borrow().clone() }
+
+    /// The files of the read-only layer that are in use unmodified (what a snapshot refers to by name).
+    pub fn pristine_files(&self) -> Vec<String> { let mut v: Vec<String> = self.pristine.iter().cloned().collect(); v.sort(); v }
+
+    /// True (and the file is asked for) when `p` is, or is a hard link to, a file whose contents are not here yet.
+    fn lazy_target(&self, p: &str) -> bool {
+        let mut t = p;
+        for _ in 0..8 { match self.aliases.get(t) { Some(a) if !self.vfs.contains_key(t) => t = a, _ => break } }
+        if self.vfs.contains_key(t) || !self.lazy.contains_key(t) { return false; }
+        self.lazy_hit.set(true);
+        let mut w = self.wanted.borrow_mut();
+        if !w.iter().any(|x| x == t) { w.push(t.to_string()); }
+        true
+    }
+
     /// One line per live process: pid, parent, executable, and what each thread is doing (debugging).
     pub fn ps(&self) -> String {
         let mut out = String::new();
@@ -496,7 +569,7 @@ impl LinuxProc {
             let exe = if pi == self.cur.0 { &self.exe } else { &p.exe };
             let mi: u64 = p.threads.iter().enumerate().map(|(ti, t)| if (pi, ti) == self.cur { self.cpu.retired } else { t.cpu.retired }).sum::<u64>() / 1_000_000;
             if let Some(c) = p.exit { out.push_str(&format!("pid {} ppid {} {exe} {} [{mi} M instr] exited {c}{}", p.pid, p.ppid, p.cmd, char::from(10))); continue; }
-            out.push_str(&format!("pid {} ppid {} {exe} {} [{mi} M instr, {} MB]:", p.pid, p.ppid, p.cmd, (if pi == self.cur.0 { &self.mem } else { &p.mem }).committed() >> 20));
+            out.push_str(&format!("pid {} ppid {} {exe} {} [{mi} M instr, {} MB]:", p.pid, p.ppid, p.cmd, (if pi == self.cur.0 { &self.mem } else { &p.mem }).own_bytes() >> 20));
             for (ti, t) in p.threads.iter().enumerate() {
                 let cpu = if (pi, ti) == self.cur { &self.cpu } else { &t.cpu };
                 match t.state {
@@ -572,6 +645,7 @@ impl LinuxProc {
             if !private && self.layer_names.contains(p) { self.pristine.insert(p.to_string()); }
             return Some(data);
         }
+        if self.lazy_target(p) { return None; }
         let d = self.files.remove(p)?;
         let data: Data = Rc::new(RefCell::new(d));
         self.vfs.insert(p.to_string(), Node::File(data.clone()));
@@ -584,6 +658,7 @@ impl LinuxProc {
         match self.vfs.get(p) {
             Some(Node::File(d)) => Some(d.borrow().clone()),
             Some(_) => None,
+            None if self.lazy_target(p) => None,
             None => self.files.get(p).cloned().or_else(|| self.aliases.get(p).and_then(|t| self.file_bytes(t))),
         }
     }
@@ -786,7 +861,7 @@ impl LinuxProc {
     fn is_dir(&self, p: &str) -> bool {
         if matches!(self.vfs.get(p), Some(Node::Dir)) { return true; }
         let pre = format!("{}/", p.trim_end_matches('/'));
-        self.files.keys().chain(self.aliases.keys()).any(|k| k.starts_with(&pre)) || self.vfs.range(pre.clone()..).next().map_or(false, |(k, _)| k.starts_with(&pre))
+        self.files.keys().chain(self.aliases.keys()).chain(self.lazy.keys()).any(|k| k.starts_with(&pre)) || self.vfs.range(pre.clone()..).next().map_or(false, |(k, _)| k.starts_with(&pre))
     }
 
     /// (mode, size) of a path, if it exists.
@@ -799,6 +874,7 @@ impl LinuxProc {
             None => match p {
                 "/dev/null" | "/dev/tty" | "/dev/plonk/events" => Some((0o020666, 0)),
                 _ => self.files.get(p).map(|d| (0o100755, d.len() as u64))
+                    .or_else(|| self.lazy.get(p).map(|&n| (0o100755, n as u64)))
                     .or_else(|| self.aliases.get(p).and_then(|t| self.lookup(t)).map(|(_, n)| (0o100755, n)))
                     .or_else(|| self.is_dir(p).then_some((0o040755, 0))),
             },
@@ -813,7 +889,7 @@ impl LinuxProc {
             if rest.is_empty() || rest.contains('/') { continue; }
             v.insert(rest.to_string(), match n { Node::Dir => 4, Node::File(_) => 8, Node::Link(_) => 10, Node::Sock(_) => 12 });
         }
-        for k in self.files.keys().chain(self.aliases.keys()).filter(|k| k.starts_with(&pre)) {
+        for k in self.files.keys().chain(self.aliases.keys()).chain(self.lazy.keys()).filter(|k| k.starts_with(&pre)) {
             let rest = &k[pre.len()..];
             match rest.split_once('/') { Some((d, _)) => { v.entry(d.to_string()).or_insert(4); } None => { v.entry(rest.to_string()).or_insert(8); } }
         }
@@ -831,10 +907,11 @@ impl LinuxProc {
         let raw = self.cstr(path);
         let p = self.resolve(dirfd, &raw, flags & 0x20000 == 0); // O_NOFOLLOW
         if self.trace_cap > 0 { self.tr(format!("path open {p} flags {flags:#x}")); }
+        if self.lazy_target(&p) { return 0; } // not here yet: the call is retried
         let kind = match self.vfs.get(&p) {
             Some(Node::File(d)) => {
                 if flags & 0xC0 == 0xC0 { return EEXIST; } // O_CREAT|O_EXCL
-                if flags & 0x200 != 0 { d.borrow_mut().clear(); } // O_TRUNC
+                if flags & 0x200 != 0 { d.borrow_mut().clear(); self.cow.remove(&(Rc::as_ptr(d) as usize)); } // O_TRUNC
                 let d = d.clone();
                 if flags & 0x203 != 0 { self.pristine.remove(&p); }
                 Kind::File { data: d, pos: 0 }
@@ -847,7 +924,7 @@ impl LinuxProc {
                 "/dev/plonk/events" => Kind::Events,
                 _ => {
                     if let Some(data) = self.promote(&p, flags & 3 != 0) {
-                        if flags & 0x200 != 0 { data.borrow_mut().clear(); }
+                        if flags & 0x200 != 0 { data.borrow_mut().clear(); self.cow.remove(&(Rc::as_ptr(&data) as usize)); }
                         Kind::File { data, pos: 0 }
                     } else if self.is_dir(&p) { Kind::Dir { pos: 0 } }
                     else if flags & 0x40 != 0 && self.is_dir(parent(&p)) { // O_CREAT
@@ -1118,6 +1195,7 @@ impl LinuxProc {
         let append = o.flags & 0x400 != 0;
         let sock = match &mut o.kind {
             Kind::File { data, pos } => {
+                self.cow.remove(&(Rc::as_ptr(data) as usize));
                 let mut d = data.borrow_mut();
                 let s = if append { d.len() } else { at.unwrap_or(*pos) as usize };
                 if d.len() < s + src.len() { d.resize(s + src.len(), 0); }
@@ -1163,8 +1241,32 @@ impl LinuxProc {
                 return a;
             }
         }
+        if flags & 0x21 == 0 && off & 0xFFF == 0 { // MAP_PRIVATE of a file: the file's pages, each copied when first written to
+            let Some(o) = self.fds.get(&fd).cloned() else { return EBADF };
+            let data = match &o.borrow().kind { Kind::File { data, .. } => Some(data.clone()), _ => None };
+            if let Some(data) = &data {
+                let s = self.cow.entry(Rc::as_ptr(data) as usize).or_insert_with(|| SharedFile { data: data.clone(), pages: Vec::new() });
+                let (flen, first) = (data.borrow().len(), (off / 4096) as usize);
+                let n = ((flen + 4095) / 4096).saturating_sub(first).min((len / 4096) as usize);
+                if s.pages.len() < first + n { s.pages.resize(first + n, core::ptr::null_mut()); }
+                for i in 0..n {
+                    let pg = first + i;
+                    if s.pages[pg].is_null() {
+                        let p = unsafe { std::alloc::alloc_zeroed(std::alloc::Layout::from_size_align(4096, 4096).unwrap()) };
+                        assert!(!p.is_null(), "out of host memory");
+                        let d = data.borrow();
+                        unsafe { core::ptr::copy_nonoverlapping(d[pg * 4096..].as_ptr(), p, (flen - pg * 4096).min(4096)) };
+                        s.pages[pg] = p;
+                    }
+                    self.mem.map_cow(a + (i as u32) * 4096, s.pages[pg], true);
+                }
+                let done = (n as u32) * 4096;
+                self.mem.map(a + done, len - done, true); // past the end of the file: zero pages
+                return a;
+            }
+        }
         self.mem.map(a, len, prot != 0 || flags & 0x20 == 0);
-        if flags & 0x20 == 0 { // file-backed, private: a copy
+        if flags & 0x20 == 0 { // file-backed, private at an odd offset: a copy
             let Some(o) = self.fds.get(&fd).cloned() else { return EBADF };
             let o = o.borrow();
             if let Kind::File { data, .. } = &o.kind {
@@ -1217,6 +1319,7 @@ impl LinuxProc {
     fn syscall(&mut self) {
         let r = self.cpu.r;
         let (nr, a, b, c, d, e, f) = (r[EAX], r[EBX], r[ECX], r[EDX], r[ESI], r[EDI], r[EBP]);
+        self.lazy_hit.set(false);
         const CWD: u32 = -100i32 as u32;
         let ret: Option<u32> = match nr {
             1 => { self.thread_exit(a); Some(0) } // exit (this thread)
@@ -1328,7 +1431,7 @@ impl LinuxProc {
             192 => Some(self.mmap(a, b, c, d, e, (f as u64) << 12)), // mmap2
             93 | 194 => { // ftruncate, ftruncate64
                 Some(match self.fds.get(&a).cloned() {
-                    Some(o) => { if let Kind::File { data, .. } = &o.borrow().kind { data.borrow_mut().resize(b as usize, 0); 0 } else { EINVAL } }
+                    Some(o) => { if let Kind::File { data, .. } = &o.borrow().kind { data.borrow_mut().resize(b as usize, 0); self.cow.remove(&(Rc::as_ptr(data) as usize)); 0 } else { EINVAL } }
                     None => EBADF,
                 })
             }
@@ -1545,6 +1648,7 @@ impl LinuxProc {
                 Some(ENOSYS)
             }
         };
+        let ret = if self.lazy_hit.replace(false) { None } else { ret }; // needs a file that is still to be supplied: retry
         match ret {
             Some(ret) => {
                 if self.trace_cap > 0 { let pid = self.pid(); self.tr(format!("{pid} sys {nr}({a:#x}, {b:#x}, {c:#x}, {d:#x}) = {ret:#x}")); }

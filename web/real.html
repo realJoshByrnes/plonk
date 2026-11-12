@@ -65,6 +65,19 @@ const put = (bytes) => { const p = x.plonk_alloc(bytes.length); new Uint8Array(x
 const msg = () => new TextDecoder().decode(new Uint8Array(x.memory.buffer, x.plonk_lx_msg(), x.plonk_lx_msg_len()));
 const enc = new TextEncoder();
 function addFile(path, bytes) { const n = enc.encode(path); x.plonk_lx_add_file(put(n), n.length, put(bytes), bytes.length); }
+// Files of the Wine install the guest is waiting for: fetch each once and hand it to the kernel (the waiting call then goes on).
+const fetching = new Set();
+async function fetchFile(path) {
+  if (fetching.has(path)) return;
+  fetching.add(path);
+  try {
+    const r = await fetch("/real/f" + path.split("/").map(encodeURIComponent).join("/"));
+    if (!r.ok) throw new Error(r.status);
+    addFile(path, new Uint8Array(await r.arrayBuffer()));
+  } catch (e) { log(`could not load ${path}: ${e.message}\n`); addFile(path, new Uint8Array(0)); }
+  kick();
+}
+function fetchWanted() { if (x.plonk_lx_wanted()) for (const p of msg().split("\n")) fetchFile(p); }
 function spawn(...args) {
   const c = enc.encode(["/usr/local/bin/wine", ...args].join("\n")), p = put(c);
   const pid = x.plonk_lx_spawn(p, c.length);
@@ -94,6 +107,7 @@ function pump() {
     const pr = x.plonk_lx_gl_presents();
     if (pr !== presents) { presents = pr; pumpGL(); }
   } while (r === 0 && performance.now() - t0 < 12);
+  fetchWanted();
   x.plonk_lx_take_stdout();
   const out = msg();
   if (out) log(out);
@@ -197,16 +211,20 @@ try {
   const { instance } = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
   x = instance.exports;
   window.__lx = { x, msg }; // for debugging from the console / headless checks
-  const rootTar = await fetchBytes("/real/root.tar", "Wine", 0.7, 0);
-  x.plonk_lx_add_tar(put(rootTar), rootTar.length);
-  const prefixTar = await fetchBytes("/real/prefix.tar", "prefix", 0.02, 0.7);
+  // The Wine install is only declared (names and sizes); a file's contents are fetched when the guest first opens it
+  // (fetchWanted). The files the snapshot's processes already have open come in one archive up front.
+  const index = await fetchBytes("/real/index", "Wine index", 0.02, 0);
+  x.plonk_lx_add_index(put(index), index.length);
+  const prefixTar = await fetchBytes("/real/prefix.tar", "prefix", 0.03, 0.02);
   x.plonk_lx_add_tar(put(prefixTar), prefixTar.length);
+  try { const boot = await fetchBytes("/real/boot.tar", "Wine", 0.45, 0.05); x.plonk_lx_provide_tar(put(boot), boot.length); } catch (e) { log("no boot archive (" + e.message + ")\n"); }
+  await fetchFile("/usr/local/bin/wine"); // what every program is started with
   fitScreen();
   // A snapshot of a booted, idle Wine session (wineserver, services, explorer and the invisible keeper process) skips
   // Wine's own start-up. Without one (or with a stale one) the session is booted here, which takes much longer.
   let warm = false;
   try {
-    const snap = await fetchBytes("/real/snapshot.bin", "session", 0.28, 0.72);
+    const snap = await fetchBytes("/real/snapshot.bin", "session", 0.5, 0.5);
     warm = x.plonk_lx_restore(put(snap), snap.length) === 0;
     if (!warm) log("snapshot not used: " + msg() + "\n");
   } catch (e) { log("no snapshot (" + e.message + "): cold start\n"); }

@@ -30,6 +30,8 @@ pub struct Mem {
 const P_OK: usize = 1;
 /// The page belongs to someone else (a shared file mapping): never recycled by this memory.
 const P_EXT: usize = 2;
+/// An external page that must not be written: the first write gives this memory its own copy (always with P_EXT).
+const P_COW: usize = 4;
 const CHUNK_PAGES: usize = 256;
 
 fn chunk_layout() -> std::alloc::Layout { std::alloc::Layout::from_size_align(CHUNK_PAGES * 4096, 4096).unwrap() }
@@ -132,6 +134,27 @@ impl Mem {
         self.drop_page(p);
         self.tbl[p] = ptr as usize | P_EXT | if accessible { P_OK } else { 0 };
     }
+    /// Paged: make the page at `a` a copy-on-write view of an external 4KB block (4KB aligned, must outlive this memory and
+    /// never change): reads use it directly, the first write replaces it with a private copy.
+    pub fn map_cow(&mut self, a: u32, ptr: *const u8, accessible: bool) {
+        let p = (a >> 12) as usize;
+        if !self.sparse || p >= self.tbl.len() || ptr as usize & 0xFFF != 0 { return; }
+        if self.cf[p] != 0 { self.smc = true; }
+        self.drop_page(p);
+        self.tbl[p] = ptr as usize | P_EXT | P_COW | if accessible { P_OK } else { 0 };
+    }
+    /// The write that found a copy-on-write page: give the page its own copy and return the host address for `a` in it.
+    #[cold]
+    fn cow_break(&mut self, a: u32) -> *mut u8 {
+        let i = (a >> 12) as usize;
+        let e = self.tbl[i];
+        let mine = self.take_page();
+        unsafe { core::ptr::copy_nonoverlapping((e & !0xFFF) as *const u8, mine, 4096) };
+        self.tbl[i] = mine as usize | (e & P_OK);
+        unsafe { mine.add((a & 0xFFF) as usize) }
+    }
+    /// Host bytes of the pages this memory owns itself (not the shared or copy-on-write ones it only refers to).
+    pub fn own_bytes(&self) -> usize { self.tbl.iter().filter(|&&e| e & !0xFFF != 0 && e & P_EXT == 0).count() * 4096 }
     /// Paged: give page `idx` these contents and accessibility (snapshot restore).
     pub fn set_page(&mut self, idx: u32, accessible: bool, data: &[u8]) {
         let i = idx as usize;
@@ -198,7 +221,9 @@ impl Mem {
     /// Bounds check for a write, plus self-modifying-code detection on flagged pages.
     #[inline(always)]
     fn chkw(&mut self, a: u32, n: u32) -> Result<*mut u8, Fault> {
-        let p = self.chk(a, n)?;
+        let mut p = self.chk(a, n)?;
+        // (chk succeeded on a paged memory: the access is within one page whose entry exists)
+        if self.sparse && unsafe { *self.tbl.get_unchecked((a >> 12) as usize) } & P_COW != 0 { p = self.cow_break(a); }
         // chk succeeded, so a + n <= len and both page indexes are in range of cf (len/4096 + 2 entries)
         let hit = unsafe { *self.cf.get_unchecked((a >> 12) as usize) | *self.cf.get_unchecked(((a + n.max(1) - 1) >> 12) as usize) };
         if hit != 0 { self.smc = true; }

@@ -1,6 +1,6 @@
 // Dev server: node web/serve.mjs [port]  -> http://localhost:8080/web/index.html
 import { createServer } from "node:http";
-import { createReadStream, readFileSync, writeFileSync, unlinkSync, readdirSync, existsSync, statSync } from "node:fs";
+import { createReadStream, readFileSync, writeFileSync, unlinkSync, readdirSync, existsSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { gzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
@@ -36,6 +36,30 @@ function buildPack() {
   return { gz, etag };
 }
 pack = buildPack(); // ready before the first request
+// wine/root.tar parsed once per version of the file: where each regular file's bytes are, and the index text for the kernel.
+let rootIx = null;
+function rootIndex() {
+  const src = join(root, "wine/root.tar");
+  if (!existsSync(src)) return null;
+  const st = statSync(src), key = st.size + "-" + Math.round(st.mtimeMs);
+  if (rootIx?.key === key) return rootIx;
+  const fd = openSync(src, "r"), h = Buffer.alloc(512), byName = new Map(), lines = [];
+  const field = (a, b) => { const s = h.subarray(a, b), z = s.indexOf(0); return s.subarray(0, z < 0 ? s.length : z).toString("utf8"); };
+  let off = 0, long = null;
+  while (readSync(fd, h, 0, 512, off) === 512 && h[0] !== 0) {
+    const size = parseInt(field(124, 136).trim(), 8) || 0, type = h[156] === 0 ? "0" : String.fromCharCode(h[156]);
+    const body = off + 512;
+    off = body + Math.ceil(size / 512) * 512;
+    if (type === "L") { const b = Buffer.alloc(size); readSync(fd, b, 0, size, body); const z = b.indexOf(0); long = b.subarray(0, z < 0 ? size : z).toString("utf8"); continue; }
+    const pre = field(345, 500), name = long ?? (pre ? pre + "/" + field(0, 100) : field(0, 100));
+    long = null;
+    lines.push([type, size, name, field(157, 257)].join("\t"));
+    if (type === "0") byName.set("/" + name.replace(/^\.\//, ""), { off: body, size });
+  }
+  closeSync(fd);
+  const read = (e) => { const b = Buffer.alloc(e.size), f = openSync(src, "r"); readSync(f, b, 0, e.size, e.off); closeSync(f); return b; };
+  return (rootIx = { key, byName, text: lines.join("\n") + "\n", read });
+}
 createServer((req, res) => {
   const url = decodeURIComponent(req.url.split("?")[0]);
   if (url === "/pack") {
@@ -82,6 +106,50 @@ createServer((req, res) => {
     }
     res.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": "gzip", etag, "cache-control": "no-cache", "content-length": statSync(gzFile).size, "x-size": st.size });
     return createReadStream(gzFile).pipe(res);
+  }
+  // On-demand files of the Wine install: /real/index lists the archive (the page declares it to the kernel without the
+  // file bodies), /real/boot.tar holds the files the snapshot refers to (wine/snapshot.bin.files, written with the snapshot),
+  // /real/f/<path> is one file, fetched when the guest first opens it.
+  if (url === "/real/index" || url === "/real/boot.tar" || url.startsWith("/real/f/")) {
+    const ix = rootIndex();
+    if (!ix) { res.statusCode = 404; return res.end("missing root.tar (see wine/build32.sh)"); }
+    const send = (body, etag) => {
+      if (req.headers["if-none-match"] === etag) { res.statusCode = 304; return res.end(); }
+      const gz = etag === ix.gzTag ? ix.gz : gzipSync(body, { level: 5 });
+      if (body.length > 8 << 20) { ix.gzTag = etag; ix.gz = gz; } // the boot archive: compressed once
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": "gzip", etag, "cache-control": "no-cache", "content-length": gz.length, "x-size": body.length });
+      res.end(gz);
+    };
+    if (url === "/real/index") return send(Buffer.from(ix.text), `"ix-${ix.key}"`);
+    if (url === "/real/boot.tar") {
+      const list = join(root, "wine/snapshot.bin.files");
+      if (!existsSync(list)) { res.statusCode = 404; return res.end("no file list for the snapshot"); }
+      const lk = ix.key + "-" + Math.round(statSync(list).mtimeMs);
+      if (ix.bootKey !== lk) {
+        const parts = [];
+        for (const n of readFileSync(list, "utf8").split("\n").filter(Boolean)) {
+          const e = ix.byName.get(n);
+          if (!e) continue;
+          const nb = Buffer.from(n.slice(1) + "\0");
+          const hdr = (name, type, size) => { // a GNU long-name record carries the path, so the name field never overflows
+            const h = Buffer.alloc(512);
+            h.write(name, 0); h.write("0000644\0", 100); h.write(size.toString(8).padStart(11, "0") + "\0", 124); h.write("        ", 148); h[156] = type.charCodeAt(0);
+            h.write("ustar  \0", 257);
+            let sum = 0; for (const b of h) sum += b;
+            h.write(sum.toString(8).padStart(6, "0") + "\0 ", 148);
+            return h;
+          };
+          const pad = (len) => Buffer.alloc((512 - (len % 512)) % 512);
+          parts.push(hdr("././@LongLink", "L", nb.length), nb, pad(nb.length), hdr("f", "0", e.size), ix.read(e), pad(e.size));
+        }
+        parts.push(Buffer.alloc(1024));
+        ix.boot = Buffer.concat(parts); ix.bootKey = lk;
+      }
+      return send(ix.boot, `"boot-${lk}"`);
+    }
+    const e = ix.byName.get(url.slice(7));
+    if (!e) { res.statusCode = 404; return res.end("no such file"); }
+    return send(ix.read(e), `"f-${ix.key}-${e.off}"`);
   }
   if (url.startsWith("/file/")) {
     const n = url.slice(6).replace(/[\\/]/g, "");

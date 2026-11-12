@@ -38,7 +38,35 @@ pub unsafe extern "C" fn plonk_lx_add_tar(data: *mut u8, len: u32) {
 #[no_mangle]
 pub unsafe extern "C" fn plonk_lx_add_file(name: *mut u8, nlen: u32, data: *mut u8, dlen: u32) {
     let n = String::from_utf8_lossy(&Vec::from_raw_parts(name, nlen as usize, nlen as usize)).into_owned();
-    lx().files.insert(n, Vec::from_raw_parts(data, dlen as usize, dlen as usize));
+    lx().provide(n, Vec::from_raw_parts(data, dlen as usize, dlen as usize));
+}
+
+/// Declare an archive's contents without the file bodies (see `LinuxProc::add_index`). Takes ownership of the buffer.
+///
+/// # Safety
+/// `data` must be an exact-size allocation returned by `plonk_alloc` and not used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn plonk_lx_add_index(data: *mut u8, len: u32) {
+    let v = Vec::from_raw_parts(data, len as usize, len as usize);
+    lx().add_index(&String::from_utf8_lossy(&v));
+}
+
+/// Supply the regular files of a tar archive (see `LinuxProc::provide_tar`). Takes ownership of the buffer.
+///
+/// # Safety
+/// `data` must be an exact-size allocation returned by `plonk_alloc` and not used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn plonk_lx_provide_tar(data: *mut u8, len: u32) {
+    let v = Vec::from_raw_parts(data, len as usize, len as usize);
+    lx().provide_tar(&v);
+}
+
+/// The files the guest is waiting for, one path per line, as the message (`plonk_lx_msg`). Returns how many.
+#[no_mangle]
+pub unsafe extern "C" fn plonk_lx_wanted() -> u32 {
+    let w = lx().take_wanted();
+    MSG = w.join("\n");
+    w.len() as u32
 }
 
 /// Start a program: `cmd` is the argument vector separated by newlines, argv[0] being a guest path (normally

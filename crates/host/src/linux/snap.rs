@@ -294,6 +294,13 @@ impl LinuxProc {
         }
         let npool = r.u32()? as usize;
         let pool = r.take(npool * 4096)?;
+        // the page contents live once, outside the processes, which refer to them copy-on-write (identical pages are shared)
+        let lay = |n: usize| std::alloc::Layout::from_size_align(n.max(1) * 4096, 4096).unwrap();
+        if self.snap_pool.0 != 0 { unsafe { std::alloc::dealloc(self.snap_pool.0 as *mut u8, lay(self.snap_pool.1)) }; }
+        let base = unsafe { std::alloc::alloc(lay(npool)) };
+        if base.is_null() { return Err("out of memory".into()); }
+        unsafe { core::ptr::copy_nonoverlapping(pool.as_ptr(), base, pool.len()) };
+        self.snap_pool = (base as usize, npool);
         for _ in 0..r.u32()? {
             let (pid, ppid, brk, brk_start, umask) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
             let exit = r.opt()?.map(|c| c as u32);
@@ -324,7 +331,8 @@ impl LinuxProc {
                     continue;
                 }
                 let id = (v >> 1) as usize;
-                p.mem.set_page(idx, v & 1 != 0, pool.get(id * 4096..id * 4096 + 4096).ok_or("bad page id")?);
+                if id >= npool { return Err("bad page id".into()); }
+                p.mem.map_cow(idx << 12, unsafe { base.add(id * 4096) }, v & 1 != 0);
             }
             self.procs.push(p);
         }

@@ -86,6 +86,7 @@ fn main() {
     if let Ok(f) = std::env::var("SNAP") {
         print!("{}", p.ps());
         let t = p.snapshot(); println!("snapshot: {} MB", t.len() >> 20);
+        std::fs::write(format!("{f}.files"), p.pristine_files().join(&char::from(10).to_string()) + &char::from(10).to_string()).unwrap(); // what the page loads up front
         std::fs::write(f, t).unwrap();
     }
     if std::env::var("SAVE").is_ok() { // shut Wine down cleanly so wineserver writes the registry files
