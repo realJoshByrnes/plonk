@@ -119,6 +119,32 @@ pub extern "C" fn plonk_lx_set_screen(w: u32, h: u32) {
     if p.screen != (w, h) { p.screen = (w, h); p.push_event(8, 0, w as i32, h as i32, 0, 0); }
 }
 
+static mut SCENE: Vec<u32> = Vec::new();
+/// The windows to draw, bottom first, for a GPU compositor: [count, then per window: hwnd, x, y, width, height, address of the
+/// BGRX pixels, dirty left, top, right, bottom (surface coordinates; right <= left: unchanged)]. Valid until the next call.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_lx_scene() -> *const u32 {
+    let p = lx();
+    unsafe {
+        SCENE.clear();
+        SCENE.push(0);
+        let mut n = 0;
+        for h in p.zorder.iter().rev() {
+            let Some(w) = p.windows.get(h) else { continue };
+            if !w.visible || w.pixels.is_empty() { continue; }
+            SCENE.extend_from_slice(&[w.hwnd, w.rect[0] as u32, w.rect[1] as u32, w.sw, w.sh, w.pixels.as_ptr() as u32,
+                w.dirty[0] as u32, w.dirty[1] as u32, w.dirty[2] as u32, w.dirty[3] as u32]);
+            n += 1;
+        }
+        SCENE[0] = n;
+        SCENE.as_ptr()
+    }
+}
+/// The page has taken the pending changes of every window.
+#[no_mangle]
+pub extern "C" fn plonk_lx_scene_done() { for w in lx().windows.values_mut() { w.dirty = [0; 4]; } }
+
 /// Compose the screen; returns a pointer to width*height*4 RGBA bytes valid until the next call.
 #[no_mangle]
 #[allow(static_mut_refs)]

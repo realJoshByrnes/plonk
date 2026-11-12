@@ -62,6 +62,8 @@ pub struct HostWin {
     pub style: u32, pub ex_style: u32, pub visible: bool, pub title: String,
     /// Surface size and its BGRX pixels (top-down).
     pub sw: u32, pub sh: u32, pub pixels: Vec<u8>,
+    /// The part of the surface changed since the page last took it (l, t, r, b; empty when r <= l).
+    pub dirty: [i32; 4],
 }
 
 /// An open file description (shared by dup'ed descriptors and descriptors passed over sockets).
@@ -392,6 +394,10 @@ impl LinuxProc {
                 let (mut l, mut t, mut r, mut b) = if a[4] != 0 { (d(0), d(1), d(2), d(3)) } else { (0, 0, sw as i32, sh as i32) };
                 if w.sw != sw || w.sh != sh { w.sw = sw; w.sh = sh; w.pixels = vec![0; (sw * sh * 4) as usize]; (l, t, r, b) = (0, 0, sw as i32, sh as i32); }
                 (l, t, r, b) = (l.max(0), t.max(0), r.min(sw as i32), b.min(sh as i32));
+                if r > l && b > t {
+                    let dd = &mut w.dirty;
+                    *dd = if dd[2] <= dd[0] { [l, t, r, b] } else { [dd[0].min(l), dd[1].min(t), dd[2].max(r), dd[3].max(b)] };
+                }
                 for y in t..b.max(t) {
                     if r <= l { break; }
                     let off = (y as u32 * sw + l as u32) * 4;

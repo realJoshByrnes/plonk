@@ -35,7 +35,15 @@
 // The real-Wine path: unmodified Wine (wine, wineserver, ntdll.so, win32u.so, PE DLLs) on the Linux personality of the
 // interpreter (crates/host/src/linux.rs), drawing through wineplonk.drv. See crates/host/src/wasm_linux.rs for the exports.
 const $ = (id) => document.getElementById(id);
-const canvas = $("screen"), ctx = canvas.getContext("2d");
+const canvas = $("screen");
+// The desktop is composed on the GPU (web/compositor.mjs) on this one canvas; without WebGL2 (or with ?cpu) the kernel composes
+// it on the CPU and it is drawn with putImageData.
+let comp = null, ctx = null;
+const wantGpu = !new URLSearchParams(location.search).has("cpu");
+if (wantGpu) { try { comp = (await import("./compositor.mjs")).createCompositor(canvas); } catch (e) { console.warn(e); } }
+if (!comp) ctx = canvas.getContext("2d");
+const inCanvas = new URLSearchParams(location.search).has("overlay") ? false : true; // ?overlay: 3D on its own canvas over the GPU-composed desktop
+let glFrame = null, glDirty = false; // the latest 3D frame, drawn by the compositor
 let W = canvas.width, H = canvas.height;
 const logEl = $("log");
 const log = (s) => { logEl.textContent += s; if (logEl.textContent.length > 20000) logEl.textContent = logEl.textContent.slice(-15000); logEl.scrollTop = logEl.scrollHeight; };
@@ -151,7 +159,10 @@ function ensureGL() {
   const q = new URLSearchParams(location.search), direct = !q.has("nodirect");
   glInit = import("./gl_backend.mjs").then((m) => m.createGLBackend({ prefer: q.get("gl") || "webgpu", direct })).then((b) => {
     const ov = $("glov");
-    if (direct) { // the finished frame goes straight to the overlay canvas (no read-back)
+    if (comp && inCanvas) { // the frame is drawn into the desktop canvas by the compositor
+      b.onFrame = (w, h, bmp) => { glFrame?.close?.(); glFrame = bmp; glDirty = true; };
+      b.onPresent = (w, h, rgba) => { glFrame = { w, h, rgba: rgba.slice() }; glDirty = true; };
+    } else if (direct) { // the finished frame goes straight to the overlay canvas (no read-back)
       const ovctx = ov.getContext("bitmaprenderer");
       b.onFrame = (w, h, bmp) => { if (ov.width !== w || ov.height !== h) { ov.width = w; ov.height = h; } ovctx.transferFromImageBitmap(bmp); };
       b.onPresent = () => {};
@@ -164,7 +175,12 @@ function ensureGL() {
     kick();
   }).catch((e) => { log("3D backend failed: " + e + String.fromCharCode(10)); glInit = null; x.plonk_lx_gl_clear(); });
 }
+const glOn = () => { const r = new Uint32Array(x.memory.buffer, x.plonk_lx_gl_rect() >>> 0, 5); return !!glb && r[4] === 1 && r[2] > 0; };
 function syncOverlay() {
+  if (comp && inCanvas) { // only the 3D frame changed: draw just that
+    if (glDirty) { glDirty = false; if (glFrame && glOn()) { const r = new Int32Array(x.memory.buffer, x.plonk_lx_gl_rect() >>> 0, 4); comp.over({ source: glFrame, x: r[0], y: r[1], w: r[2], h: r[3] }, W, H); } }
+    return;
+  }
   const ov = $("glov"), r = new Uint32Array(x.memory.buffer, x.plonk_lx_gl_rect() >>> 0, 5), k = canvas.getBoundingClientRect().width / W;
   const on = !!glb && r[4] === 1 && r[2] > 0;
   ov.style.display = on ? "block" : "none";
@@ -181,6 +197,15 @@ function pumpGL() {
   syncOverlay();
 }
 function paint() {
+  if (comp) {
+    const ptr = x.plonk_lx_scene() >>> 0, n = new Uint32Array(x.memory.buffer, ptr, 1)[0];
+    let over = null;
+    if (inCanvas && glFrame && glOn()) { const r = new Int32Array(x.memory.buffer, x.plonk_lx_gl_rect() >>> 0, 4); over = { source: glFrame, x: r[0], y: r[1], w: r[2], h: r[3] }; }
+    comp.frame(x.memory.buffer, new Uint32Array(x.memory.buffer, ptr, 1 + n * 10), W, H, over);
+    x.plonk_lx_scene_done();
+    glDirty = false;
+    return;
+  }
   const p = x.plonk_lx_compose();
   ctx.putImageData(new ImageData(new Uint8ClampedArray(x.memory.buffer, p, W * H * 4), W, H), 0, 0);
   const k = x.plonk_lx_cursor();

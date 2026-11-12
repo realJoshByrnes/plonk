@@ -42,7 +42,7 @@ try {
     await sleep(2000);
     const st = await evalJs(`document.getElementById("stxt").textContent`);
     // a window is up once the canvas is no longer one flat colour
-    const varied = await evalJs(`(() => { const c = document.getElementById("screen"), d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; for (let i = 4; i < d.length; i += 4096) if (d[i] !== d[0] || d[i + 1] !== d[1]) return true; return false; })()`);
+    const varied = await evalJs(`(() => { const c = document.getElementById("screen"), t = document.createElement("canvas"); t.width = c.width; t.height = c.height; const x2 = t.getContext("2d"); x2.drawImage(c, 0, 0); const d = x2.getImageData(0, 0, c.width, c.height).data; for (let i = 4; i < d.length; i += 4096) if (d[i] !== d[0] || d[i + 1] !== d[1]) return true; return false; })()`);
     if (varied && !shownAt) { shownAt = Date.now() - t0; console.log(`first window pixels after ${(shownAt / 1000).toFixed(0)} s (${st})`); }
     if (shownAt && Date.now() - t0 > shownAt + +(process.env.AFTER || 6) * 1000) break;
   }
