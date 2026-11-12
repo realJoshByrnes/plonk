@@ -192,7 +192,7 @@ fn flag_use(i: &Insn) -> u8 {
 }
 
 /// Translate one instruction. `next` is the address after it, `flags` whether its flag results are needed. False: unsupported.
-fn insn(f: &mut Fx, i: &Insn, next: u32, flags: bool) -> bool {
+fn insn(f: &mut Fx, i: &Insn, next: u32, flags: bool, side_exit: Option<u32>) -> bool {
     let w = i.w as u32;
     match i.h {
         H::Nop => {}
@@ -326,6 +326,14 @@ fn insn(f: &mut Fx, i: &Insn, next: u32, flags: bool) -> bool {
             f.get(CPU); f.get(A); f.c(4); f.add(); f.store(32, Fx::roff(ESP as u8, 32));
             f.setr(EBP as u8, 32, T);
         }
+        H::Jcc if side_exit.is_some() => { // not the end of the block: taken leaves through a side exit, not taken falls through
+            let k = side_exit.unwrap();
+            f.cond(i.aux); f.op(0x04); f.op(0x40);
+            f.set_eip(|f| f.c(i.imm));
+            f.get(CPU); f.get(EF); f.store(32, O_EF);
+            f.c((k + 1) | 0x8000_0000); f.op(0x0F);
+            f.op(0x0B);
+        }
         H::Jcc => f.set_eip(|f| { f.c(i.imm); f.c(next); f.cond(i.aux); f.op(0x1B); }),
         H::Jmp => f.set_eip(|f| f.c(i.imm)),
         H::Call => { f.push(|f| f.c(next)); f.set_eip(|f| f.c(i.imm)); }
@@ -349,26 +357,27 @@ fn translate(insns: &[Insn], pc: u32) -> Option<(Vec<u8>, u32)> {
     f.b.extend_from_slice(&[2, 9, 0x7F, 1, 0x7E]);
     f.get(CPU); f.load(32, O_EF); f.set(EF);
     f.op(0x02); f.op(0x40); // block: a branch out of it is a bail-out
-    let (mut at, mut jn) = (pc, 0u32);
+    let (mut at, mut jn, mut ended) = (pc, 0u32, false);
     for (k, i) in insns.iter().enumerate() {
         // the flags of this instruction are dead when the next one that touches flags replaces them all
         let needed = insns[k + 1..].iter().map(flag_use).find(|&u| u != 0).map_or(true, |u| u == 1);
         let mark = f.b.len();
         f.c(k as u32); f.set(K);
         let next = at.wrapping_add(i.len as u32);
-        if !insn(&mut f, i, next, needed) { f.b.truncate(mark); break; }
+        let last = k + 1 == insns.len();
+        if !insn(&mut f, i, next, needed, (!last && i.h == H::Jcc).then_some(k as u32)) { f.b.truncate(mark); break; }
         at = next;
         jn += 1;
-        if super::is_term(i.h) { break; }
+        if super::is_term(i.h) && (last || i.h != H::Jcc) { ended = true; break; }
     }
-    finish(f, insns, at, jn)
+    finish(f, insns, at, jn, ended)
 }
 
-fn finish(mut f: Fx, insns: &[Insn], at: u32, jn: u32) -> Option<(Vec<u8>, u32)> {
+fn finish(mut f: Fx, insns: &[Insn], at: u32, jn: u32, ended: bool) -> Option<(Vec<u8>, u32)> {
     if jn < 2 && (jn as usize) < insns.len() { return None; }
     if jn == 0 { return None; }
     // done: where execution continues (a terminator has stored it already), the flags, and the count
-    if !super::is_term(insns[jn as usize - 1].h) { f.set_eip(|f| f.c(at)); }
+    if !ended { f.set_eip(|f| f.c(at)); }
     f.get(CPU); f.get(EF); f.store(32, O_EF);
     f.c(jn); f.op(0x0F); // return
     f.op(0x0B); // end of the block: bailed out before instruction K

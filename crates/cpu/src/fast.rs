@@ -345,7 +345,7 @@ impl Cache {
             p = p.wrapping_add(ins.len as u32);
             let h = ins.h;
             self.insns.push(ins);
-            if is_term(h) { break; }
+            if is_term(h) && h != H::Jcc { break; } // a conditional jump does not end the block: the block follows the fall-through path
         }
         let blen = p.wrapping_sub(pc);
         mem.mark_code(pc, blen);
@@ -580,7 +580,7 @@ impl Cpu {
                         t!(self.wrrm(mem, i, w, r));
                         self.eflags = (f & !CF) | if a != 0 { CF } else { 0 };
                     }
-                    H::Jcc => { if self.cond(i.aux) { next = i.imm; } }
+                    H::Jcc => { if self.cond(i.aux) { next = i.imm; brk = true; } } // taken: leave the block
                     H::Jmp => next = i.imm,
                     H::Call => {
                         let sp = self.r[ESP].wrapping_sub(4);
@@ -722,11 +722,14 @@ impl Cpu {
             }
             let mut o = BlockOut { done: 0, pc: pc0, last: pc0, st: ST_OK };
             let mut jd = 0usize;
+            let mut side_exit = false;
             if blk.jit != 0 && blk.jn as u64 <= left {
                 if let Some((t, c, l)) = jview {
                     jd = unsafe { jit::call(blk.jit, self as *mut Cpu, t, c, l) } as usize;
+                    let side = jd >> 31 != 0; side_exit = side; // left through a taken conditional jump: eip is set, the rest of the block is skipped
+                    jd &= 0x7FFF_FFFF;
                     o.done = jd as u32;
-                    o.pc = if jd == blk.jn as usize { self.eip } else {
+                    o.pc = if side || jd == blk.jn as usize { self.eip } else {
                         let mut p = pc0;
                         for k in 0..jd { p = p.wrapping_add(unsafe { (*ip.add(k)).len } as u32); }
                         p
@@ -734,6 +737,7 @@ impl Cpu {
                 }
             }
             if prof { jit::tally(jd as u64, (n - jd.min(n)) as u64, blk.jit != 0 && jd < blk.jn as usize, blk.jit != 0); }
+            if side_exit { jd = n; }
             if jd < n {
                 let r = unsafe { self.exec(mem, ip.add(jd), n - jd, o.pc) };
                 o = BlockOut { done: o.done + r.done, pc: r.pc, last: if r.done > 0 { r.last } else { o.last }, st: r.st };
