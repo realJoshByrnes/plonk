@@ -1,2 +1,2 @@
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "target-feature=+bulk-memory,+nontrapping-fptoint,+sign-ext,+simd128"]
+rustflags = ["-C", "target-feature=+bulk-memory,+nontrapping-fptoint,+sign-ext,+simd128", "-C", "link-arg=--export-table", "-C", "link-arg=--growable-table"]

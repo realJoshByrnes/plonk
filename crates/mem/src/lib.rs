@@ -65,6 +65,8 @@ impl Mem {
         m
     }
     pub fn is_sparse(&self) -> bool { self.sparse }
+    /// For translated code: (address of the page table, of the code flags, size of the address space). Paged memories only.
+    pub fn jit_view(&self) -> Option<(usize, usize, u32)> { self.sparse.then(|| (self.tbl.as_ptr() as usize, self.cf.as_ptr() as usize, self.len)) }
     /// Host bytes held by a paged memory.
     pub fn committed(&self) -> usize { self.chunks.len() * CHUNK_PAGES * 4096 }
 

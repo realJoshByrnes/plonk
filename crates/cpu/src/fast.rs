@@ -13,6 +13,7 @@
 //! memory the first time it is used in every `run` call (`epoch`).
 use crate::*;
 use plonk_mem::Fault;
+pub mod jit;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -255,7 +256,7 @@ fn is_term(h: H) -> bool {
 }
 
 #[derive(Clone, Copy)]
-struct Block { pc: u32, epoch: u32, start: u32, n: u32, boff: u32, blen: u32, nx: [(u32, u32); 2] }
+struct Block { pc: u32, epoch: u32, start: u32, n: u32, boff: u32, blen: u32, nx: [(u32, u32); 2], hot: u32, jit: u32, jn: u32 }
 
 const MAP_BITS: u32 = 14;
 const MAX_BLOCKS: usize = 1 << 15;
@@ -348,7 +349,7 @@ impl Cache {
         }
         let blen = p.wrapping_sub(pc);
         mem.mark_code(pc, blen);
-        self.blocks.push(Block { pc, epoch: self.epoch, start: start as u32, n: n as u32, boff: boff as u32, blen, nx: [(NONE, 0); 2] });
+        self.blocks.push(Block { pc, epoch: self.epoch, start: start as u32, n: n as u32, boff: boff as u32, blen, nx: [(NONE, 0); 2], hot: 0, jit: 0, jn: 0 });
         let bi = self.blocks.len() - 1;
         self.map[h] = bi as u32;
         bi
@@ -703,7 +704,32 @@ impl Cpu {
             let blk = cache.blocks[bi];
             let n = (blk.n as u64).min(left) as usize;
             let ip = unsafe { cache.insns.as_ptr().add(blk.start as usize) };
-            let o = unsafe { self.exec(mem, ip, n, pc0) };
+            if jit::enabled() && blk.jit == 0 {
+                let b = &mut cache.blocks[bi];
+                b.hot += 1;
+                if b.hot >= 40 && b.hot % 64 == 40 {
+                    let (s, e) = (blk.start as usize, (blk.start + blk.n) as usize);
+                    let bytes = &cache.bytes[blk.boff as usize..(blk.boff + blk.blen) as usize];
+                    if let Some((idx, jn)) = jit::want(pc0, bytes, &cache.insns[s..e]) { let b = &mut cache.blocks[bi]; b.jit = idx; b.jn = jn; }
+                }
+            }
+            let mut o = BlockOut { done: 0, pc: pc0, last: pc0, st: ST_OK };
+            let mut jd = 0usize;
+            if blk.jit != 0 && blk.jn as u64 <= left {
+                if let Some((t, c, l)) = mem.jit_view() {
+                    jd = unsafe { jit::call(blk.jit, self as *mut Cpu, t, c, l) } as usize;
+                    o.done = jd as u32;
+                    o.pc = if jd == blk.jn as usize { self.eip } else {
+                        let mut p = pc0;
+                        for k in 0..jd { p = p.wrapping_add(unsafe { (*ip.add(k)).len } as u32); }
+                        p
+                    };
+                }
+            }
+            if jd < n {
+                let r = unsafe { self.exec(mem, ip.add(jd), n - jd, o.pc) };
+                o = BlockOut { done: o.done + r.done, pc: r.pc, last: if r.done > 0 { r.last } else { o.last }, st: r.st };
+            }
             left -= o.done as u64;
             match o.st {
                 ST_STOP => break self.pending.take().unwrap(),

@@ -24,6 +24,7 @@ pub const OF: u32 = 0x800;
 const FLAGS_MASK: u32 = CF | PF | AF | ZF | SF | 0x100 | 0x200 | DF | OF;
 
 pub use fast::CacheSlot;
+pub use fast::jit;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Exit {

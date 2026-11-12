@@ -84,6 +84,23 @@ async function fetchFile(path) {
   }
   kick();
 }
+// Hot guest code is translated to wasm by the kernel; the browser compiles each batch off the main thread and the kernel
+// is told where the functions landed in the table. ?nojit turns it off.
+const jitOn = !new URLSearchParams(location.search).has("nojit");
+let jitBusy = false;
+function jitPump() {
+  if (jitBusy) return;
+  const n = x.plonk_lx_jit_take();
+  if (!n) return;
+  jitBusy = true;
+  const bytes = new Uint8Array(x.memory.buffer, x.plonk_lx_jit_ptr(), n).slice(), id = x.plonk_lx_jit_id(), count = x.plonk_lx_jit_count();
+  WebAssembly.instantiate(bytes, { e: { m: x.memory } }).then(({ instance }) => {
+    const table = x.__indirect_function_table, first = table.length;
+    table.grow(count);
+    for (let i = 0; i < count; i++) table.set(first + i, instance.exports[i]);
+    x.plonk_lx_jit_installed(id, first);
+  }).catch((e) => { log("jit module failed: " + e.message + "\n"); x.plonk_lx_jit_installed(id, 0); }).finally(() => { jitBusy = false; });
+}
 function fetchWanted() { if (x.plonk_lx_wanted()) for (const p of msg().split("\n")) fetchFile(p); }
 function spawn(...args) {
   const c = enc.encode(["/usr/local/bin/wine", ...args].join("\n")), p = put(c);
@@ -115,6 +132,7 @@ function pump() {
     if (pr !== presents) { presents = pr; pumpGL(); }
   } while (r === 0 && performance.now() - t0 < 12);
   fetchWanted();
+  if (jitOn) jitPump();
   x.plonk_lx_take_stdout();
   const out = msg();
   if (out) log(out);
@@ -223,6 +241,7 @@ try {
     wine: hold(fetch("/real/f/usr/local/bin/wine").then((r) => r.arrayBuffer())) };
   const { instance } = await WebAssembly.instantiateStreaming(fetch("/target/wasm32-unknown-unknown/release/plonk_host.wasm"), {});
   x = instance.exports;
+  if (!new URLSearchParams(location.search).has("nojit")) x.plonk_lx_jit_enable(1);
   window.__lx = { x, msg }; // for debugging from the console / headless checks
   // The Wine install is only declared (names and sizes); a file's contents are fetched when the guest first opens it
   // (fetchWanted). The files the snapshot's processes already have open come in one archive up front.

@@ -169,6 +169,29 @@ pub extern "C" fn plonk_lx_key(down: u32, vk: u32, scan: u32) { lx().push_event(
 #[no_mangle]
 pub extern "C" fn plonk_lx_cursor() -> i32 { lx().cursor }
 
+/// Translation of hot code to wasm: turn it on, collect the next module of translated blocks (length, 0 = none; then
+/// `plonk_lx_jit_ptr` / `plonk_lx_jit_id` / `plonk_lx_jit_count`), and report it installed in the function table.
+#[no_mangle]
+pub extern "C" fn plonk_lx_jit_enable(on: u32) { plonk_cpu::jit::enable(on != 0); }
+static mut JIT_MOD: (u32, u32, Vec<u8>) = (0, 0, Vec::new());
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_lx_jit_take() -> u32 {
+    unsafe { match plonk_cpu::jit::take_module() { Some(m) => { JIT_MOD = m; JIT_MOD.2.len() as u32 } None => 0 } }
+}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_lx_jit_ptr() -> *const u8 { unsafe { JIT_MOD.2.as_ptr() } }
+#[no_mangle]
+pub extern "C" fn plonk_lx_jit_id() -> u32 { unsafe { JIT_MOD.0 } }
+#[no_mangle]
+pub extern "C" fn plonk_lx_jit_count() -> u32 { unsafe { JIT_MOD.1 } }
+#[no_mangle]
+pub extern "C" fn plonk_lx_jit_installed(id: u32, first: u32) { plonk_cpu::jit::installed(id, first); }
+/// Functions installed so far.
+#[no_mangle]
+pub extern "C" fn plonk_lx_jit_stats() -> u32 { plonk_cpu::jit::stats().0 as u32 }
+
 /// Millions of guest instructions executed so far.
 #[no_mangle]
 pub extern "C" fn plonk_lx_mips_total() -> u32 { (lx().retired() / 1_000_000) as u32 }
