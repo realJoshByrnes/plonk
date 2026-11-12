@@ -23,7 +23,7 @@
   <button data-cmd="notepad" disabled>Notepad</button>
   <button data-cmd="winemine" disabled>Minesweeper</button>
   <button data-cmd="regedit" disabled>Regedit</button>
-  <button data-cmd="winefile" disabled>File manager</button>
+  <button data-cmd="winfile.exe" disabled>File manager</button>
   <button data-cmd="winecfg" disabled>Wine config</button>
   <select id="guests" disabled><option value="">Test programs…</option></select>
   <label class="btn">Run your own .exe…<input id="upload" type="file" multiple hidden></label>
@@ -303,7 +303,7 @@ try {
   status("ready");
   log(`ready in ${((performance.now() - tLoad) / 1000).toFixed(1)} s
 `);
-  for (const b of document.querySelectorAll("#bar button")) { b.disabled = false; b.onclick = () => { spawn(b.dataset.cmd); canvas.focus(); }; }
+  for (const b of document.querySelectorAll("#bar button")) { b.disabled = false; b.onclick = async () => { const c = b.dataset.cmd; if (c.endsWith(".exe")) { addFile("/home/user/" + c, new Uint8Array(await (await fetch("/tests/guests/" + c)).arrayBuffer())); spawn("/home/user/" + c); } else spawn(c); canvas.focus(); }; }
   const man = await (await fetch("/manifest.json")).json();
   const sel = $("guests");
   for (const a of man.apps) sel.add(new Option(a, a));
