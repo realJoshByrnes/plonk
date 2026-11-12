@@ -151,6 +151,7 @@ let dark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)
       gl.uniform2f(u.screen, W, H);
       gl.clearColor(58 / 255, 110 / 255, 165 / 255, 1); gl.clear(gl.COLOR_BUFFER_BIT);
       const s32 = new Int32Array(scene.buffer, scene.byteOffset, scene.length);
+      if (window.__dbg) window.__dbgLast = Array.from(s32);
       const seen = new Set();
       gl.activeTexture(gl.TEXTURE0);
       let activeIdx = -1;

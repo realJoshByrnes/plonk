@@ -157,7 +157,7 @@ pub extern "C" fn plonk_lx_scene() -> *const u32 {
             if !w.visible || w.pixels.is_empty() || w.style & 0x2000_0000 != 0 { continue; } // minimized windows are not drawn
             SCENE.extend_from_slice(&[w.hwnd, w.rect[0] as u32, w.rect[1] as u32, w.sw, w.sh, w.pixels.as_ptr() as u32,
                 w.dirty[0] as u32, w.dirty[1] as u32, w.dirty[2] as u32, w.dirty[3] as u32,
-                w.cap[0] as u32, w.cap[1] as u32, w.cap[2] as u32, w.cap[3] as u32, w.cap[4] as u32, w.cap[5] as u32, w.cap[6] as u32, w.title_gen]);
+                w.cap[0] as u32, w.cap[1] as u32, w.cap[2] as u32, w.cap[3] as u32, w.cap[4] as u32, w.cap[5] as u32, w.title_gen]);
             n += 1;
         }
         SCENE[0] = n;

@@ -64,6 +64,7 @@ try {
     if (!process.env.HOLD) await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at(...p2)[0], y: at(...p2)[1], button: "left", clickCount: 1 });
     await sleep(2500);
   }
+  if (process.env.EVAL) console.log("eval:", await evalJs(process.env.EVAL));
   console.log("gl:", await evalJs(`JSON.stringify({ov: document.getElementById("glov").style.cssText, w: document.getElementById("glov").width, nz: window.__glNonZero})`));
   console.log("kernel:", await evalJs(`(() => { const { x, msg } = window.__lx; x.plonk_lx_ps(); return "presents " + x.plonk_lx_gl_presents() + " queued " + x.plonk_lx_gl_len() + String.fromCharCode(10) + msg().split(String.fromCharCode(10)).filter((l) => !l.includes("exited")).map((l) => l.slice(0, 160)).join(String.fromCharCode(10)); })()`));
   console.log("status:", await evalJs(`document.getElementById("stxt").textContent`));
