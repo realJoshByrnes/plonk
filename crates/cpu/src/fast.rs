@@ -261,6 +261,7 @@ struct Block { pc: u32, epoch: u32, start: u32, n: u32, boff: u32, blen: u32, nx
 const MAP_BITS: u32 = 14;
 const MAX_BLOCKS: usize = 1 << 15;
 const MAX_INSNS: usize = 1 << 19;
+const HOT: u32 = 40;
 const BLOCK_MAX: usize = 64;
 const NONE: u32 = u32::MAX;
 
@@ -714,7 +715,7 @@ impl Cpu {
             if jit_on && blk.jit == 0 {
                 let b = &mut cache.blocks[bi];
                 b.hot += 1;
-                if b.hot >= 40 && b.hot % 64 == 40 {
+                if b.hot >= HOT && b.hot % 64 == HOT % 64 {
                     let (s, e) = (blk.start as usize, (blk.start + blk.n) as usize);
                     let bytes = &cache.bytes[blk.boff as usize..(blk.boff + blk.blen) as usize];
                     if let Some((idx, jn)) = jit::want(pc0, bytes, &cache.insns[s..e]) { let b = &mut cache.blocks[bi]; b.jit = idx; b.jn = jn; }
