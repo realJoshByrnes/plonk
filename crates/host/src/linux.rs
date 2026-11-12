@@ -594,6 +594,8 @@ impl LinuxProc {
     /// Advance the guest clock (lets poll timeouts expire).
     pub fn advance(&mut self, ms: u64) { self.clock_ns += ms * 1_000_000; }
     pub fn advance_ns(&mut self, ns: u64) { self.clock_ns += ns; }
+    /// Is this process still running?
+    pub fn alive(&self, pid: u32) -> bool { self.procs.iter().any(|p| p.pid == pid && p.exit.is_none()) }
     /// Instructions executed by all threads of all processes.
     pub fn retired(&self) -> u64 {
         let mut n = self.cpu.retired;

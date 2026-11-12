@@ -70,6 +70,7 @@ function spawn(...args) {
   const pid = x.plonk_lx_spawn(p, c.length);
   if (pid < 0) log("spawn failed: " + msg() + "\n"); else log(`started ${args.join(" ")} (pid ${pid})\n`);
   kick();
+  return pid;
 }
 
 // ---- main loop: run the guest in ~10 ms slices against the real clock; repaint when the driver reported changes ----
@@ -213,6 +214,15 @@ try {
   if (!warm) {
     addFile("/home/user/keeper.exe", new Uint8Array(await (await fetch("/tests/guests/keeper.exe")).arrayBuffer()));
     spawn("/home/user/keeper.exe"); // keeps the Wine session alive between programs
+  }
+  // On a scaled display (Windows at 125%, 150%, ...) a guest pixel is a device pixel, so tell Wine the matching DPI: programs
+  // read it from the registry when they start, and then lay themselves out at normal physical size, still unscaled.
+  const dpi = Math.round(96 * (window.devicePixelRatio || 1) / 24) * 24;
+  if (dpi !== 96 && !new URLSearchParams(location.search).has("nodpi")) {
+    status(`setting ${dpi} DPI…`);
+    const pid = spawn("reg", "add", "HKCU\\Control Panel\\Desktop", "/v", "LogPixels", "/t", "REG_DWORD", "/d", String(dpi), "/f");
+    const t0 = performance.now();
+    while (pid > 0 && x.plonk_lx_alive(pid) && performance.now() - t0 < 30000) await new Promise((res) => setTimeout(res, 50));
   }
   $("prog").remove();
   status("ready");

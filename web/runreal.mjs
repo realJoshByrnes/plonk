@@ -10,7 +10,7 @@ const CHROME = ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Pro
 const [out, secs = "60", run = "notepad", clicks = ""] = process.argv.slice(2);
 if (!CHROME || !out) { console.log("usage: node web/runreal.mjs <out.png> [seconds] [program] [clicks]"); process.exit(1); }
 const PORT = 9335, sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const chrome = spawn(CHROME, ["--headless=new", "--ignore-gpu-blocklist", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--remote-debugging-port=${PORT}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "plonk-real-"))}`,
+const chrome = spawn(CHROME, ["--headless=new", ...(process.env.SCALE ? ["--force-device-scale-factor=" + process.env.SCALE] : []), "--ignore-gpu-blocklist", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", `--remote-debugging-port=${PORT}`, `--user-data-dir=${mkdtempSync(join(tmpdir(), "plonk-real-"))}`,
   "--window-size=1100,1000", "--hide-scrollbars", "about:blank"], { stdio: "ignore" });
 let ws, nextId = 1;
 const pending = new Map(), errors = [];

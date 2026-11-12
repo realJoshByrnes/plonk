@@ -77,6 +77,10 @@ pub extern "C" fn plonk_lx_run(steps: u32, dt_us: u32) -> i32 {
     }
 }
 
+/// 1 while the process with this pid (from `plonk_lx_spawn`) is running.
+#[no_mangle]
+pub extern "C" fn plonk_lx_alive(pid: u32) -> u32 { lx().alive(pid) as u32 }
+
 /// Changes whenever a window moved or new pixels arrived.
 #[no_mangle]
 pub extern "C" fn plonk_lx_frame() -> u32 { lx().frame as u32 }
