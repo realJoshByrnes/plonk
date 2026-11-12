@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
+mod gl;
 mod snap;
 
 /// Environment for Wine processes. The overrides switch off parts of Wine's session start-up that cost a lot of emulated
@@ -129,6 +130,12 @@ pub struct LinuxProc {
     pub zorder: Vec<u32>,
     events: VecDeque<[u32; 8]>,
     pub cursor: i32,
+    /// OpenGL: the command stream for the page (see linux/gl.rs) and where the GL window is: top-level hwnd, hwnd, client x, y, w, h.
+    pub gl: gl::Gl,
+    pub gl_rect: [i32; 6],
+    /// Set when a GL frame was presented: `run` returns so the page can draw it.
+    frame_break: bool,
+    gl_pid: u32,
     /// Bumped whenever a window changes or pixels are flushed.
     pub frame: u64,
     cur: (usize, usize),
@@ -151,7 +158,7 @@ impl LinuxProc {
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
         LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, exit_code: None, blocked: false,
             vfs, aliases: HashMap::new(), pristine: HashSet::new(), layer_sig: 0, layer_names: HashSet::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
-            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, wait_all: false }
+            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, wait_all: false }
     }
 
     // ---- processes and threads ----
@@ -239,6 +246,7 @@ impl LinuxProc {
         let fds: Vec<u32> = self.fds.keys().copied().collect();
         for fd in fds { self.close(fd); }
         self.procs[pi].exit = Some(code);
+        if self.procs[pi].pid == self.gl_pid { self.gl = gl::Gl::default(); self.gl_rect = [0; 6]; self.gl_pid = 0; self.frame += 1; } // its GL window is gone
         if self.procs[pi].ppid == 1 { self.procs[pi].reaped = true; }
         for p in self.procs.iter_mut() { for t in p.threads.iter_mut() { if t.state == St::Vfork(pi) { t.state = St::Run; } } }
         if pi == 0 { self.exit_code = Some(code); }
@@ -370,6 +378,10 @@ impl LinuxProc {
                 if let Some(w) = self.windows.get_mut(&a[0]) { w.title = String::from_utf16_lossy(&u); }
             }
             5 => self.cursor = a[1] as i32,
+            6 => { // where the GL window is, and whose it is
+                for i in 0..6 { self.gl_rect[i] = self.mem.r32(a[0] + i as u32 * 4).unwrap_or(0) as i32; }
+                self.gl_pid = self.pid();
+            }
             _ => return ENOSYS,
         }
         0
@@ -703,6 +715,7 @@ impl LinuxProc {
                     alive = true;
                     self.switch(pi, ti);
                     let (used, blocked) = self.run_slice(SLICE.min(budget))?;
+                    if self.frame_break { self.frame_break = false; self.blocked = false; return Ok(self.exit_code); }
                     if !(blocked && used <= 2) { progress = true; }
                     budget = budget.saturating_sub(used.max(1));
                     if budget == 0 { self.blocked = false; return Ok(self.exit_code); }
@@ -1469,6 +1482,18 @@ impl LinuxProc {
             }
             191 => { let _ = self.mem.w32(b, u32::MAX); let _ = self.mem.w32(b + 4, u32::MAX); Some(0) } // ugetrlimit
             0x504C_0000..=0x504C_00FF => Some(self.plonk_call(nr & 0xFF, [a, b, c, d, e])),
+            0x504C_1000..=0x504C_1FFF => { // OpenGL: Plonk's opengl32.dll traps here, ebx -> the stdcall arguments
+                match Self::gl_name((nr & 0xFFF) as usize) {
+                    Some((name, nbytes)) => {
+                        let args: Vec<u32> = (0..nbytes / 4).map(|i| self.mem.r32(a + i * 4).unwrap_or(0)).collect(); // a = ebx
+                        match self.gl_call(name, &args) {
+                            Ok(v) => Some(v.unwrap_or(0)),
+                            Err(e) => { self.tr(format!("gl {name}: {e}")); Some(0) }
+                        }
+                    }
+                    None => Some(0),
+                }
+            }
             355 => { for i in 0..b { let _ = self.mem.w8(a + i, (i * 37 + 11) as u8); } Some(b) } // getrandom
             _ => {
                 let s = format!("syscall {nr}");

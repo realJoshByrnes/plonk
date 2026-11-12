@@ -158,3 +158,23 @@ pub extern "C" fn plonk_lx_msg() -> *const u8 { unsafe { MSG.as_ptr() } }
 #[no_mangle]
 #[allow(static_mut_refs)]
 pub extern "C" fn plonk_lx_msg_len() -> u32 { unsafe { MSG.len() as u32 } }
+
+// ---- OpenGL: the command stream (docs/GL_PROTOCOL.md) the page replays on WebGPU / WebGL2 ----
+
+/// Pointer to the pending GL command words (valid until `plonk_lx_gl_clear`).
+#[no_mangle]
+pub extern "C" fn plonk_lx_gl_ptr() -> *const u32 { lx().gl.cmds.as_ptr() }
+#[no_mangle]
+pub extern "C" fn plonk_lx_gl_len() -> u32 { lx().gl.cmds.len() as u32 }
+#[no_mangle]
+pub extern "C" fn plonk_lx_gl_clear() { lx().gl.cmds.clear(); }
+/// Frames presented so far.
+#[no_mangle]
+pub extern "C" fn plonk_lx_gl_presents() -> u32 { lx().gl.presents as u32 }
+/// Pointer to 5 words: x, y, width, height of the GL window's client area on screen, and 1 when it is visible and on top.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_lx_gl_rect() -> *const u32 {
+    static mut R: [u32; 5] = [0; 5];
+    unsafe { R = lx().gl_screen_rect(); R.as_ptr() }
+}
