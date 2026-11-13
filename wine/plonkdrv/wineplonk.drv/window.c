@@ -201,6 +201,7 @@ struct plonk_window_surface
     void                 *bits;
     pthread_mutex_t       mutex;
     BITMAPINFO            info;
+    int                   flushing;
 };
 
 static struct plonk_window_surface *get_plonk_surface( struct window_surface *surface )
@@ -224,8 +225,23 @@ static void plonk_surface_lock( struct window_surface *window_surface )
 static void plonk_surface_unlock( struct window_surface *window_surface )
 {
     struct plonk_window_surface *surface = get_plonk_surface( window_surface );
+    static ULONGLONG last_flush;
+    int pending = !surface->flushing && surface->bounds.left < surface->bounds.right;
 
     pthread_mutex_unlock( &surface->mutex );
+
+    /* Wine only flushes window surfaces when the application goes idle or pumps many messages; a game that draws
+     * with BitBlt from a loop that never idles then showed a few frames per second. Show drawing as it happens,
+     * at most every 16 ms. */
+    if (pending)
+    {
+        ULONGLONG now = NtGetTickCount();
+        if (now - last_flush >= 16)
+        {
+            last_flush = now;
+            window_surface->funcs->flush( window_surface );
+        }
+    }
 }
 
 static void *plonk_surface_get_bitmap_info( struct window_surface *window_surface, BITMAPINFO *info )
@@ -256,6 +272,7 @@ static void plonk_surface_flush( struct window_surface *window_surface )
     int dirty[4];
 
     window_surface->funcs->lock( window_surface );
+    surface->flushing = 1;
 
     dirty[0] = max( surface->bounds.left, 0 );
     dirty[1] = max( surface->bounds.top, 0 );
@@ -274,6 +291,7 @@ static void plonk_surface_flush( struct window_surface *window_surface )
     reset_bounds( &surface->bounds );
 
     window_surface->funcs->unlock( window_surface );
+    surface->flushing = 0;
 }
 
 static void plonk_surface_destroy( struct window_surface *window_surface )
