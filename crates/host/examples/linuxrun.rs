@@ -97,6 +97,11 @@ fn main() {
         println!("PROF top eips (pid, eip: instructions in 997-insn chunks starting there); total {}", eips.values().sum::<u64>());
         for (k, n) in v.iter().take(25) { println!("  pid {} {:#010x} {}", k.0, k.1, n); }
         let mut v: Vec<_> = sys.iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(*x.1));
+        let mut reg: std::collections::HashMap<(u32, u32), u64> = Default::default();
+        for (k, n) in eips.iter() { *reg.entry((k.0, k.1 >> 16)).or_default() += n; }
+        let mut v: Vec<_> = reg.iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(*x.1));
+        println!("PROF top 64KB regions (pid, base: instructions)");
+        for (k, n) in v.iter().take(14) { println!("  pid {} {:#010x} {}", k.0, k.1 << 16, n); }
         println!("PROF top syscalls (pid, nr: count)");
         for (k, n) in v.iter().take(80) { println!("  pid {} nr {} {}", k.0, k.1, n); }
     }

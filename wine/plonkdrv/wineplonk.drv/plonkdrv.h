@@ -63,6 +63,7 @@ extern void plonk_init_display_devices( BOOL force );
 extern void plonk_resize_desktop(void);
 
 /* user driver entry points */
+extern LONG PLONK_ChangeDisplaySettings( LPDEVMODEW displays, LPCWSTR primary_name, HWND hwnd, DWORD flags, LPVOID lparam );
 extern BOOL PLONK_UpdateDisplayDevices( const struct gdi_device_manager *device_manager,
                                         BOOL force, void *param );
 extern BOOL PLONK_CreateDesktop( const WCHAR *name, UINT width, UINT height );

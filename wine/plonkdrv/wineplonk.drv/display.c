@@ -68,6 +68,26 @@ void plonk_resize_desktop(void)
                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_DEFERERASE );
 }
 
+/* The mode a program switched to (SetDisplayMode / ChangeDisplaySettings): 0 = the host screen at 32 bpp. Without this,
+ * every refresh of the display devices reset the current mode and DirectDraw games got a full-size surface. */
+static int cur_width, cur_height, cur_bpp;
+
+/***********************************************************************
+ *           PLONK_ChangeDisplaySettings
+ */
+LONG PLONK_ChangeDisplaySettings( LPDEVMODEW displays, LPCWSTR primary_name, HWND hwnd, DWORD flags, LPVOID lparam )
+{
+    if (displays && displays->dmPelsWidth && displays->dmPelsHeight)
+    {
+        cur_width = displays->dmPelsWidth;
+        cur_height = displays->dmPelsHeight;
+        cur_bpp = displays->dmBitsPerPel ? displays->dmBitsPerPel : 32;
+        TRACE( "mode %dx%dx%d\n", cur_width, cur_height, cur_bpp );
+    }
+    force_display_devices_refresh = TRUE;
+    return DISP_CHANGE_SUCCESSFUL;
+}
+
 /***********************************************************************
  *           PLONK_UpdateDisplayDevices
  */
@@ -78,7 +98,7 @@ BOOL PLONK_UpdateDisplayDevices( const struct gdi_device_manager *device_manager
     struct gdi_adapter adapter = {0};
     struct gdi_monitor monitor = {0};
     DEVMODEW mode;
-    int width, height;
+    int width, height, host_w, host_h;
     unsigned int i;
 
     if (!force && !force_display_devices_refresh) return TRUE;
@@ -96,6 +116,9 @@ BOOL PLONK_UpdateDisplayDevices( const struct gdi_device_manager *device_manager
                           DISPLAY_DEVICE_VGA_COMPATIBLE;
     device_manager->add_adapter( &adapter, param );
 
+    host_w = width; host_h = height;
+    if (cur_width && cur_width <= host_w && cur_height <= host_h) { width = cur_width; height = cur_height; }
+    else cur_width = cur_height = cur_bpp = 0;
     SetRect( &monitor.rc_monitor, 0, 0, width, height );
     /* TODO: the host has no way to report a work area (e.g. a task bar) yet */
     monitor.rc_work = monitor.rc_monitor;
@@ -123,27 +146,31 @@ BOOL PLONK_UpdateDisplayDevices( const struct gdi_device_manager *device_manager
 
         for (s = 0; s < ARRAY_SIZE(sizes); s++)
         {
-            if (sizes[s][0] > width || sizes[s][1] > height || (sizes[s][0] == width && sizes[s][1] == height)) continue;
+            if (sizes[s][0] > host_w || sizes[s][1] > host_h) continue;
             for (d = 0; d < ARRAY_SIZE(depths); d++)
             {
                 mode.dmBitsPerPel = depths[d];
                 mode.dmPelsWidth = sizes[s][0];
                 mode.dmPelsHeight = sizes[s][1];
+                if (mode.dmPelsWidth == width && mode.dmPelsHeight == height && mode.dmBitsPerPel == (cur_bpp ? cur_bpp : 32)) continue;
                 device_manager->add_mode( &mode, FALSE, param );
             }
         }
         for (d = 0; d < ARRAY_SIZE(depths); d++)
         {
-            if (depths[d] == 32) continue;
+            int is_listed = FALSE;
+            for (s = 0; s < ARRAY_SIZE(sizes); s++) if (sizes[s][0] == host_w && sizes[s][1] == host_h) is_listed = TRUE;
+            if (is_listed) break;
             mode.dmBitsPerPel = depths[d];
-            mode.dmPelsWidth = width;
-            mode.dmPelsHeight = height;
+            mode.dmPelsWidth = host_w;
+            mode.dmPelsHeight = host_h;
+            if (host_w == width && host_h == height && depths[d] == (cur_bpp ? cur_bpp : 32)) continue;
             device_manager->add_mode( &mode, FALSE, param );
         }
     }
 
-    /* the host screen itself, 32 bpp, is the current mode */
-    mode.dmBitsPerPel = 32;
+    /* the current mode: the host screen at 32 bpp unless a program switched */
+    mode.dmBitsPerPel = cur_bpp ? cur_bpp : 32;
     mode.dmPelsWidth = width;
     mode.dmPelsHeight = height;
     device_manager->add_mode( &mode, TRUE, param );

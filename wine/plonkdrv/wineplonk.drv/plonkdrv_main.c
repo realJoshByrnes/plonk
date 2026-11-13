@@ -23,6 +23,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(plonk);
 
 static const struct user_driver_funcs plonkdrv_funcs =
 {
+    .pChangeDisplaySettings = PLONK_ChangeDisplaySettings,
     .pCreateDesktop = PLONK_CreateDesktop,
     .pCreateWindow = PLONK_CreateWindow,
     .pDestroyWindow = PLONK_DestroyWindow,
