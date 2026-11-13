@@ -97,6 +97,8 @@ struct Proc {
 }
 
 pub struct LinuxProc {
+    /// Profiling (linuxrun PROF=1): samples of (pid, eip) and system call counts (pid, nr).
+    pub prof: Option<(HashMap<(u32, u32), u64>, HashMap<(u32, u32), u64>)>,
     pub mem: Mem,
     pub cpu: Cpu,
     pub stdout: Vec<u8>,
@@ -188,7 +190,7 @@ impl LinuxProc {
     pub fn new() -> Self {
         let mut vfs = BTreeMap::new();
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
-        LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, exit_code: None, blocked: false,
+        LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, prof: None, exit_code: None, blocked: false,
             vfs, aliases: HashMap::new(), lazy: HashMap::new(), wanted: RefCell::new(Vec::new()), lazy_hit: std::cell::Cell::new(false), pristine: HashSet::new(), layer_sig: 0, layer_names: HashSet::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
             exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), audio: Audio { rate: 44100, ch: 2, fmt: 16, q: VecDeque::new(), last: 0, out: Vec::new() }, cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], shared: Vec::new(), cow: HashMap::new(), snap_pool: (0, 0), frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, clock_step_ns: 20_000, wait_all: false }
     }
@@ -208,6 +210,30 @@ impl LinuxProc {
         std::mem::swap(&mut self.poll_deadline, &mut t.poll_deadline);
     }
     /// Make (process, thread) the running one. The decoded-code cache belongs to the process and travels with whichever thread runs.
+    /// Debug: bytes of a process's memory (hex), for inspecting a hot spot found by the profiler.
+    pub fn peek(&mut self, pid: u32, addr: u32, len: u32) -> String {
+        let Some(pi) = self.procs.iter().position(|p| p.pid == pid) else { return "no such pid".into() };
+        let ti = self.procs[pi].threads.iter().position(|t| t.state != St::Dead).unwrap_or(0);
+        self.switch(pi, ti);
+        if len == 0 { // list the PE images (MZ at a 64 KB boundary) from `addr` up to 2 GB with their SizeOfImage and the first name-like string of the export directory
+            let mut out = String::new();
+            let mut a = addr & !0xFFFF;
+            while a < 0x8000_0000 {
+                if self.mem.r16(a).map_or(false, |v| v == 0x5a4d) {
+                    let pe = a + self.mem.r32(a + 0x3c).unwrap_or(0);
+                    let size = self.mem.r32(pe + 0x50).unwrap_or(0);
+                    let exp = self.mem.r32(pe + 0x78).unwrap_or(0);
+                    let name = if exp != 0 { let n = self.mem.r32(a + exp + 12).unwrap_or(0); self.cstr(a + n) } else { String::new() };
+                    out += &format!("{a:#x}+{size:#x} {name}
+");
+                    a += (size + 0xFFFF) & !0xFFFF; continue;
+                }
+                a += 0x10000;
+            }
+            return out;
+        }
+        (0..len).map(|i| format!("{:02x}", self.mem.r8(addr + i).unwrap_or(0))).collect::<Vec<_>>().join("")
+    }
     fn switch(&mut self, pi: usize, ti: usize) {
         if (pi, ti) == self.cur { return; }
         if self.cur.0 != usize::MAX {
@@ -373,6 +399,7 @@ impl LinuxProc {
     /// Driver calls: see wine/plonkdrv/wineplonk.drv/plonk_abi.h.
     fn plonk_call(&mut self, n: u32, a: [u32; 5]) -> u32 {
         self.frame += 1;
+        if let Some(pr) = self.prof.as_mut() { *pr.1.entry((self.procs[self.cur.0].pid, 100000 + n)).or_default() += 1; }
         match n {
             0 => { let _ = self.mem.w32(a[0], self.screen.0); let _ = self.mem.w32(a[0] + 4, self.screen.1); }
             1 => { // create or update a top-level window
@@ -839,13 +866,17 @@ impl LinuxProc {
         loop {
             let used = self.cpu.retired.saturating_sub(start);
             if used >= steps { break; }
-            match self.cpu.run(&mut self.mem, steps - used) {
+            let chunk = if self.prof.is_some() { (steps - used).min(997) } else { steps - used };
+            let (pk, r0) = ((self.procs[self.cur.0].pid, self.cpu.eip), self.cpu.retired);
+            let ex = self.cpu.run(&mut self.mem, chunk);
+            if let Some(pr) = self.prof.as_mut() { *pr.0.entry(pk).or_default() += self.cpu.retired - r0; }
+            match ex {
                 Exit::Interrupt(0x80) => { self.syscall(); if self.blocked || self.resched { break; } }
                 Exit::StepLimit => break,
                 e => { // no signal delivery yet: a CPU fault ends this process only (as an unhandled SIGSEGV would)
                     let at = self.cpu.insn_start;
                     let bytes: Vec<String> = (0..12).map(|i| format!("{:02x}", self.mem.r8(at + i).unwrap_or(0))).collect();
-                    let msg = format!("plonk: pid {} ({}) killed: {e:?} at eip {:#x} insn {at:#x} [{}] regs {:x?}", self.pid(), self.exe, self.cpu.eip, bytes.join(" "), self.cpu.r);
+                    let msg = format!("plonk: pid {} ({}) killed: {e:?} at eip {:#x} insn {at:#x} [{}] regs {:x?} stack {:x?}", self.pid(), self.exe, self.cpu.eip, bytes.join(" "), self.cpu.r, (0..8).map(|i| self.mem.r32(self.cpu.r[4] + i * 4).unwrap_or(0)).collect::<Vec<_>>());
                     self.stdout.extend_from_slice(msg.as_bytes());
                     self.stdout.push(10);
                     self.faults.push(msg);
@@ -1413,6 +1444,7 @@ impl LinuxProc {
         let r = self.cpu.r;
         let (nr, a, b, c, d, e, f) = (r[EAX], r[EBX], r[ECX], r[EDX], r[ESI], r[EDI], r[EBP]);
         self.lazy_hit.set(false);
+        if let Some(pr) = self.prof.as_mut() { *pr.1.entry((self.procs[self.cur.0].pid, nr)).or_default() += 1; }
         const CWD: u32 = -100i32 as u32;
         let ret: Option<u32> = match nr {
             1 => { self.thread_exit(a); Some(0) } // exit (this thread)

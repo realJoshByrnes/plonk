@@ -35,6 +35,7 @@ fn main() {
 
     // RESTORE=file: start from a snapshot, then start the program inside that session
     let restored = if let Ok(f) = std::env::var("RESTORE") { if let Err(e) = p.restore(&std::fs::read(f).expect("snapshot")) { println!("restore failed: {e}"); std::process::exit(1); } true } else { false };
+    if let Ok(f) = std::env::var("PREFIX2") { p.add_tar(&std::fs::read(f).expect("prefix2 tar")); } // added after RESTORE (does not change the snapshot fingerprint)
     let argv: Vec<&str> = a[1..].iter().map(|s| s.as_str()).collect();
     let extra = std::env::var("ENV").unwrap_or_default();
     // STD=1: the standard Wine environment of the web page (overrides that skip slow start-up work) instead of a bare one
@@ -42,6 +43,13 @@ fn main() {
     let extra: Vec<&str> = extra.split(';').filter(|s| !s.is_empty()).collect();
     env.retain(|e| !extra.iter().any(|x| x.split('=').next() == e.split('=').next())); // ENV overrides the standard variables
     env.extend(extra);
+    // PRE="prog arg;prog arg": programs run to completion (until everything idles) in the restored session before the main program
+    for pre in std::env::var("PRE").unwrap_or_default().split(';').filter(|s| !s.is_empty()) {
+        let a: Vec<&str> = pre.split(' ').collect();
+        p.wait_all = true;
+        p.spawn_path(&a, &env).expect("PRE program");
+        let _ = p.run(2_000_000_000);
+    }
     // the program is a guest path, or failing that a host file
     if p.spawn_path(&argv, &env).is_err() { p.load(&std::fs::read(&a[1]).expect("program not found in the guest tree or on the host"), &argv, &env).unwrap(); }
     p.wait_all = restored || std::env::var("SAVE").is_ok() || std::env::var("WAIT").is_ok();
@@ -49,10 +57,12 @@ fn main() {
     // run; whenever everything blocks, let a second of guest time pass (up to IDLE rounds)
     let idle: u32 = std::env::var("IDLE").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
     let steps: u64 = std::env::var("STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(2_000_000_000);
+    if std::env::var("PROF").is_ok() { p.prof = Some(Default::default()); } // PROF=1: sample eips / count syscalls; event "z" resets
     let mut r = p.run(steps);
     // RT=seconds: run against the real clock, like the browser page does (guest time = wall time)
     if let Some(secs) = std::env::var("RT").ok().and_then(|v| v.parse::<f64>().ok()) {
         p.clock_step_ns = 0;
+        if p.prof.is_some() { p.prof = Some(Default::default()); } // profile only the real-time phase
         let (t0, mut last, mut busy, mut shown) = (std::time::Instant::now(), std::time::Instant::now(), std::time::Duration::ZERO, false);
         while t0.elapsed().as_secs_f64() < secs && !matches!(r, Ok(Some(_)) | Err(_)) {
             let now = std::time::Instant::now();
@@ -72,6 +82,7 @@ fn main() {
         let f: Vec<i32> = e.split(',').skip(1).map(|v| v.parse().unwrap()).collect();
         match &e[..1] {
             "t" => p.advance(f[0] as u64),
+            "z" => { if p.prof.is_some() { p.prof = Some(Default::default()); } println!("profile reset at {} M instructions", p.retired() / 1_000_000); }
             "d" => p.mouse(0, f[0], f[1]),
             "u" => p.mouse(2, f[0], f[1]),
             "m" => p.mouse(1, f[0], f[1]),
@@ -80,6 +91,18 @@ fn main() {
         }
         r = p.run(steps);
         for _ in 0..3 { if matches!(r, Ok(None)) && p.blocked { p.advance(200); r = p.run(steps); } }
+    }
+    if let Some((eips, sys)) = &p.prof {
+        let mut v: Vec<_> = eips.iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(*x.1));
+        println!("PROF top eips (pid, eip: instructions in 997-insn chunks starting there); total {}", eips.values().sum::<u64>());
+        for (k, n) in v.iter().take(25) { println!("  pid {} {:#010x} {}", k.0, k.1, n); }
+        let mut v: Vec<_> = sys.iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(*x.1));
+        println!("PROF top syscalls (pid, nr: count)");
+        for (k, n) in v.iter().take(80) { println!("  pid {} nr {} {}", k.0, k.1, n); }
+    }
+    if let Ok(d) = std::env::var("PEEK") { // PEEK=pid:hexaddr:len: hex dump of guest memory
+        let f: Vec<&str> = d.split(':').collect();
+        println!("peek {d}: {}", p.peek(f[0].parse().unwrap(), u32::from_str_radix(f[1], 16).unwrap(), f[2].parse().unwrap()));
     }
     println!("result {r:?} blocked={} after {rounds} idle seconds", p.blocked);
     println!("stdout: {}", String::from_utf8_lossy(&p.stdout));

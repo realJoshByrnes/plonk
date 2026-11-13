@@ -42,6 +42,9 @@ else
     (cd "$SRC" && tr -d '\r' < "$HERE/explorer.patch" | git apply -)
 fi
 
+echo "== patching wined3d (copy only changed front-buffer pixels)"
+if ! grep -q plonk_shrink_to_changes "$SRC/dlls/wined3d/swapchain.c"; then (cd "$SRC" && tr -d '' < "$HERE/wined3d.patch" | git apply -); fi
+
 echo "== regenerating makefiles and configure"
 regen=0
 grep -q 'dlls/wineplonk.drv' "$SRC/configure" || regen=1

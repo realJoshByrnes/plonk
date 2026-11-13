@@ -1,0 +1,88 @@
+diff --git a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
+index 8a02847..db50506 100644
+--- a/dlls/wined3d/swapchain.c
++++ b/dlls/wined3d/swapchain.c
+@@ -1272,6 +1272,68 @@ static const struct wined3d_swapchain_ops swapchain_vk_ops =
+     swapchain_frontbuffer_updated,
+ };
+ 
++/* Plonk: games like DX-Ball lock the whole front buffer and rewrite it every frame, and each unlock used to convert and copy
++ * all of it to the window (hundreds of thousands of interpreted instructions). Keep a copy of what was last sent for this
++ * swapchain and shrink the rectangle to the pixels that really changed (nothing at all if none did). */
++static struct
++{
++    const struct wined3d_swapchain *swapchain;
++    unsigned int width, height, pitch, bpp;
++    POINT offset;
++    RGBQUAD colors[256];
++    BYTE *data;
++} plonk_shadow;
++
++static void plonk_shrink_to_changes(const struct wined3d_swapchain *swapchain, RECT *rect, const POINT *offset)
++{
++    struct wined3d_texture *front = swapchain->front_buffer;
++    unsigned int width = front->resource.width, height = front->resource.height, pitch, slice, bpp, y;
++    const BYTE *bits = front->resource.heap_memory;
++    RGBQUAD colors[256];
++    int top = -1, bottom = -1, left = rect->right, right = rect->left;
++    BOOL full = FALSE;
++
++    if (!bits || !front->resource.format) return;
++    bpp = front->resource.format->byte_count;
++    wined3d_texture_get_pitch(front, 0, &pitch, &slice);
++    memset(colors, 0, sizeof(colors));
++    if (swapchain->palette) memcpy(colors, swapchain->palette->colors, sizeof(colors));
++
++    if (plonk_shadow.swapchain != swapchain || plonk_shadow.width != width || plonk_shadow.height != height
++            || plonk_shadow.pitch != pitch || plonk_shadow.bpp != bpp || !plonk_shadow.data
++            || plonk_shadow.offset.x != offset->x || plonk_shadow.offset.y != offset->y
++            || (bpp == 1 && memcmp(plonk_shadow.colors, colors, sizeof(colors))))
++    {
++        free(plonk_shadow.data);
++        plonk_shadow.data = malloc((size_t)pitch * height);
++        if (!plonk_shadow.data) { plonk_shadow.swapchain = NULL; return; }
++        plonk_shadow.swapchain = swapchain;
++        plonk_shadow.width = width; plonk_shadow.height = height; plonk_shadow.pitch = pitch; plonk_shadow.bpp = bpp;
++        plonk_shadow.offset = *offset;
++        memcpy(plonk_shadow.colors, colors, sizeof(colors));
++        memcpy(plonk_shadow.data, bits, (size_t)pitch * height);
++        return; /* first copy: everything goes */
++    }
++
++    for (y = rect->top; y < rect->bottom; ++y)
++    {
++        const BYTE *a = bits + (size_t)y * pitch + rect->left * bpp, *b = plonk_shadow.data + (size_t)y * pitch + rect->left * bpp;
++        size_t n = (size_t)(rect->right - rect->left) * bpp, i, j;
++
++        if (!memcmp(a, b, n)) continue;
++        for (i = 0; a[i] == b[i]; ++i) ;
++        for (j = n; a[j - 1] == b[j - 1]; --j) ;
++        if (top < 0) top = y;
++        bottom = y + 1;
++        if ((int)(rect->left + i / bpp) < left) left = rect->left + i / bpp;
++        if ((int)(rect->left + (j + bpp - 1) / bpp) > right) right = rect->left + (j + bpp - 1) / bpp;
++        memcpy((BYTE *)b + i, a + i, j - i);
++    }
++    (void)full;
++    if (top < 0) SetRectEmpty(rect);
++    else SetRect(rect, left, top, right, bottom);
++}
++
+ static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchain)
+ {
+     struct wined3d_dc_info *front;
+@@ -1306,6 +1368,14 @@ static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchai
+             swapchain->front_buffer->resource.height);
+     IntersectRect(&draw_rect, &draw_rect, &swapchain->front_buffer_update);
+ 
++    plonk_shrink_to_changes(swapchain, &draw_rect, &offset);
++    if (IsRectEmpty(&draw_rect))
++    {
++        ReleaseDC(window, dst_dc);
++        SetRectEmpty(&swapchain->front_buffer_update);
++        return;
++    }
++
+     BitBlt(dst_dc, draw_rect.left - offset.x, draw_rect.top - offset.y,
+             draw_rect.right - draw_rect.left, draw_rect.bottom - draw_rect.top,
+             src_dc, draw_rect.left, draw_rect.top, SRCCOPY);
