@@ -14,7 +14,7 @@
 //! Translations are kept by (address, code bytes), so every process that runs the same code at the same address shares
 //! them, and they survive a flush of the decoded-code cache.
 use super::{Insn, H};
-use crate::{Cpu, EAX, EBP, EDX, ESP};
+use crate::{Cpu, EAX, EBP, ECX, EDI, EDX, ESI, ESP};
 use core::mem::offset_of;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -422,6 +422,21 @@ fn insn(f: &mut Fx, i: &Insn, next: u32, flags: bool, side_exit: Option<u32>) ->
             f.set_eip(|f| f.get(T));
         }
         H::Fpu => return fpu(f, i),
+        H::Str if i.aux == 0xFC => { f.get(EF); f.c(!0x400u32); f.and(); f.set(EF); }
+        H::Str if i.aux == 0xFD => { f.get(EF); f.c(0x400); f.or(); f.set(EF); }
+        H::Str => return str_op(f, i),
+        H::MulDiv => return muldiv(f, i),
+        H::Cmpxchg => {
+            f.rm_in(i, 32, Y, true); f.getr(EAX as u8, 32); f.set(X);
+            f.alu(7, 32, flags, false);
+            f.get(X); f.get(Y); f.op(0x46);
+            f.op(0x04); f.op(0x40); f.getr(i.reg, 32); f.set(T); f.rm_out(i, 32, T); f.op(0x05); f.setr(EAX as u8, 32, Y); f.op(0x0B);
+        }
+        H::Xadd => {
+            f.rm_in(i, 32, X, true); f.getr(i.reg, 32); f.set(Y);
+            f.alu(0, 32, flags, false);
+            f.setr(i.reg, 32, X); f.rm_out(i, 32, R);
+        }
         _ => return false,
     }
     true
@@ -690,6 +705,75 @@ fn fpu(f: &mut Fx, i: &Insn) -> bool {
         }
         (0xDF, 5..=6, _) => { f.fget(0); f.set(FA); f.fget(ri); f.set(FB); f.fcomi(); f.ftop_add(1); }
         _ => return false,
+    }
+    true
+}
+
+/// movs / stos / lods with and without rep, direction flag clear (set: the interpreter does it). Registers are updated after every
+/// element, so a bail-out in the middle of a rep leaves a restartable state.
+fn str_op(f: &mut Fx, i: &Insn) -> bool {
+    let (w, op) = (i.w as u32, i.aux);
+    let n = w / 8;
+    f.get(EF); f.c(0x400); f.and(); f.bail_if();
+    let src = |f: &mut Fx| {
+        f.getr(ESI as u8, 32);
+        if i.seg != 0 { f.get(CPU); f.load(32, if i.seg == 1 { O_FS } else { O_GS }); f.add(); }
+        f.set(A);
+    };
+    let step = |f: &mut Fx, reg: usize| { f.get(CPU); f.getr(reg as u8, 32); f.c(n); f.add(); f.store(32, Fx::roff(reg as u8, 32)); };
+    let one = |f: &mut Fx| match op {
+        0xA4 | 0xA5 => {
+            src(f); f.read(w); f.set(T);
+            f.getr(EDI as u8, 32); f.set(A); f.wcheck(w); f.get(HP); f.get(T); f.store(w, 0);
+            step(f, ESI); step(f, EDI);
+        }
+        0xAA | 0xAB => {
+            f.getr(EDI as u8, 32); f.set(A); f.wcheck(w); f.get(HP); f.getr(EAX as u8, w); f.store(w, 0);
+            step(f, EDI);
+        }
+        _ => { src(f); f.read(w); f.set(T); f.setr(EAX as u8, w, T); step(f, ESI); }
+    };
+    if i.reg != 0 {
+        f.getr(ECX as u8, 32); f.c(0x1000_0000 / n + 1); f.op(0x4F); f.bail_if(); // the interpreter faults on absurd counts
+        f.op(0x02); f.op(0x40); f.op(0x03); f.op(0x40); f.depth += 2; // block { loop {
+        f.getr(ECX as u8, 32); f.eqz(); f.op(0x0D); f.uleb(1);
+        one(f);
+        f.get(CPU); f.getr(ECX as u8, 32); f.c(1); f.sub(); f.store(32, Fx::roff(ECX as u8, 32));
+        f.op(0x0C); f.uleb(0);
+        f.op(0x0B); f.op(0x0B); f.depth -= 2; // } }
+    } else { one(f); }
+    true
+}
+
+/// F7 /4../7: mul, imul, div, idiv with a 32 bit operand (anything that would raise #DE is left to the interpreter).
+fn muldiv(f: &mut Fx, i: &Insn) -> bool {
+    f.rm_in(i, 32, Y, false);
+    let eax = Fx::roff(EAX as u8, 32);
+    let edx = Fx::roff(EDX as u8, 32);
+    match i.reg {
+        4 | 5 => {
+            let ext = if i.reg == 4 { 0xAD } else { 0xAC }; // i64.extend_i32_u / _s
+            f.getr(EAX as u8, 32); f.op(ext); f.get(Y); f.op(ext); f.op(0x7E); f.set(P64);
+            f.get(CPU); f.get(P64); f.op(0xA7); f.store(32, eax);
+            f.get(CPU); f.get(P64); f.op(0x42); f.op(32); f.op(0x88); f.op(0xA7); f.store(32, edx);
+            // CF = OF = the result does not fit in 32 bits (mul) / in a signed 32 bit value (imul)
+            f.get(EF); f.c(!0x801u32); f.and();
+            if i.reg == 4 { f.get(P64); f.op(0x42); f.op(32); f.op(0x88); f.op(0x50); }
+            else { f.get(P64); f.get(P64); f.op(0xA7); f.op(0xAC); f.op(0x51); }
+            f.eqz(); f.c(0x801); f.op(0x6C); f.or(); f.set(EF);
+        }
+        _ => {
+            let signed = i.reg == 7;
+            f.get(Y); f.eqz(); f.bail_if();
+            if signed { f.get(Y); f.c(u32::MAX); f.op(0x46); f.bail_if(); }
+            f.get(CPU); f.load(32, edx); f.op(0xAD); f.op(0x42); f.op(32); f.op(0x86); f.getr(EAX as u8, 32); f.op(0xAD); f.op(0x84); f.set(P64);
+            let ext = if signed { 0xAC } else { 0xAD };
+            let (div, rem) = if signed { (0x7F, 0x81) } else { (0x80, 0x82) };
+            if signed { f.get(P64); f.get(Y); f.op(ext); f.op(div); f.get(P64); f.get(Y); f.op(ext); f.op(div); f.op(0xA7); f.op(0xAC); f.op(0x51); f.eqz(); f.bail_if(); }
+            else { f.get(P64); f.get(Y); f.op(ext); f.op(div); f.op(0x42); f.op(32); f.op(0x88); f.op(0x50); f.eqz(); f.bail_if(); }
+            f.get(CPU); f.get(P64); f.get(Y); f.op(ext); f.op(div); f.op(0xA7); f.store(32, eax);
+            f.get(CPU); f.get(P64); f.get(Y); f.op(ext); f.op(rem); f.op(0xA7); f.store(32, edx);
+        }
     }
     true
 }

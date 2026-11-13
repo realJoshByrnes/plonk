@@ -26,6 +26,12 @@ pub(crate) enum H {
     Shift, Not, Neg,
     Jcc, Jmp, Call, CallRm, JmpRm, Ret, RetN, Leave,
     Setcc, Cmov, Cwde, Cdq, Fpu,
+    /// movs/stos/lods (aux = opcode, reg = rep prefix present) and cld/std: only the JIT has a fast path
+    Str,
+    /// F7 /4../7 mul imul div idiv (32 bit, reg = which)
+    MulDiv,
+    /// 0F B1 cmpxchg and 0F C1 xadd (32 bit)
+    Cmpxchg, Xadd,
 }
 
 #[derive(Clone, Copy)]
@@ -201,6 +207,7 @@ fn decode_opt(b: &[u8], pc: u32) -> Option<Insn> {
                 0 | 1 => { i.imm = rdimm(b, &mut p, w)?; i.h = H::TestRmI; }
                 2 => i.h = H::Not,
                 3 => i.h = H::Neg,
+                4..=7 if w == 32 => { i.reg = sub; i.h = H::MulDiv; }
                 _ => i.h = H::Step,
             }
         }
@@ -215,6 +222,9 @@ fn decode_opt(b: &[u8], pc: u32) -> Option<Insn> {
             i.h = match sub { 0 | 1 => H::IncDecRm, 2 => H::CallRm, 4 => H::JmpRm, 6 => H::PushRm, _ => return None };
         }
         0xD8..=0xDF => { let mb = *b.get(p)?; step_modrm!(false); i.h = H::Fpu; i.aux = op; i.reg = seg_end(b, pc); i.imm = mb as u32; } // imm: the ModRM byte (the JIT needs its reg/rm fields)
+        0x9B => i.h = H::Nop,
+        0xA4 | 0xA5 | 0xAA | 0xAB | 0xAC | 0xAD => { i.h = H::Str; i.aux = op; i.reg = rep as u8; i.w = if op & 1 == 0 { 8 } else { ow as u8 }; }
+        0xFC | 0xFD => { i.h = H::Str; i.aux = op; }
         0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x60 | 0x61 | 0x9B | 0x9C..=0x9F | 0xA4..=0xA7 | 0xAA..=0xAF | 0xD7 | 0xF5 | 0xF8..=0xFD | 0xCC | 0xCF | 0xF4 => i.h = H::Step,
         0xCD | 0xE0..=0xE3 => { rd8(b, &mut p)?; i.h = H::Step; }
         0xA0..=0xA3 => { // mov al/eax, [moffs] and back: the same as a mov with an absolute address and no base
@@ -238,6 +248,7 @@ fn decode_opt(b: &[u8], pc: u32) -> Option<Insn> {
                     i.aux = if op2 & 1 != 0 { 16 } else { 8 };
                     i.h = if op2 >= 0xBE { H::Movsx } else { H::Movzx };
                 }
+                0xB1 | 0xC1 if ow == 32 => { i.reg = mr!(); i.h = if op2 == 0xB1 { H::Cmpxchg } else { H::Xadd }; }
                 0x0B | 0x31 | 0xA0 | 0xA1 | 0xA2 | 0xA8 | 0xA9 | 0xC8..=0xCF => i.h = H::Step,
                 0xA3 | 0xAB | 0xB3 | 0xBB | 0xB0 | 0xB1 | 0xC0 | 0xC1 | 0xBC | 0xBD | 0xC7 | 0xA5 | 0xAD | 0xAE => step_modrm!(false),
                 0xBA | 0xA4 | 0xAC => step_modrm!(true),
@@ -250,7 +261,7 @@ fn decode_opt(b: &[u8], pc: u32) -> Option<Insn> {
     }
     i.len = p as u8;
     // rep/repne prefixes are ignored by the old core except for string ops / SSE: let it handle them all.
-    if rep && i.h != H::Step { i.h = H::Step; }
+    if rep && !matches!(i.h, H::Step | H::Str) { i.h = H::Step; }
     Some(i)
 }
 
@@ -628,7 +639,7 @@ impl Cpu {
                     H::Fpu => {
                         if let Err(e) = self.do_fpu(mem, i, pc) { self.pending = Some(e); st = ST_STOP; break 'blk; }
                     }
-                    H::Step | H::Slow => {
+                    H::Step | H::Slow | H::Str | H::MulDiv | H::Cmpxchg | H::Xadd => {
                         self.eip = pc;
                         if let Err(e) = self.do_step(mem) { self.pending = Some(e); st = ST_STOP; break 'blk; }
                         if i.h == H::Slow || self.eip != next { brk = true; }
