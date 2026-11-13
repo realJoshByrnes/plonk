@@ -97,6 +97,8 @@ struct Proc {
 }
 
 pub struct LinuxProc {
+    /// Clock polling detector (busy-waits on timeGetTime): (thread, retired at the last read, reads in a row).
+    clk_poll: ((usize, usize), u64, u32),
     /// Profiling (linuxrun PROF=1): samples of (pid, eip) and system call counts (pid, nr).
     pub prof: Option<(HashMap<(u32, u32), u64>, HashMap<(u32, u32), u64>)>,
     pub mem: Mem,
@@ -190,7 +192,7 @@ impl LinuxProc {
     pub fn new() -> Self {
         let mut vfs = BTreeMap::new();
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
-        LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, prof: None, exit_code: None, blocked: false,
+        LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, clk_poll: ((usize::MAX, 0), 0, 0), prof: None, exit_code: None, blocked: false,
             vfs, aliases: HashMap::new(), lazy: HashMap::new(), wanted: RefCell::new(Vec::new()), lazy_hit: std::cell::Cell::new(false), pristine: HashSet::new(), layer_sig: 0, layer_names: HashSet::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
             exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), audio: Audio { rate: 44100, ch: 2, fmt: 16, q: VecDeque::new(), last: 0, out: Vec::new() }, cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], shared: Vec::new(), cow: HashMap::new(), snap_pool: (0, 0), frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, clock_step_ns: 20_000, wait_all: false }
     }
@@ -1423,6 +1425,21 @@ impl LinuxProc {
         (self.clock_ns / 1_000_000_000, (self.clock_ns % 1_000_000_000) as u32)
     }
 
+    /// A thread that reads the clock again and again with almost nothing in between is busy-waiting for time to pass (Windows
+    /// timeGetTime/QueryPerformanceCounter loops). After a few such reads, deschedule it for a millisecond of guest time:
+    /// the guest then costs no host time while waiting. Returns true when the call has to be retried later.
+    fn clock_poll_yield(&mut self) -> bool {
+        let (me, now) = (self.cur, self.cpu.retired);
+        if let Some(dl) = self.poll_deadline { // retry after a yield: go on once the millisecond has passed
+            if self.clk_poll.2 >= 6 { if self.clock_ns >= dl { self.poll_deadline = None; self.clk_poll = (me, now, 0); return false; } return true; }
+        }
+        let c = &mut self.clk_poll;
+        if c.0 == me && now.saturating_sub(c.1) < 3000 { c.2 += 1 } else { c.2 = 0 }
+        c.0 = me; c.1 = now;
+        if c.2 >= 6 { self.poll_deadline = Some(self.clock_ns + 1_000_000); return true; }
+        false
+    }
+
     fn poll(&mut self, fds: u32, n: u32, timeout_ms: i64) -> Option<u32> {
         let mut ready = 0;
         for i in 0..n {
@@ -1754,10 +1771,11 @@ impl LinuxProc {
             }
             258 => { self.me().clear_tid = a; Some(self.me().tid) } // set_tid_address
             265 | 403 => { // clock_gettime (32-bit / 64-bit timespec)
+                if self.clock_poll_yield() { None } else {
                 let (s, ns) = self.now();
                 let _ = self.mem.w32(b, s as u32);
                 if nr == 403 { let _ = self.mem.w32(b + 4, (s >> 32) as u32); let _ = self.mem.w32(b + 8, ns); } else { let _ = self.mem.w32(b + 4, ns); }
-                Some(0)
+                Some(0) }
             }
             311 => Some(0), // set_robust_list
             340 => { // prlimit64: report "unlimited"

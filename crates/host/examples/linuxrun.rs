@@ -102,6 +102,7 @@ fn main() {
         let mut v: Vec<_> = reg.iter().collect(); v.sort_by_key(|x| std::cmp::Reverse(*x.1));
         println!("PROF top 64KB regions (pid, base: instructions)");
         for (k, n) in v.iter().take(14) { println!("  pid {} {:#010x} {}", k.0, k.1 << 16, n); }
+        println!("PROF driver flushes (call 3): {}  clock_gettime64: {}", sys.iter().filter(|(k, _)| k.1 == 100003).map(|(_, n)| n).sum::<u64>(), sys.iter().filter(|(k, _)| k.1 == 403).map(|(_, n)| n).sum::<u64>());
         println!("PROF top syscalls (pid, nr: count)");
         for (k, n) in v.iter().take(80) { println!("  pid {} nr {} {}", k.0, k.1, n); }
     }
