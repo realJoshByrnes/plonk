@@ -1459,6 +1459,18 @@ impl LinuxProc {
                 let call = [1, 8, 2, 3, 4, 18, 15, 14, 6, 7, 11, 16, 12, 17, 13][(nr - 359) as usize];
                 self.sock_call(call, [a, b, c, d, e, f])
             }
+            268 | 269 => { // statfs/fstatfs(64): a roomy disk (4 GB, 2 GB free) so installers' free-space checks pass
+                let buf = c;
+                let mut st = [0u8; 84];
+                let put = |st: &mut [u8], off: usize, v: u64| st[off..off + 8].copy_from_slice(&v.to_le_bytes());
+                st[0..4].copy_from_slice(&0xEF53u32.to_le_bytes());
+                st[4..8].copy_from_slice(&4096u32.to_le_bytes());
+                put(&mut st, 8, 1 << 20); put(&mut st, 16, 1 << 19); put(&mut st, 24, 1 << 19); put(&mut st, 32, 1 << 20); put(&mut st, 40, 1 << 19);
+                st[56..60].copy_from_slice(&255u32.to_le_bytes());
+                st[60..64].copy_from_slice(&4096u32.to_le_bytes());
+                let _ = self.mem.write_bytes(buf, &st);
+                Some(0)
+            }
             122 => { // uname: six 65-byte fields
                 let _ = self.mem.write_bytes(a, &[0u8; 390]);
                 for (i, s) in ["Linux", "plonk", "6.1.0", "#1", "i686", "(none)"].iter().enumerate() { let _ = self.mem.write_bytes(a + i as u32 * 65, s.as_bytes()); }

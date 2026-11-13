@@ -113,9 +113,9 @@ let dark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)
     if (!e.cv) { e.cv = document.createElement("canvas"); e.ctx = e.cv.getContext("2d"); e.tex = newTex(); }
     if (e.cv.width !== w || e.cv.height !== h) { e.cv.width = w; e.cv.height = h; }
     const g = e.ctx, k = h / 32;
-    g.fillStyle = dark ? (active ? "#202020" : "#2b2b2b") : (active ? "#f3f3f3" : "#ffffff");
+    g.fillStyle = active ? (dark ? "#5b3fd6" : "#6a4bf0") : (dark ? "#2b2b2b" : "#ececec"); // the active window gets an accent colour
     g.fillRect(0, 0, w, h);
-    const fg = dark ? (active ? "#ffffff" : "#9d9d9d") : (active ? "#1b1b1b" : "#808080");
+    const fg = active ? "#ffffff" : (dark ? "#9d9d9d" : "#777777");
     const btns = btnLayout(c);
     g.fillStyle = fg; g.font = `${Math.max(12, Math.round(h * 0.46))}px ${FONT}`; g.textBaseline = "middle";
     const left = Math.round(12 * k), avail = (btns.length ? btns[btns.length - 1].x : w) - left - 8;
@@ -124,7 +124,7 @@ let dark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)
     g.fillText(t, left, Math.round(h / 2) + 1);
     for (const b of btns) {
       const hot = hover === b.id, red = hot && b.id === "close";
-      if (hot) { g.fillStyle = red ? "#c42b1c" : dark ? "rgba(255,255,255,0.10)" : "rgba(0,0,0,0.06)"; g.fillRect(b.x, 0, c.bw, h); }
+      if (hot) { g.fillStyle = red ? "#c42b1c" : (active || dark) ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.08)"; g.fillRect(b.x, 0, c.bw, h); }
       const cx = b.x + c.bw / 2, cy = h / 2, s = 5 * k;
       g.strokeStyle = red ? "#ffffff" : fg; g.lineWidth = Math.max(1, k); g.beginPath();
       if (b.id === "min") { g.moveTo(cx - s, cy + 0.5); g.lineTo(cx + s, cy + 0.5); }

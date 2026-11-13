@@ -91,6 +91,8 @@ fn main() {
         std::fs::write(format!("{f}.files"), p.pristine_files().join(&char::from(10).to_string()) + &char::from(10).to_string()).unwrap(); // what the page loads up front
         std::fs::write(f, t).unwrap();
     }
+    // EXPORT=file.tar: export ~/.wine immediately (no clean shutdown; files only)
+    if let Ok(f) = std::env::var("EXPORT") { std::fs::write(f, p.export_tar("/home/user/.wine")).unwrap(); }
     if std::env::var("SAVE").is_ok() { // shut Wine down cleanly so wineserver writes the registry files
         p.auto_time = true;
         let pid = p.spawn_path(&["/usr/local/bin/wine", "wineboot", "--shutdown"], &env);
