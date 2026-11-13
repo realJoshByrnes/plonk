@@ -108,12 +108,44 @@ BOOL PLONK_UpdateDisplayDevices( const struct gdi_device_manager *device_manager
                     DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY | DM_POSITION;
     mode.dmDisplayOrientation = DMDO_DEFAULT;
     mode.dmDisplayFlags = 0;
-    mode.dmBitsPerPel = 32;
-    mode.dmPelsWidth = width;
-    mode.dmPelsHeight = height;
     mode.dmDisplayFrequency = 60;
     mode.dmPosition.x = 0;
     mode.dmPosition.y = 0;
+
+    /* The classic mode list, so that old DirectDraw/GDI programs can switch (SetDisplayMode, ChangeDisplaySettings):
+     * win32u rejects modes that were not added here. Modes bigger than the host screen are left out. */
+    {
+        static const int sizes[][2] = { {320,200}, {320,240}, {400,300}, {512,384}, {640,400}, {640,480}, {800,600},
+                                        {1024,768}, {1152,864}, {1280,720}, {1280,800}, {1280,1024}, {1366,768},
+                                        {1440,900}, {1600,900}, {1600,1200}, {1920,1080} };
+        static const int depths[] = { 8, 16, 32 };
+        unsigned int s, d;
+
+        for (s = 0; s < ARRAY_SIZE(sizes); s++)
+        {
+            if (sizes[s][0] > width || sizes[s][1] > height || (sizes[s][0] == width && sizes[s][1] == height)) continue;
+            for (d = 0; d < ARRAY_SIZE(depths); d++)
+            {
+                mode.dmBitsPerPel = depths[d];
+                mode.dmPelsWidth = sizes[s][0];
+                mode.dmPelsHeight = sizes[s][1];
+                device_manager->add_mode( &mode, FALSE, param );
+            }
+        }
+        for (d = 0; d < ARRAY_SIZE(depths); d++)
+        {
+            if (depths[d] == 32) continue;
+            mode.dmBitsPerPel = depths[d];
+            mode.dmPelsWidth = width;
+            mode.dmPelsHeight = height;
+            device_manager->add_mode( &mode, FALSE, param );
+        }
+    }
+
+    /* the host screen itself, 32 bpp, is the current mode */
+    mode.dmBitsPerPel = 32;
+    mode.dmPelsWidth = width;
+    mode.dmPelsHeight = height;
     device_manager->add_mode( &mode, TRUE, param );
 
     return TRUE;

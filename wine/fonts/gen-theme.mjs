@@ -47,6 +47,7 @@ for (const [name, c] of Object.entries(themes)) {
   for (const [k, v] of Object.entries(metrics)) s += `"${k}"="${v}"\r\n`;
   for (const [k, v] of Object.entries(fonts)) s += `"${k}"=${v}\r\n`;
   s += "\r\n[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\ThemeManager]\r\n\"ThemeActive\"=\"0\"\r\n"; // classic controls follow the colours above
+  s += "\r\n[HKEY_CURRENT_USER\\Software\\Wine\\Direct3D]\r\n\"renderer\"=\"no3d\"\r\n"; // no OpenGL: DirectDraw runs on wined3d's software (no3d) adapter
   writeFileSync(here + `theme-${name}.reg`, s);
 }
 let s = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\FontSubstitutes]\r\n";
