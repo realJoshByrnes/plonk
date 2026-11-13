@@ -217,7 +217,10 @@ fn decode_opt(b: &[u8], pc: u32) -> Option<Insn> {
         0xD8..=0xDF => { step_modrm!(false); i.h = H::Fpu; i.aux = op; i.reg = seg_end(b, pc); }
         0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x60 | 0x61 | 0x9B | 0x9C..=0x9F | 0xA4..=0xA7 | 0xAA..=0xAF | 0xD7 | 0xF5 | 0xF8..=0xFD | 0xCC | 0xCF | 0xF4 => i.h = H::Step,
         0xCD | 0xE0..=0xE3 => { rd8(b, &mut p)?; i.h = H::Step; }
-        0xA0..=0xA3 => { rd32(b, &mut p)?; i.h = H::Step; }
+        0xA0..=0xA3 => { // mov al/eax, [moffs] and back: the same as a mov with an absolute address and no base
+            i.disp = rd32(b, &mut p)?; i.m = true; i.reg = 0; i.w = if op & 1 == 0 { 8 } else { ow as u8 };
+            i.h = if op < 0xA2 { H::MovRRm } else { H::MovRmR };
+        }
         0x0F => {
             let op2 = *b.get(p)?;
             p += 1;

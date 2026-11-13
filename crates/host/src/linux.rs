@@ -1429,6 +1429,7 @@ impl LinuxProc {
     /// timeGetTime/QueryPerformanceCounter loops). After a few such reads, deschedule it for a millisecond of guest time:
     /// the guest then costs no host time while waiting. Returns true when the call has to be retried later.
     fn clock_poll_yield(&mut self) -> bool {
+        if self.clock_step_ns != 0 { return false; } // only against the real clock (the page, linuxrun RT=): with a stepped test clock nothing waits
         let (me, now) = (self.cur, self.cpu.retired);
         if let Some(dl) = self.poll_deadline { // retry after a yield: go on once the millisecond has passed
             if self.clk_poll.2 >= 6 { if self.clock_ns >= dl { self.poll_deadline = None; self.clk_poll = (me, now, 0); return false; } return true; }
