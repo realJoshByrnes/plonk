@@ -1,0 +1,8 @@
+[package]
+name = "plonk-serve"
+version.workspace = true
+edition.workspace = true
+description = "Local web server for Plonk! (static files and the compressed Wine archives)"
+
+[dependencies]
+flate2 = "1"

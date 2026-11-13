@@ -1,5 +1,5 @@
 // Memory check of the real-Wine path in wasm: restore the snapshot, run a program to completion several times, print the
-// wasm memory size after each run (it must level off). Needs `node web/serve.mjs 8080`.  node web/mem_real_wasm.mjs [rounds=6] [program and args = /home/user/hello.exe]
+// wasm memory size after each run (it must level off). Needs `cargo run --release -p plonk-serve`.  node web/mem_real_wasm.mjs [rounds=6] [program and args = /home/user/hello.exe]
 import { readFileSync, readdirSync } from "node:fs";
 const root = new URL("../", import.meta.url);
 const { instance } = await WebAssembly.instantiate(readFileSync(new URL("target/wasm32-unknown-unknown/release/plonk_host.wasm", root)), {});

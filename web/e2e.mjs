@@ -1,4 +1,4 @@
-// Real-browser end-to-end check (Chrome via DevTools protocol). Needs `node web/serve.mjs 8080` running
+// Real-browser end-to-end check (Chrome via DevTools protocol). Needs `cargo run --release -p plonk-serve` running
 // and Chrome installed. Usage: node web/e2e.mjs [shot-dir]
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";

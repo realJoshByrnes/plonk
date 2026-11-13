@@ -1,4 +1,4 @@
-// Open the real-Wine page in headless Chrome, start a program, wait, screenshot. Needs `node web/serve.mjs 8080`.
+// Open the real-Wine page in headless Chrome, start a program, wait, screenshot. Needs `cargo run --release -p plonk-serve`.
 // node web/runreal.mjs <out.png> [seconds=60] [program and args = notepad] ["x,y;x,y" clicks in screen coordinates, 2 s apart, after the wait]
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -63,6 +63,20 @@ try {
     for (let i = 1; i <= 10; i++) { const [mx, my] = at(p1[0] + (p2[0] - p1[0]) * i / 10, p1[1] + (p2[1] - p1[1]) * i / 10); await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: mx, y: my, buttons: 1 }); await sleep(150); }
     if (!process.env.HOLD) await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: at(...p2)[0], y: at(...p2)[1], button: "left", clickCount: 1 });
     await sleep(2500);
+  }
+  // SCRIPT="click x,y|wait ms|drag x1,y1,x2,y2|..." : steps after the first window appeared (canvas coordinates; negative y reaches the toolbar)
+  for (const step of (process.env.SCRIPT || "").split("|").filter(Boolean)) {
+    const [cmd, arg = ""] = [step.slice(0, step.indexOf(" ")), step.slice(step.indexOf(" ") + 1)];
+    const nums = arg.split(/[ ,]+/).map(Number);
+    if (cmd === "wait") await sleep(nums[0]);
+    else if (cmd === "click") { const x = rect[0] + nums[0], y = rect[1] + nums[1]; await send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }); await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 }); await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }); }
+    else if (cmd === "drag") {
+      const [x1, y1, x2, y2] = nums; let px = rect[0] + x1, py = rect[1] + y1;
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: px, y: py });
+      await send("Input.dispatchMouseEvent", { type: "mousePressed", x: px, y: py, button: "left", clickCount: 1 });
+      for (let i = 1; i <= 8; i++) await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: rect[0] + x1 + (x2 - x1) * i / 8, y: rect[1] + y1 + (y2 - y1) * i / 8, buttons: 1 }), await sleep(120);
+      await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: rect[0] + x2, y: rect[1] + y2, button: "left", clickCount: 1 });
+    }
   }
   if (process.env.EVAL) console.log("eval:", await evalJs(process.env.EVAL));
   console.log("gl:", await evalJs(`JSON.stringify({ov: document.getElementById("glov").style.cssText, w: document.getElementById("glov").width, nz: window.__glNonZero})`));

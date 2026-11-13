@@ -1,4 +1,4 @@
-// Run any 32-bit exe in the real page (headless Chrome via DevTools) and screenshot it. Needs `node web/serve.mjs 8080`.
+// Run any 32-bit exe in the real page (headless Chrome via DevTools) and screenshot it. Needs `cargo run --release -p plonk-serve`.
 // node web/runapp.mjs <exe path> <out.png> [seconds=8] ["x,y;x,y;..." clicks in screen coordinates, one per second]
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";

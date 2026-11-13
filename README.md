@@ -1,6 +1,8 @@
-# Plonk!
+<p align="center"><img src="docs/logo.svg" width="380" alt="Plonk!"></p>
 
-**Real Windows programs, running in a browser tab.**
+<p align="center"><b>Real Windows programs, running in a browser tab.</b></p>
+
+<p align="center"><img src="docs/screenshot-dark.png" width="860" alt="The Plonk! desktop: Wine configuration and Minesweeper running in the browser"></p>
 
 Plonk! runs unmodified 32-bit Windows applications (Notepad, Regedit, mIRC, old DirectX-era games, your own `.exe`) entirely inside a web page. There is no server-side emulation, no streaming and no plugin. It is a small PC built out of WebAssembly: a CPU, a Linux-compatible kernel, and the real [Wine](https://www.winehq.org/) on top.
 
@@ -76,7 +78,7 @@ Useful switches (URL parameters): `?nojit`, `?cpu` (CPU composition instead of t
 
 ## Building and running
 
-You need Rust (with the `wasm32-unknown-unknown` target), Node.js, and for the Wine build a Debian/Ubuntu environment (WSL works) with an i386 toolchain.
+You need Rust (with the `wasm32-unknown-unknown` target) and, for the Wine build, a Debian/Ubuntu environment (WSL works) with an i386 toolchain. Nothing else: the web server is a small Rust program in this repository, so Node.js is not needed to run Plonk! (a few developer test scripts in `web/*.mjs` still use it for headless-browser checks).
 
 ```sh
 # the WebAssembly program
@@ -90,7 +92,7 @@ wine/repack.sh
 cargo run --release -p plonk-host --example linuxrun -- /usr/local/bin/wine /home/user/keeper.exe   # see the example's header for the env knobs
 
 # serve it
-node web/serve.mjs 8080  # then open http://localhost:8080/
+cargo run --release -p plonk-serve   # then open http://localhost:8080/  (optional argument: a port)
 ```
 
 Large generated files (`wine/root.tar`, `wine/prefix.tar`, `wine/snapshot.bin`) are not checked in. Design notes are in `docs/`; the OpenGL command protocol is in `docs/GL_PROTOCOL.md`.

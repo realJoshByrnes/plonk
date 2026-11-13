@@ -89,6 +89,7 @@ let dark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)
   const caps = new Map(); // hwnd -> { cv, ctx, tex, key }
   let lastCaps = [];      // captioned windows of the last frame, top first
   let hoverKey = "";
+  let wall = null; // { tex, w, h }
   const FONT = '"Segoe UI Variable Text", "Segoe UI", Selawik, system-ui, sans-serif';
   const btnLayout = (c) => { // button rectangles (x offsets from the bar's left edge), right to left
     const w = c.r - c.l, out = [];
@@ -141,6 +142,19 @@ let dark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)
     kind: "webgl2",
     /** Draw the desktop. `buf`: the wasm memory; `scene`: Uint32Array/Int32Array of the kernel's scene (see plonk_lx_scene);
      *  `over`: null or { source (ImageBitmap | canvas | { w, h, rgba }), x, y, w, h } drawn on top. */
+    /** Use an image (e.g. an SVG) as the desktop wallpaper, scaled to cover the screen. */
+    setWallpaper(url) {
+      const img = new Image();
+      img.onload = () => {
+        const t = newTex();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        wall = { tex: t, w: img.naturalWidth || 1920, h: img.naturalHeight || 1080 };
+        this.onchange?.();
+      };
+      img.src = url;
+    },
     /** Dark or light chrome. */
     setDark(d) { dark = !!d; },
     /** The pointer moved (screen coordinates; null = left): true when a title bar highlight changed, so a redraw is needed. */
@@ -154,6 +168,11 @@ let dark = !window.matchMedia || window.matchMedia("(prefers-color-scheme: dark)
       if (window.__dbg) window.__dbgLast = Array.from(s32);
       const seen = new Set();
       gl.activeTexture(gl.TEXTURE0);
+      if (wall) { // cover the screen, centred
+        const k = Math.max(W / wall.w, H / wall.h), ww = wall.w * k, wh = wall.h * k;
+        gl.bindTexture(gl.TEXTURE_2D, wall.tex);
+        quad((W - ww) / 2, (H - wh) / 2, ww, wh, false);
+      }
       let activeIdx = -1;
       for (let i = 0, n = scene[0]; i < n; i++) if (s32[1 + i * 17 + 10] & 1) activeIdx = i; // the topmost window with a title bar
       const tops = [];

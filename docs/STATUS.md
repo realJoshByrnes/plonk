@@ -24,7 +24,7 @@ Browser desktop that runs 32-bit Windows programs: Rust i386 interpreter (wasm) 
 ## Workflow
 - Build Wine DLLs: `wine/build.sh` in WSL Debian -> copy into wine/out (git-ignored; tests skip if absent).
 - Debug: `examples/drive.exe <exe> [secs]` (LAZY=1 mimics browser, WATCH=1 reports spins), `examples/shot.exe <exe> out.ppm "d,x,y;u,x,y;k,vk,ch"`
-  then `node web/ppm2png.mjs`; `web/perf.mjs`, `web/lazy_check.mjs`, `web/e2e.mjs [shotdir]` (needs `node web/serve.mjs 8080`).
+  then `node web/ppm2png.mjs`; `web/perf.mjs`, `web/lazy_check.mjs`, `web/e2e.mjs [shotdir]` (needs `cargo run --release -p plonk-serve`).
 - Gotcha: heredocs halve backslashes; write Rust/JS with `c:\` strings via the Write/Edit tools.
 
 ## Next
