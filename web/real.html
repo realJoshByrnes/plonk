@@ -273,6 +273,24 @@ let steps = 400000, last = performance.now(), lastFrame = -1, dead = false, time
 const again = new MessageChannel();
 again.port1.onmessage = () => { if (timer === -1) pump(); };
 function kick() { if (dead || timer === -1) return; clearTimeout(timer); timer = -1; again.port2.postMessage(0); }
+// Sound: the guest's /dev/dsp (Wine's OSS driver) fills a PCM buffer in the kernel at the guest clock's pace; play it with Web Audio
+let actx = null, audioT = 0;
+const audioStart = () => { try { if (!actx) actx = new AudioContext({ latencyHint: "interactive" }); if (actx.state !== "running") actx.resume(); } catch (e) { actx = null; } };
+for (const ev of ["pointerdown", "keydown"]) document.addEventListener(ev, audioStart, true);
+function audioPump() {
+  const n = x.plonk_lx_audio_take();
+  if (!n) return;
+  if (!actx || actx.state !== "running") return; // no user gesture yet: the browser would not let us play, drop it
+  const ch = x.plonk_lx_audio_channels(), rate = x.plonk_lx_audio_rate(), frames = (n >> 1) / ch | 0;
+  const pcm = new Int16Array(x.memory.buffer, x.plonk_lx_audio_ptr(), frames * ch);
+  const buf = actx.createBuffer(ch, frames, rate);
+  for (let c = 0; c < ch; c++) { const d = buf.getChannelData(c); for (let i = 0; i < frames; i++) d[i] = pcm[i * ch + c] / 32768; }
+  const now = actx.currentTime;
+  if (audioT < now + 0.01) audioT = now + 0.08; // underrun: restart with a little cushion
+  if (audioT > now + 0.6) audioT = now + 0.08;   // fallen far behind: skip ahead rather than lag
+  const src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination); src.start(audioT);
+  audioT += frames / rate;
+}
 function pump() {
   timer = 0;
   if (dead) return;
@@ -291,6 +309,7 @@ function pump() {
   } while (r === 0 && performance.now() - t0 < 12);
   fetchWanted();
   if (jitOn) jitPump();
+  audioPump();
   x.plonk_lx_take_stdout();
   const out = msg();
   if (out) log(out);

@@ -315,3 +315,19 @@ pub extern "C" fn plonk_lx_filebuf() -> *const u8 { unsafe { FILEBUF.as_ptr() } 
 /// The topmost visible window at a screen position (0 = none).
 #[no_mangle]
 pub extern "C" fn plonk_lx_window_at(x: i32, y: i32) -> u32 { lx().window_at(x, y) }
+
+/// Audio: take the PCM (s16le, interleaved) the guest's sound card played since the last call; returns its byte length.
+#[no_mangle]
+pub extern "C" fn plonk_lx_audio_take() -> u32 {
+    let a = &mut lx().audio;
+    unsafe { AUDIO = std::mem::take(&mut a.out); AUDIO.len() as u32 }
+}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_lx_audio_ptr() -> *const u8 { unsafe { AUDIO.as_ptr() } }
+/// Sample rate of the PCM that `plonk_lx_audio_take` last returned.
+#[no_mangle]
+pub extern "C" fn plonk_lx_audio_rate() -> u32 { lx().audio.rate }
+#[no_mangle]
+pub extern "C" fn plonk_lx_audio_channels() -> u32 { lx().audio.ch }
+static mut AUDIO: Vec<u8> = Vec::new();

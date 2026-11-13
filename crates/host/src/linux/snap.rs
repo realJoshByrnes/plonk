@@ -118,6 +118,8 @@ impl LinuxProc {
                 Kind::Tty => of.u8(3),
                 Kind::Sock(s) => { of.u8(4); of.u32(*s as u32); }
                 Kind::Events => of.u8(5),
+                Kind::Dsp => of.u8(6),
+                Kind::Mixer => of.u8(7),
             }
         }
         // shared-mapping page stores (their pages are referenced from the process page lists below)
@@ -263,6 +265,8 @@ impl LinuxProc {
                 2 => Kind::Null,
                 3 => Kind::Tty,
                 4 => Kind::Sock(r.u32()? as usize),
+                6 => Kind::Dsp,
+                7 => Kind::Mixer,
                 _ => Kind::Events,
             };
             ofds.push(Rc::new(RefCell::new(Ofd { kind, flags, path })));

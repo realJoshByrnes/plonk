@@ -51,7 +51,12 @@ type Fd = Rc<RefCell<Ofd>>;
 /// Things created in the file tree at run time (the read-only `files` map sits underneath).
 enum Node { File(Data), Dir, Sock(usize), Link(String) }
 
-enum Kind { File { data: Data, pos: u64 }, Dir { pos: usize }, Null, Tty, Sock(usize), Events }
+enum Kind { File { data: Data, pos: u64 }, Dir { pos: usize }, Null, Tty, Sock(usize), Events, Dsp, Mixer }
+
+/// The emulated OSS sound card: PCM written to /dev/dsp drains at the guest clock's pace into `out` (s16le), which the page plays.
+pub struct Audio { pub rate: u32, pub ch: u32, fmt: u32, q: VecDeque<u8>, last: u64, pub out: Vec<u8> }
+const AUDIO_CAP: usize = 32768;
+const AUDIO_FRAG: usize = 2048;
 
 /// A top-level window as reported by the Wine display driver (wineplonk.drv), with the pixels it last flushed.
 #[derive(Default, Clone)]
@@ -143,6 +148,7 @@ pub struct LinuxProc {
     pub windows: BTreeMap<u32, HostWin>,
     pub zorder: Vec<u32>,
     events: VecDeque<[u32; 8]>,
+    pub audio: Audio,
     pub cursor: i32,
     /// OpenGL: the command stream for the page (see linux/gl.rs) and where the GL window is: top-level hwnd, hwnd, client x, y, w, h.
     pub gl: gl::Gl,
@@ -184,7 +190,7 @@ impl LinuxProc {
         for d in ["/", "/tmp", "/dev", "/dev/plonk", "/home", "/home/user", "/etc", "/proc", "/proc/self"] { vfs.insert(d.to_string(), Node::Dir); }
         LinuxProc { mem: Mem::new_owned(0), cpu: Cpu::new(), stdout: Vec::new(), files: HashMap::new(), unknown: Vec::new(), trace: Vec::new(), faults: Vec::new(), trace_cap: 400_000, exit_code: None, blocked: false,
             vfs, aliases: HashMap::new(), lazy: HashMap::new(), wanted: RefCell::new(Vec::new()), lazy_hit: std::cell::Cell::new(false), pristine: HashSet::new(), layer_sig: 0, layer_names: HashSet::new(), cwd: "/".into(), fds: HashMap::new(), cloexec: HashSet::new(), socks: Vec::new(), brk: 0, brk_start: 0, maps: BTreeMap::new(), clock_ns: 1_700_000_000_000_000_000, poll_deadline: None, umask: 0o022,
-            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], shared: Vec::new(), cow: HashMap::new(), snap_pool: (0, 0), frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, clock_step_ns: 20_000, wait_all: false }
+            exe: String::new(), sigact: HashMap::new(), procs: Vec::new(), screen: (1024, 768), windows: BTreeMap::new(), zorder: Vec::new(), events: VecDeque::new(), audio: Audio { rate: 44100, ch: 2, fmt: 16, q: VecDeque::new(), last: 0, out: Vec::new() }, cursor: 0, gl: gl::Gl::default(), gl_rect: [0; 6], shared: Vec::new(), cow: HashMap::new(), snap_pool: (0, 0), frame_break: false, gl_pid: 0, frame: 0, cur: (usize::MAX, 0), next_pid: 1000, resched: false, auto_time: false, clock_step_ns: 20_000, wait_all: false }
     }
 
     // ---- processes and threads ----
@@ -685,7 +691,75 @@ impl LinuxProc {
 
     /// Advance the guest clock (lets poll timeouts expire).
     pub fn advance(&mut self, ms: u64) { self.clock_ns += ms * 1_000_000; }
-    pub fn advance_ns(&mut self, ns: u64) { self.clock_ns += ns; }
+    pub fn advance_ns(&mut self, ns: u64) { self.clock_ns += ns; self.audio_pump(); }
+    /// Move the PCM the sound card would have played by now from its queue to `audio.out`.
+    fn audio_pump(&mut self) {
+        let a = &mut self.audio;
+        let bps = (a.rate as u64 * a.ch as u64 * 2).max(1);
+        if a.q.is_empty() { a.last = self.clock_ns; return; }
+        let n = (((self.clock_ns - a.last) * bps / 1_000_000_000) as usize & !3).min(a.q.len());
+        if n == 0 { return; }
+        a.last += n as u64 * 1_000_000_000 / bps;
+        let v: Vec<u8> = a.q.drain(..n).collect();
+        a.out.extend_from_slice(&v);
+    }
+    fn audio_write(&mut self, src: &[u8]) {
+        self.audio_pump();
+        let a = &mut self.audio;
+        if a.q.is_empty() { a.last = self.clock_ns; }
+        if a.fmt == 8 { for &b in src { let v = ((b as i16 - 128) << 8) as u16; a.q.extend(v.to_le_bytes()); } } else { a.q.extend(src.iter().copied()); }
+    }
+    fn ioctl(&mut self, fd: u32, req: u32, arg: u32) -> u32 {
+        let Some(o) = self.fds.get(&fd).cloned() else { return EBADF };
+        let k = match o.borrow().kind { Kind::Dsp => 1, Kind::Mixer => 2, _ => 0 };
+        if k == 0 { return ENOTTY; }
+        let (ty, nr) = ((req >> 8) & 0xFF, req & 0xFF);
+        let ok = 0u32;
+        match (ty as u8, nr) {
+            (b'X', 1) => { // SNDCTL_SYSINFO
+                let mut b = vec![0u8; 1248];
+                b[..9].copy_from_slice(b"Plonk OSS"); b[32..37].copy_from_slice(b"4.2.0");
+                b[64..68].copy_from_slice(&0x040200u32.to_le_bytes());
+                for off in [196usize, 248, 284, 288] { b[off..off + 4].copy_from_slice(&1u32.to_le_bytes()); } // numaudios, nummixers, numcards, numaudioengines
+                if self.mem.write_bytes(arg, &b).is_err() { return EFAULT; }
+                ok
+            }
+            (b'X', 7) | (b'X', 12) => { // SNDCTL_AUDIOINFO / ENGINEINFO
+                let mut b = vec![0u8; 1180];
+                let mut put = |off: usize, v: u32| b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+                put(76, 0x0002_0000); put(84, 0x18); put(172, 1); // caps: output; oformats: S16_LE | U8; enabled
+                put(180, 8000); put(184, 48000); put(188, 1); put(192, 2);
+                b[4..14].copy_from_slice(b"Plonk Wave");
+                b[404..412].copy_from_slice(b"/dev/dsp");
+                if self.mem.write_bytes(arg, &b).is_err() { return EFAULT; }
+                ok
+            }
+            (b'M', _) => { if req & 0x4000_0000 != 0 { let _ = self.mem.w32(arg, 0x6464); } ok }
+            (b'P', 5) => { // SETFMT
+                let v = self.mem.r32(arg).unwrap_or(0);
+                let f = if v == 0x8 { 8 } else { 16 };
+                self.audio.fmt = f;
+                let _ = self.mem.w32(arg, if f == 8 { 0x8 } else { 0x10 });
+                ok
+            }
+            (b'P', 2) => { let v = self.mem.r32(arg).unwrap_or(44100).clamp(8000, 48000); self.audio_pump(); self.audio.rate = v; let _ = self.mem.w32(arg, v); ok }
+            (b'P', 6) => { let v = self.mem.r32(arg).unwrap_or(2).clamp(1, 2); self.audio.ch = v; let _ = self.mem.w32(arg, v); ok }
+            (b'P', 3) => { let v = self.mem.r32(arg).unwrap_or(1); self.audio.ch = if v != 0 { 2 } else { 1 }; ok }
+            (b'P', 11) => { let _ = self.mem.w32(arg, 0x18); ok } // GETFMTS
+            (b'P', 15) => { let _ = self.mem.w32(arg, 0x0000_1000); ok } // GETCAPS: revision 1, no trigger
+            (b'P', 10) => ok, // SETFRAGMENT
+            (b'P', 1) | (b'P', 0) | (b'P', 8) | (b'P', 4) | (b'P', 14) | (b'P', 16) => ok, // SYNC, RESET, POST, ... NONBLOCK
+            (b'P', 12) | (b'P', 13) => { // GETOSPACE / GETISPACE
+                self.audio_pump();
+                let used = self.audio.q.len().min(AUDIO_CAP);
+                let free = if nr == 12 { AUDIO_CAP - used } else { 0 };
+                for (i, v) in [free / AUDIO_FRAG, AUDIO_CAP / AUDIO_FRAG, AUDIO_FRAG, free].iter().enumerate() { let _ = self.mem.w32(arg + i as u32 * 4, *v as u32); }
+                ok
+            }
+            (b'P', 23) => { self.audio_pump(); let _ = self.mem.w32(arg, self.audio.q.len() as u32); ok } // GETODELAY
+            _ => ENOTTY,
+        }
+    }
     /// Is this process still running?
     pub fn alive(&self, pid: u32) -> bool { self.procs.iter().any(|p| p.pid == pid && p.exit.is_none()) }
     /// Instructions executed by all threads of all processes.
@@ -887,7 +961,7 @@ impl LinuxProc {
             Some(Node::Sock(_)) => Some((0o140755, 0)),
             Some(Node::Link(t)) => Some((0o120777, t.len() as u64)),
             None => match p {
-                "/dev/null" | "/dev/tty" | "/dev/plonk/events" => Some((0o020666, 0)),
+                "/dev/null" | "/dev/tty" | "/dev/plonk/events" | "/dev/dsp" | "/dev/mixer" => Some((0o020666, 0)),
                 _ => self.files.get(p).map(|d| (0o100755, d.len() as u64))
                     .or_else(|| self.lazy.get(p).map(|&n| (0o100755, n as u64)))
                     .or_else(|| self.aliases.get(p).and_then(|t| self.lookup(t)).map(|(_, n)| (0o100755, n)))
@@ -937,6 +1011,8 @@ impl LinuxProc {
                 "/dev/null" => Kind::Null,
                 "/dev/tty" => Kind::Tty,
                 "/dev/plonk/events" => Kind::Events,
+                "/dev/dsp" => Kind::Dsp,
+                "/dev/mixer" => Kind::Mixer,
                 _ => {
                     if let Some(data) = self.promote(&p, flags & 3 != 0) {
                         if flags & 0x200 != 0 { data.borrow_mut().clear(); self.cow.remove(&(Rc::as_ptr(&data) as usize)); }
@@ -988,7 +1064,7 @@ impl LinuxProc {
         let (mode, size) = match &o.kind {
             Kind::File { data, .. } => (0o100644, data.borrow().len() as u64),
             Kind::Dir { .. } => (0o040700, 0),
-            Kind::Null | Kind::Tty | Kind::Events => (0o020620, 0),
+            Kind::Null | Kind::Tty | Kind::Events | Kind::Dsp | Kind::Mixer => (0o020620, 0),
             Kind::Sock(_) => (0o140777, 0),
         };
         let path = if let Kind::Sock(s) = o.kind { format!("socket:{s}") } else { o.path.clone() };
@@ -1190,7 +1266,8 @@ impl LinuxProc {
             }
             Kind::Sock(s) => *s,
             Kind::Dir { .. } => return Some(-21i32 as u32), // EISDIR
-            Kind::Null | Kind::Tty => return Some(0),
+            Kind::Null | Kind::Tty | Kind::Mixer => return Some(0),
+            Kind::Dsp => return Some(if nb { EAGAIN } else { 0 }),
             Kind::Events => { // whole 32-byte input records
                 let k = (n as usize / 32).min(self.events.len());
                 if k == 0 { return if nb { Some(EAGAIN) } else { None }; }
@@ -1219,7 +1296,8 @@ impl LinuxProc {
                 return n;
             }
             Kind::Tty => { self.stdout.extend_from_slice(&src); return n; }
-            Kind::Null => return n,
+            Kind::Null | Kind::Mixer => return n,
+            Kind::Dsp => { self.audio_write(&src); return n; }
             Kind::Sock(s) => *s,
             Kind::Dir { .. } | Kind::Events => return EBADF,
         };
@@ -1411,7 +1489,7 @@ impl LinuxProc {
                 }
                 Some(self.brk)
             }
-            54 => Some(ENOTTY), // ioctl
+            54 => Some(self.ioctl(a, b, c)),
             60 => { let old = self.umask; self.umask = a & 0o777; Some(old) } // umask
             66 | 57 => Some(0), // setsid, setpgid
             65 | 132 => Some(1000), // getpgrp, getpgid

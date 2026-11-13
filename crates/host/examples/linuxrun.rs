@@ -108,6 +108,7 @@ fn main() {
         out.extend(p.compose_rgb());
         std::fs::write(f, out).unwrap();
     }
+    if let Ok(f) = std::env::var("AUDIO") { println!("audio: {} bytes at {} Hz x{}", p.audio.out.len(), p.audio.rate, p.audio.ch); std::fs::write(f, &p.audio.out).unwrap(); }
     if std::env::var("PS").is_ok() { print!("{}", p.ps()); }
     let n: usize = std::env::var("TRACE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     let pat = std::env::var("GREP").unwrap_or_default();
