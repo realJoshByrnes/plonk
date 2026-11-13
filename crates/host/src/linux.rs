@@ -1680,3 +1680,129 @@ impl LinuxProc {
 impl Default for LinuxProc {
     fn default() -> Self { Self::new() }
 }
+
+// ---- shortcuts (.lnk) in the Wine prefix: listing and parsing for the page's desktop icons and Start menu ----
+const DRIVE_C: &str = "/home/user/.wine/drive_c/";
+const SM_PROGRAMS: &str = "/start menu/programs/";
+
+fn lnk_win_to_guest(w: &str) -> String {
+    let b = w.as_bytes();
+    if b.len() >= 2 && b[1] == b':' {
+        let rest = w[2..].replace('\\', "/");
+        let rest = rest.trim_start_matches('/');
+        return if b[0].eq_ignore_ascii_case(&b'z') { format!("/{rest}") } else { format!("{DRIVE_C}{rest}") };
+    }
+    w.replace('\\', "/")
+}
+
+fn is_lnk(k: &str) -> bool {
+    k.starts_with(DRIVE_C) && k.len() > 4 && k.is_char_boundary(k.len() - 4) && k[k.len() - 4..].eq_ignore_ascii_case(".lnk")
+}
+
+/// Parse an MS-SHLLINK file: (target, arguments, working dir, icon location).
+fn parse_lnk(d: &[u8]) -> Option<(String, String, String, String)> {
+    let u16at = |o: usize| d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+    let u32at = |o: usize| d.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    if u32at(0)? != 0x4c { return None; }
+    let flags = u32at(0x14)?;
+    let uni = flags & 0x80 != 0;
+    let cstr = |o: usize| -> String { let s = d.get(o..).unwrap_or(&[]); String::from_utf8_lossy(&s[..s.iter().position(|&c| c == 0).unwrap_or(s.len())]).into_owned() };
+    let wstr = |o: usize, max: usize| -> String {
+        let mut v = Vec::new();
+        for i in 0..max { match u16at(o + i * 2) { Some(0) | None => break, Some(c) => v.push(c as u16) } }
+        String::from_utf16_lossy(&v)
+    };
+    let mut off = 0x4c;
+    if flags & 1 != 0 { off += 2 + u16at(off)?; }
+    let mut target = String::new();
+    if flags & 2 != 0 {
+        let sz = u32at(off)?;
+        let hdr = u32at(off + 4)?;
+        let lf = u32at(off + 8)?;
+        if lf & 1 != 0 {
+            let (base, suf) = if hdr >= 0x24 && u32at(off + 28)? != 0 {
+                (wstr(off + u32at(off + 28)?, 520), wstr(off + u32at(off + 32)?, 520))
+            } else { (cstr(off + u32at(off + 16)?), cstr(off + u32at(off + 24)?)) };
+            target = if suf.is_empty() { base } else { format!("{}\\{}", base.trim_end_matches('\\'), suf) };
+        }
+        off += sz;
+    }
+    let mut rd = |present: bool| -> Option<String> {
+        if !present { return Some(String::new()); }
+        let n = u16at(off)?;
+        off += 2;
+        let s = if uni { let s = wstr(off, n); off += n * 2; s } else { let s = String::from_utf8_lossy(d.get(off..off + n)?).into_owned(); off += n; s };
+        Some(s)
+    };
+    let _name = rd(flags & 4 != 0)?;
+    let rel = rd(flags & 8 != 0)?;
+    let cwd = rd(flags & 0x10 != 0)?;
+    let args = rd(flags & 0x20 != 0)?;
+    let icon = rd(flags & 0x40 != 0)?;
+    // extra data: the environment-variable block carries the target as a plain path
+    while let Some(sz) = u32at(off) {
+        if sz < 8 { break; }
+        if u32at(off + 4) == Some(0xA000_0001) && target.is_empty() { target = wstr(off + 268, 260); if target.is_empty() { target = cstr(off + 8); } }
+        off += sz;
+    }
+    if target.is_empty() && !rel.is_empty() { target = rel; }
+    if target.is_empty() { return None; }
+    Some((target, args, cwd, icon))
+}
+
+impl LinuxProc {
+    /// Every .lnk of the prefix: (guest path, contents).
+    fn lnk_files(&self) -> BTreeMap<String, Vec<u8>> {
+        let mut out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for (k, d) in self.files.iter() { if is_lnk(k) && !self.vfs.contains_key(k) { out.insert(k.clone(), d.clone()); } }
+        for (k, n) in self.vfs.range(DRIVE_C.to_string()..) {
+            if !k.starts_with(DRIVE_C) { break; }
+            if let (true, Node::File(d)) = (is_lnk(k), n) { out.insert(k.clone(), d.borrow().clone()); }
+        }
+        out
+    }
+
+    /// Cheap change counter for the shortcut files (hash of the paths and sizes).
+    pub fn lnk_generation(&self) -> u32 {
+        let mut h: u64 = 0;
+        let mut add = |k: &str, n: usize| { h ^= k.bytes().fold(n as u64 ^ 1469598103934665603, |a, b| (a ^ b as u64).wrapping_mul(1099511628211)); };
+        for (k, d) in self.files.iter() { if is_lnk(k) && !self.vfs.contains_key(k) { add(k, d.len()); } }
+        for (k, n) in self.vfs.range(DRIVE_C.to_string()..) {
+            if !k.starts_with(DRIVE_C) { break; }
+            if let (true, Node::File(d)) = (is_lnk(k), n) { add(k, d.borrow().len()); }
+        }
+        (h ^ (h >> 32)) as u32
+    }
+
+    /// Case-insensitive lookup of a file (Windows paths are); returns the real guest path.
+    pub fn find_ci(&self, p: &str) -> Option<String> {
+        if self.vfs.contains_key(p) || self.files.contains_key(p) || self.lazy.contains_key(p) { return Some(p.to_string()); }
+        self.vfs.iter().filter(|(_, n)| matches!(n, Node::File(_))).map(|(k, _)| k).chain(self.files.keys()).chain(self.lazy.keys()).find(|k| k.eq_ignore_ascii_case(p)).cloned()
+    }
+
+    /// Bytes of a file by (case-insensitive) guest path; a lazily-declared file is asked for and `None` is returned.
+    pub fn read_ci(&self, p: &str) -> Option<Vec<u8>> { self.find_ci(p).and_then(|k| self.file_bytes(&k)) }
+
+    /// One line per shortcut: kind, name, target (guest path), args, cwd (guest), icon source (guest), target (windows), group, .lnk (windows), tab separated.
+    pub fn list_shortcuts(&self) -> String {
+        let mut rows: Vec<String> = Vec::new();
+        let pd = "programdata/microsoft/windows/start menu/programs/";
+        for (path, data) in self.lnk_files() {
+            let rel = &path[DRIVE_C.len()..];
+            let low = rel.to_ascii_lowercase();
+            let parts: Vec<&str> = rel.split('/').collect();
+            let after = if let Some(i) = low.find(SM_PROGRAMS) { Some(&rel[i + SM_PROGRAMS.len()..]) } else if low.starts_with(pd) { Some(&rel[pd.len()..]) } else { None };
+            let (kind, group) = if let Some(a) = after { ("start", a.rsplit_once('/').map(|x| x.0.to_string()).unwrap_or_default()) }
+                else if parts.len() == 4 && low.starts_with("users/") && parts[2].eq_ignore_ascii_case("desktop") { ("desktop", String::new()) } else { continue };
+            let Some((target, args, cwd, icon)) = parse_lnk(&data) else { continue };
+            let file = parts[parts.len() - 1];
+            let name = &file[..file.len() - 4];
+            let wlnk = format!("C:\\{}", rel.replace('/', "\\"));
+            let gt = lnk_win_to_guest(&target);
+            let ico = if icon.is_empty() { gt.clone() } else { lnk_win_to_guest(&icon) };
+            let t = |s: &str| s.replace(['\t', '\n'], " ");
+            rows.push(format!("{kind}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", t(name), t(&gt), t(&args), t(&lnk_win_to_guest(&cwd)), t(&ico), t(&target), t(&group), t(&wlnk)));
+        }
+        rows.join("\n")
+    }
+}

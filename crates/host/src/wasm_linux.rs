@@ -288,3 +288,30 @@ pub extern "C" fn plonk_lx_gl_rect() -> *const u32 {
     static mut R: [u32; 5] = [0; 5];
     unsafe { R = lx().gl_screen_rect(); R.as_ptr() }
 }
+
+/// Change counter of the .lnk files in the prefix (poll it; re-read the listing when it changes).
+#[no_mangle]
+pub extern "C" fn plonk_lx_lnk_gen() -> u32 { lx().lnk_generation() }
+
+/// The shortcuts of the Desktop / Start Menu folders as lines (see `LinuxProc::list_shortcuts`), as the message.
+#[no_mangle]
+pub extern "C" fn plonk_lx_shortcuts() { unsafe { MSG = lx().list_shortcuts(); } }
+
+static mut FILEBUF: Vec<u8> = Vec::new();
+/// Read a guest file (case-insensitive path) into a buffer; returns its length or -1. The bytes are at `plonk_lx_filebuf`.
+///
+/// # Safety
+/// `p` must be valid for `len` bytes.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub unsafe extern "C" fn plonk_lx_read_file(p: *const u8, len: u32) -> i32 {
+    let path = String::from_utf8_lossy(core::slice::from_raw_parts(p, len as usize)).into_owned();
+    match lx().read_ci(&path) { Some(b) => { FILEBUF = b; FILEBUF.len() as i32 } None => { FILEBUF = Vec::new(); -1 } }
+}
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn plonk_lx_filebuf() -> *const u8 { unsafe { FILEBUF.as_ptr() } }
+
+/// The topmost visible window at a screen position (0 = none).
+#[no_mangle]
+pub extern "C" fn plonk_lx_window_at(x: i32, y: i32) -> u32 { lx().window_at(x, y) }

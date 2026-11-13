@@ -28,9 +28,27 @@
   #tasks .task.active::after { width: 18px; margin-left: -9px; background: var(--ac); }
   #tasks .task.min { opacity: .7; }
   #clock { font-size: 12px; text-align: right; line-height: 1.25; padding: 0 8px; white-space: pre; }
-  #startmenu { position: absolute; left: 8px; bottom: 54px; min-width: 220px; padding: 8px; border-radius: 10px; background: var(--tb); border: 1px solid var(--tbl); box-shadow: 0 8px 28px #0008; display: none; flex-direction: column; }
+  #startmenu { position: absolute; left: 8px; bottom: 54px; width: 380px; max-height: min(620px, 80vh); padding: 14px 8px 8px; border-radius: 10px; background: var(--tb); border: 1px solid var(--tbl); box-shadow: 0 8px 28px #0008; display: none; flex-direction: column; box-sizing: border-box; z-index: 5; }
   #startmenu.open { display: flex; }
   #startmenu button { text-align: left; height: 34px; }
+  #startmenu h4 { margin: 4px 10px 6px; font: 600 13px system-ui, "Segoe UI", sans-serif; opacity: .9; }
+  #startmenu .pins { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 8px; }
+  #startmenu .pins button { height: 56px; padding: 4px; text-align: center; font-size: 12px; }
+  #startmenu .apps { overflow-y: auto; min-height: 60px; flex: 1; }
+  #startmenu .apps button { display: flex; align-items: center; gap: 10px; width: 100%; }
+  #startmenu .apps img { width: 22px; height: 22px; object-fit: contain; }
+  #startmenu .apps .grp { margin: 8px 10px 2px; font-size: 11px; opacity: .65; }
+  #startmenu .none { margin: 6px 10px; font-size: 12px; opacity: .6; }
+  #dicons { position: absolute; inset: 0; pointer-events: none; display: flex; flex-flow: column wrap; align-content: flex-start; padding: 6px; gap: 2px; overflow: hidden; line-height: 1.25; --dfg: #fff; --dsel: #4cc2ff55; }
+  #dicons.light { --dfg: #111; --dsel: #0067c033; }
+  #dicons.blocked .dic { pointer-events: none; }
+  .dic { pointer-events: auto; width: 82px; padding: 5px 2px 4px; border-radius: 4px; border: 1px solid transparent; text-align: center; color: var(--dfg); font: 12px system-ui, "Segoe UI", sans-serif; cursor: default; user-select: none; }
+  #dicons:not(.light) .dic span { text-shadow: 0 1px 3px #000c; }
+  #dicons.light .dic span { text-shadow: 0 0 3px #fffc; }
+  .dic img { width: 40px; height: 40px; object-fit: contain; display: block; margin: 0 auto 3px; }
+  .dic span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
+  .dic:hover { background: #ffffff1a; }
+  .dic.sel { background: var(--dsel); border-color: var(--dsel); }
 </style>
 <div id="bar">
   <strong>Plonk · real Wine</strong>
@@ -43,7 +61,7 @@
   <label class="btn">Run your own .exe…<input id="upload" type="file" multiple hidden></label>
   <span id="status"><progress id="prog" max="1" value="0"></progress> <span id="stxt">loading…</span></span>
 </div>
-<div id="wrap"><div id="stage"><canvas id="screen" width="1024" height="768" tabindex="0"></canvas><canvas id="glov"></canvas></div></div>
+<div id="wrap"><div id="stage"><canvas id="screen" width="1024" height="768" tabindex="0"></canvas><canvas id="glov"></canvas><div id="dicons"></div></div></div>
 <div id="taskbar"><button id="start" title="Start"><svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4cc2ff" d="M0 2.5 7.5 1.5v6.8H0zM8.6 1.4 18 0v8.3H8.6zM0 9.7h7.5v6.8L0 15.5zM8.6 9.7H18V18l-9.4-1.3z"/></svg></button><div id="tasks"></div><div id="clock"></div><div id="startmenu"></div></div>
 <pre id="log"></pre>
 <script type="module">
@@ -71,13 +89,95 @@ function updateTasks() {
 }
 const tick = () => { const d = new Date(); $("clock").textContent = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) + "\n" + d.toLocaleDateString(); };
 tick(); setInterval(tick, 10000);
+// ---- shortcuts: .lnk files of the Wine prefix (Desktop, Start Menu) as desktop icons and Start menu entries ----
+import { parseList, splitArgs, iconFromBytes, genericIcon, makeLnk } from "./shortcuts.mjs";
+let shortcuts = [], lnkGen = -1, selIcon = null;
+$("dicons").classList.toggle("light", !isDark);
+const iconCache = new Map(); // guest path -> blob/data URL
+function iconFor(path) {
+  if (!path || !x) return genericIcon;
+  if (iconCache.has(path)) return iconCache.get(path);
+  let url = null;
+  try {
+    const p = enc.encode(path), n = x.plonk_lx_read_file(put(p), p.length);
+    if (n > 0) url = iconFromBytes(new Uint8Array(x.memory.buffer, x.plonk_lx_filebuf(), n).slice());
+    if (n < 0) return genericIcon; // not there (yet): do not cache, the next refresh tries again
+  } catch {}
+  iconCache.set(path, url || genericIcon);
+  return url || genericIcon;
+}
+const toWin = (g) => g ? (g.startsWith("/home/user/.wine/drive_c") ? "C:" + g.slice(24) : "Z:" + g).replaceAll("/", "\\") : "";
+function launchShortcut(s) {
+  const title = '"' + s.name.replaceAll('"', "") + '"'; // start.exe takes a quoted first word as the window title
+  spawn("start", ...(s.cwd ? ["/d", toWin(s.cwd)] : []), title, s.wtarget, ...splitArgs(s.args));
+  $("screen").focus();
+}
+function renderDesktop() {
+  const box = $("dicons"), items = shortcuts.filter((s) => s.kind === "desktop");
+  box.replaceChildren(...items.map((s) => {
+    const d = document.createElement("div"), im = document.createElement("img"), sp = document.createElement("span");
+    d.className = "dic"; d.title = s.name; im.src = iconFor(s.icon); im.draggable = false; sp.textContent = s.name;
+    d.append(im, sp);
+    d.onpointerdown = (e) => { e.stopPropagation(); selIcon?.classList.remove("sel"); selIcon = d; d.classList.add("sel"); };
+    d.ondblclick = () => launchShortcut(s);
+    return d;
+  }));
+  selIcon = null;
+}
+function renderStart() {
+  const m = $("startmenu"), mk = (t, c) => { const e = document.createElement(t); if (c) e.className = c; return e; };
+  const pins = mk("div", "pins");
+  for (const src of document.querySelectorAll("#bar button[data-cmd]")) {
+    const b = mk("button"); b.textContent = src.textContent; b.onclick = () => { m.classList.remove("open"); src.click(); }; pins.append(b);
+  }
+  const apps = mk("div", "apps"), items = shortcuts.filter((s) => s.kind === "start" && !/^uninstall|uninstall$/i.test(s.name));
+  if (!items.length) { const n = mk("div", "none"); n.textContent = "Programs you install appear here."; apps.append(n); }
+  let g = null;
+  for (const s of items.sort((a, b) => (a.group + "/" + a.name).localeCompare(b.group + "/" + b.name))) {
+    if (s.group !== g) { g = s.group; if (g) { const h = mk("div", "grp"); h.textContent = g; apps.append(h); } }
+    const b = mk("button"), im = document.createElement("img"), sp = mk("span");
+    im.src = iconFor(s.icon); sp.textContent = s.name; b.append(im, sp);
+    b.onclick = () => { m.classList.remove("open"); launchShortcut(s); };
+    apps.append(b);
+  }
+  const h1 = mk("h4"), h2 = mk("h4");
+  h1.textContent = "Pinned"; h2.textContent = "All apps";
+  m.replaceChildren(h1, pins, h2, apps);
+}
+function refreshShortcuts() {
+  if (!x) return;
+  const g = x.plonk_lx_lnk_gen();
+  if (g === lnkGen) return;
+  lnkGen = g;
+  x.plonk_lx_shortcuts();
+  shortcuts = parseList(msg());
+  renderDesktop(); updateIconVis();
+  if ($("startmenu").classList.contains("open")) renderStart();
+}
+setInterval(refreshShortcuts, 2000);
+// icons under an application window are hidden (the icon layer is HTML above the canvas)
+function updateIconVis() {
+  if (!x) return;
+  const r = $("screen").getBoundingClientRect(), k = W / r.width, box = $("dicons").getBoundingClientRect();
+  for (const d of $("dicons").children) {
+    const b = d.getBoundingClientRect(), x0 = (b.left - r.left) * k, y0 = (b.top - r.top) * k, x1 = (b.right - r.left) * k, y1 = (b.bottom - r.top) * k;
+    const pts = [[x0, y0], [x1, y0], [x0, y1], [x1, y1], [(x0 + x1) / 2, (y0 + y1) / 2]];
+    d.style.visibility = pts.some(([px, py]) => x.plonk_lx_window_at(Math.round(px), Math.round(py)) !== 0) ? "hidden" : "";
+  }
+}
+// desktop icons must not cover windows: while the pointer is over a window the icons let events through to the canvas
+$("stage").addEventListener("pointermove", (e) => {
+  if (!x) return;
+  const r = $("screen").getBoundingClientRect(), px = Math.round((e.clientX - r.left) * W / r.width), py = Math.round((e.clientY - r.top) * H / r.height);
+  $("dicons").classList.toggle("blocked", x.plonk_lx_window_at(px, py) !== 0);
+});
+$("screen").addEventListener("pointerdown", () => { selIcon?.classList.remove("sel"); selIcon = null; }, true);
 $("start").onclick = (e) => {
   e.stopPropagation();
   const m = $("startmenu");
   if (!m.classList.toggle("open")) return;
-  m.replaceChildren(...[...document.querySelectorAll("#bar button[data-cmd]")].map((src) => {
-    const b = document.createElement("button"); b.textContent = src.textContent; b.onclick = () => { m.classList.remove("open"); src.click(); }; return b;
-  }));
+  refreshShortcuts();
+  renderStart();
 };
 document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#startmenu, #start")) $("startmenu").classList.remove("open"); });
 const canvas = $("screen");
@@ -192,7 +292,7 @@ function pump() {
   if (out) log(out);
   if (r < 0) { dead = true; log("kernel error: " + msg() + "\n"); status("stopped"); return; }
   const f = x.plonk_lx_frame();
-  if (f !== lastFrame) { lastFrame = f; paint(); updateTasks(); }
+  if (f !== lastFrame) { lastFrame = f; paint(); updateTasks(); updateIconVis(); }
   pumpGL();
   // everything waiting: poll timers/input at a relaxed rate; busy: go again at once (a message, since timers are clamped to 4 ms)
   if (r === 1) timer = setTimeout(pump, 8); else { timer = -1; again.port2.postMessage(0); }
@@ -379,6 +479,13 @@ try {
     if (exe) { spawn("/home/user/app/" + exe.name); canvas.focus(); } else log("no .exe among the chosen files\n");
     e.target.value = "";
   };
+  if (new URLSearchParams(location.search).has("lnktest")) { // test hook: hand-made shortcuts in the prefix
+    const u = "/home/user/.wine/drive_c/users/user/", sm = u + "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/";
+    addFile(u + "Desktop/Notepad.lnk", makeLnk("C:\\windows\\system32\\notepad.exe"));
+    addFile(u + "Desktop/Minesweeper game.lnk", makeLnk("C:\\windows\\system32\\winemine.exe", "", "C:\\windows"));
+    addFile(sm + "Demo Group/Wine Mine.lnk", makeLnk("C:\\windows\\system32\\winemine.exe"));
+    addFile(sm + "Editor.lnk", makeLnk("C:\\windows\\system32\\notepad.exe"));
+  }
   const want = new URLSearchParams(location.search).get("run");
   if (want) { // ?run=notepad  or  ?run=/home/user/gl_cube.exe (test programs are fetched on demand)
     const args = want.split(" ");
