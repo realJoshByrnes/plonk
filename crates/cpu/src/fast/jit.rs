@@ -24,6 +24,10 @@ const O_EIP: u32 = offset_of!(Cpu, eip) as u32;
 const O_EF: u32 = offset_of!(Cpu, eflags) as u32;
 const O_FS: u32 = offset_of!(Cpu, fs_base) as u32;
 const O_GS: u32 = offset_of!(Cpu, gs_base) as u32;
+const O_FST: u32 = offset_of!(Cpu, fst) as u32;
+const O_FTOP: u32 = offset_of!(Cpu, ftop) as u32;
+const O_FSW: u32 = offset_of!(Cpu, fsw) as u32;
+const O_FCW: u32 = offset_of!(Cpu, fcw) as u32;
 
 // parameters and locals of a translated function
 const CPU: u32 = 0;
@@ -40,6 +44,8 @@ const T: u32 = 10;
 const EF: u32 = 11;
 const K: u32 = 12; // index of the instruction being executed (what a bail-out returns)
 const P64: u32 = 13; // the one i64 local
+const FA: u32 = 14; // the two f64 locals of the x87 code
+const FB: u32 = 15;
 
 /// CF PF AF ZF SF OF
 const FLAGS6: u32 = 0x8D5;
@@ -86,6 +92,76 @@ impl Fx {
         if i.im != 0 { self.getr(i.idx, 32); if i.sc != 0 { self.c(i.sc as u32); self.shl(); } if any { self.add(); } any = true; }
         if i.disp != 0 || !any { self.c(i.disp); if any { self.add(); } }
         if i.seg != 0 { self.get(CPU); self.load(32, if i.seg == 1 { O_FS } else { O_GS }); self.add(); }
+    }
+    // ---- x87: the registers are f64 in the Cpu, exactly as in fpu.rs ----
+    fn f64c(&mut self, v: f64) { self.op(0x44); self.b.extend_from_slice(&v.to_le_bytes()); }
+    /// Address of ST(i) (the f64 is then at offset O_FST).
+    fn st_addr(&mut self, i: u32) {
+        self.get(CPU); self.get(CPU); self.load(32, O_FTOP);
+        if i != 0 { self.c(i); self.add(); }
+        self.c(7); self.and(); self.c(3); self.shl(); self.add();
+    }
+    fn fget(&mut self, i: u32) { self.st_addr(i); self.mem(0x2B, O_FST); }
+    fn fset(&mut self, i: u32, v: impl FnOnce(&mut Fx)) { self.st_addr(i); v(self); self.mem(0x39, O_FST); }
+    /// ftop = ftop + d (mod 8): 1 pops, 7 pushes
+    fn ftop_add(&mut self, d: u32) { self.get(CPU); self.get(CPU); self.load(32, O_FTOP); self.c(d); self.add(); self.c(7); self.and(); self.store(32, O_FTOP); }
+    /// FA op FB as the x87 arithmetic selector `sub` (0 add, 1 mul, 4 sub, 5 subr, 6 div, 7 divr)
+    fn farith(&mut self, sub: u32) {
+        match sub {
+            0 => { self.get(FA); self.get(FB); self.op(0xA0); }
+            1 => { self.get(FA); self.get(FB); self.op(0xA2); }
+            4 => { self.get(FA); self.get(FB); self.op(0xA1); }
+            5 => { self.get(FB); self.get(FA); self.op(0xA1); }
+            6 => { self.get(FA); self.get(FB); self.op(0xA3); }
+            _ => { self.get(FB); self.get(FA); self.op(0xA3); }
+        }
+    }
+    /// 1 when FA or FB is a NaN
+    fn unord(&mut self) { self.get(FA); self.get(FA); self.op(0x62); self.get(FB); self.get(FB); self.op(0x62); self.or(); }
+    /// fcom: C3 C2 C0 of the status word from FA ? FB
+    fn fcmp(&mut self) {
+        self.get(CPU);
+        self.get(CPU); self.load(32, O_FSW); self.c(!0x4500u32); self.and();
+        self.get(FA); self.get(FB); self.op(0x63); self.c(8); self.shl(); self.or();
+        self.get(FA); self.get(FB); self.op(0x61); self.c(14); self.shl(); self.or();
+        self.unord(); self.c(0x4500); self.op(0x6C); self.or();
+        self.store(32, O_FSW);
+    }
+    /// fcomi: ZF PF CF of the flags from FA ? FB
+    fn fcomi(&mut self) {
+        self.get(EF); self.c(!0x45u32); self.and();
+        self.get(FA); self.get(FB); self.op(0x61); self.unord(); self.or(); self.c(6); self.shl(); self.or();
+        self.unord(); self.c(2); self.shl(); self.or();
+        self.get(FA); self.get(FB); self.op(0x63); self.unord(); self.or(); self.or();
+        self.set(EF);
+    }
+    /// FA rounded as the control word says (or truncated), on the stack
+    fn fround(&mut self, trunc: bool) {
+        if trunc { self.get(FA); self.op(0x9D); return; }
+        // select(a, b, c) is a when c is non-zero: each step keeps the value so far unless the mode asks for the other
+        self.get(CPU); self.load(32, O_FCW); self.c(10); self.shr_u(); self.c(3); self.and(); self.set(X);
+        self.get(FA); self.op(0x9D); self.get(FA); self.op(0x9B); self.get(X); self.c(2); self.op(0x47); self.op(0x1B);
+        self.get(FA); self.op(0x9C); self.get(X); self.c(1); self.op(0x47); self.op(0x1B);
+        self.get(FA); self.op(0x9E); self.get(X); self.op(0x1B);
+    }
+    /// fist/fistp: ST(0) rounded to a `bits` wide integer stored at HP (checked); out of range or NaN gives the "integer indefinite"
+    fn fstore_int(&mut self, bits: u32, trunc: bool) {
+        self.fget(0); self.set(FA); self.fround(trunc); self.set(FA);
+        let (lo, hi) = match bits { 16 => (-32768.0, 32767.0), 32 => (-2147483648.0, 2147483647.0), _ => (-9.223372036854775808e18, 9.223372036854775807e18) };
+        self.get(HP);
+        self.get(FA);
+        if bits == 64 { self.op(0xFC); self.op(0x06); self.op(0x42); self.b.extend_from_slice(&[0x80; 9]); self.b.push(0x7F); }
+        else { self.op(0xFC); self.op(0x02); self.c(if bits == 16 { 0x8000 } else { 0x8000_0000 }); }
+        self.get(FA); self.f64c(lo); self.op(0x66); self.get(FA); self.f64c(hi); self.op(0x65); self.and();
+        self.op(0x1B);
+        if bits == 64 { self.mem(0x37, 0); } else { self.store(bits, 0); }
+    }
+    /// The 64 bits at the guest address in A, as raw i64 (page checks as `read`).
+    fn read64(&mut self) {
+        self.page();
+        self.get(E); self.c(1); self.and(); self.eqz(); self.bail_if();
+        self.cross(64);
+        self.host(); self.mem(0x29, 0);
     }
     /// Page lookup for the address in A: leaves the table entry in E. Bails when the address is outside the address space.
     fn page(&mut self) {
@@ -345,6 +421,7 @@ fn insn(f: &mut Fx, i: &Insn, next: u32, flags: bool, side_exit: Option<u32>) ->
             f.get(CPU); f.get(A); f.c(4u32.wrapping_add(if i.h == H::RetN { i.imm } else { 0 })); f.add(); f.store(32, Fx::roff(ESP as u8, 32));
             f.set_eip(|f| f.get(T));
         }
+        H::Fpu => return fpu(f, i),
         _ => return false,
     }
     true
@@ -354,7 +431,7 @@ fn insn(f: &mut Fx, i: &Insn, next: u32, flags: bool, side_exit: Option<u32>) ->
 fn translate(insns: &[Insn], pc: u32) -> Option<(Vec<u8>, u32)> {
     let mut f = Fx { b: Vec::new(), depth: 1 };
     // locals: 9 x i32 (A..K), 1 x i64
-    f.b.extend_from_slice(&[2, 9, 0x7F, 1, 0x7E]);
+    f.b.extend_from_slice(&[3, 9, 0x7F, 1, 0x7E, 2, 0x7C]);
     f.get(CPU); f.load(32, O_EF); f.set(EF);
     f.op(0x02); f.op(0x40); // block: a branch out of it is a bail-out
     let (mut at, mut jn, mut ended) = (pc, 0u32, false);
@@ -506,4 +583,113 @@ pub fn profile_report() -> String {
 }
 pub(super) fn tally(jit_insns: u64, interp_insns: u64, bailed: bool, has_jit: bool) {
     JIT.with(|j| { let mut j = j.borrow_mut(); j.stats[3] += jit_insns; j.stats[4] += interp_insns; j.stats[5] += bailed as u64; j.stats[6] += has_jit as u64; j.stats[7] += 1; });
+}
+
+/// x87 instruction (decoded with the ModRM byte in `imm`), mirroring fpu.rs. False: not handled here.
+thread_local! { static FPU_OFF: std::cell::Cell<u32> = std::cell::Cell::new(0); }
+/// Debugging: bit (opcode - 0xD8) * 2 + (register form) switches that class of x87 translation off.
+pub fn fpu_off(mask: u32) { FPU_OFF.with(|m| m.set(mask)); }
+
+fn fpu(f: &mut Fx, i: &Insn) -> bool {
+    let (op, mb) = (i.aux, i.imm as u8);
+    if FPU_OFF.with(|m| m.get()) >> ((op as u32 - 0xD8) * 2 + (!i.m) as u32) & 1 != 0 { return false; }
+    let (reg, ri) = ((mb >> 3) & 7, (mb & 7) as u32);
+    if i.m && FPU_OFF.with(|m| m.get()) >> (16 + reg) & 1 != 0 { return false; }
+    if i.m {
+        // memory operand: the address into A, every check before the first change of state
+        let load_f32 = |f: &mut Fx| { f.ea(i); f.set(A); f.read(32); f.op(0xBE); f.op(0xBB); };
+        let load_f64 = |f: &mut Fx| { f.ea(i); f.set(A); f.page(); f.get(E); f.c(1); f.and(); f.eqz(); f.bail_if(); f.cross(64); f.host(); f.mem(0x2B, 0); };
+        let load_i32 = |f: &mut Fx| { f.ea(i); f.set(A); f.read(32); f.op(0xB7); };
+        let load_i16 = |f: &mut Fx| { f.ea(i); f.set(A); f.read(16); f.op(0xC1); f.op(0xB7); };
+        let load_i64 = |f: &mut Fx| { f.ea(i); f.set(A); f.read64(); f.op(0xB9); };
+        let push = |f: &mut Fx| { f.ftop_add(7); f.fset(0, |f| f.get(FA)); };
+        match (op, reg) {
+            (0xD8, _) | (0xDC, _) | (0xDA, _) | (0xDE, _) => {
+                match op { 0xD8 => load_f32(f), 0xDC => load_f64(f), 0xDA => load_i32(f), _ => load_i16(f) }
+                f.set(FB); f.fget(0); f.set(FA);
+                if reg == 2 || reg == 3 { f.fcmp(); if reg == 3 { f.ftop_add(1); } } else { f.fset(0, |f| f.farith(reg as u32)); }
+            }
+            (0xD9, 0) => { load_f32(f); f.set(FA); push(f); }
+            (0xD9, 2) | (0xD9, 3) => {
+                f.ea(i); f.set(A); f.wcheck(32);
+                f.get(HP); f.fget(0); f.op(0xB6); f.mem(0x38, 0);
+                if reg == 3 { f.ftop_add(1); }
+            }
+            (0xD9, 5) => { f.get(CPU); f.ea(i); f.set(A); f.read(16); f.store(32, O_FCW); }
+            (0xD9, 7) => { f.ea(i); f.set(A); f.wcheck(16); f.get(HP); f.get(CPU); f.load(32, O_FCW); f.store(16, 0); }
+            (0xDB, 0) => { load_i32(f); f.set(FA); push(f); }
+            (0xDB, 1) | (0xDB, 2) | (0xDB, 3) => { f.ea(i); f.set(A); f.wcheck(32); f.fstore_int(32, reg == 1); if reg != 2 { f.ftop_add(1); } }
+            (0xDD, 0) => { load_f64(f); f.set(FA); push(f); }
+            (0xDD, 1) => { f.ea(i); f.set(A); f.wcheck(64); f.fstore_int(64, true); f.ftop_add(1); }
+            (0xDD, 2) | (0xDD, 3) => {
+                f.ea(i); f.set(A); f.wcheck(64);
+                f.get(HP); f.fget(0); f.mem(0x39, 0);
+                if reg == 3 { f.ftop_add(1); }
+            }
+            (0xDD, 7) => {
+                f.ea(i); f.set(A); f.wcheck(16);
+                f.get(HP); f.get(CPU); f.load(32, O_FSW); f.c(!0x3800u32); f.and(); f.get(CPU); f.load(32, O_FTOP); f.c(11); f.shl(); f.or(); f.store(16, 0);
+            }
+            (0xDF, 0) => { load_i16(f); f.set(FA); push(f); }
+            (0xDF, 1) | (0xDF, 2) | (0xDF, 3) => { f.ea(i); f.set(A); f.wcheck(16); f.fstore_int(16, reg == 1); if reg != 2 { f.ftop_add(1); } }
+            (0xDF, 5) => { load_i64(f); f.set(FA); push(f); }
+            (0xDF, 7) => { f.ea(i); f.set(A); f.wcheck(64); f.fstore_int(64, false); f.ftop_add(1); }
+            _ => return false,
+        }
+        return true;
+    }
+    let cmov = |f: &mut Fx, neg: bool| {
+        let mask = match reg { 0 => 1, 1 => 0x40, 2 => 0x41, _ => 4 };
+        f.fset(0, |f| { f.fget(ri); f.fget(0); f.get(EF); f.c(mask); f.and(); if neg { f.eqz(); } f.op(0x1B); });
+    };
+    match (op, reg, ri) {
+        (0xD8, _, _) => {
+            f.fget(0); f.set(FA); f.fget(ri); f.set(FB);
+            if reg == 2 || reg == 3 { f.fcmp(); if reg == 3 { f.ftop_add(1); } } else { f.fset(0, |f| f.farith(reg as u32)); }
+        }
+        (0xDE, 3, 1) => { f.fget(0); f.set(FA); f.fget(1); f.set(FB); f.fcmp(); f.ftop_add(1); f.ftop_add(1); }
+        (0xDC, 2..=3, _) | (0xDE, 2..=3, _) => return false,
+        (0xDC, _, _) | (0xDE, _, _) => {
+            let sub = match reg { 4 => 5, 5 => 4, 6 => 7, 7 => 6, r => r } as u32;
+            f.fget(ri); f.set(FA); f.fget(0); f.set(FB);
+            f.fset(ri, |f| f.farith(sub));
+            if op == 0xDE { f.ftop_add(1); }
+        }
+        (0xD9, 0, _) => { f.fget(ri); f.set(FA); f.ftop_add(7); f.fset(0, |f| f.get(FA)); }
+        (0xD9, 1, _) => { f.fget(0); f.set(FA); f.fget(ri); f.set(FB); f.fset(0, |f| f.get(FB)); f.fset(ri, |f| f.get(FA)); }
+        (0xD9, 2, 0) => {}
+        (0xD9, 4, 0) => f.fset(0, |f| { f.fget(0); f.op(0x9A); }),
+        (0xD9, 4, 1) => f.fset(0, |f| { f.fget(0); f.op(0x99); }),
+        (0xD9, 4, 4) => { f.fget(0); f.set(FA); f.f64c(0.0); f.set(FB); f.fcmp(); }
+        (0xD9, 5, k) if k != 7 => {
+            let v = [1.0, 10f64.log2(), std::f64::consts::LOG2_E, std::f64::consts::PI, 2f64.log10(), std::f64::consts::LN_2, 0.0][k as usize];
+            f.ftop_add(7); f.fset(0, |f| f.f64c(v));
+        }
+        (0xD9, 6, 6) => f.ftop_add(7),
+        (0xD9, 6, 7) => f.ftop_add(1),
+        (0xD9, 7, 2) => f.fset(0, |f| { f.fget(0); f.op(0x9F); }),
+        (0xD9, 7, 4) => { f.fget(0); f.set(FA); f.fset(0, |f| f.fround(false)); }
+        (0xDA, 0..=3, _) => cmov(f, false),
+        (0xDA, 5, 1) => { f.fget(0); f.set(FA); f.fget(1); f.set(FB); f.fcmp(); f.ftop_add(1); f.ftop_add(1); }
+        (0xDB, 0..=3, _) => cmov(f, true),
+        (0xDB, 4, 2) => { f.get(CPU); f.get(CPU); f.load(32, O_FSW); f.c(!0x80FFu32); f.and(); f.store(32, O_FSW); }
+        (0xDB, 4, 3) => {
+            f.get(CPU); f.c(0x37F); f.store(32, O_FCW);
+            f.get(CPU); f.c(0); f.store(32, O_FSW);
+            f.get(CPU); f.c(0); f.store(32, O_FTOP);
+        }
+        (0xDB, 5..=6, _) => { f.fget(0); f.set(FA); f.fget(ri); f.set(FB); f.fcomi(); }
+        (0xDD, 0, _) => {}
+        (0xDD, 2..=3, _) => { f.fget(0); f.set(FA); f.fset(ri, |f| f.get(FA)); if reg == 3 { f.ftop_add(1); } }
+        (0xDD, 4..=5, _) => { f.fget(0); f.set(FA); f.fget(ri); f.set(FB); f.fcmp(); if reg == 5 { f.ftop_add(1); } }
+        (0xDF, 4, 0) => {
+            f.get(CPU);
+            f.get(CPU); f.load(32, O_R); f.c(0xFFFF_0000); f.and();
+            f.get(CPU); f.load(32, O_FSW); f.c(!0x3800u32); f.and(); f.get(CPU); f.load(32, O_FTOP); f.c(11); f.shl(); f.or();
+            f.or(); f.store(32, O_R);
+        }
+        (0xDF, 5..=6, _) => { f.fget(0); f.set(FA); f.fget(ri); f.set(FB); f.fcomi(); f.ftop_add(1); }
+        _ => return false,
+    }
+    true
 }

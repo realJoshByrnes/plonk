@@ -51,7 +51,7 @@ impl Cpu {
     fn round(&self, v: f64, trunc: bool) -> f64 {
         if trunc { return v.trunc(); }
         match (self.fcw >> 10) & 3 {
-            0 => { let r = v.round(); if (v - v.trunc()).abs() == 0.5 && r % 2.0 != 0.0 { r - v.signum() } else { r } }
+            0 => v.round_ties_even(),
             1 => v.floor(),
             2 => v.ceil(),
             _ => v.trunc(),

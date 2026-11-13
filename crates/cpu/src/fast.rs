@@ -214,7 +214,7 @@ fn decode_opt(b: &[u8], pc: u32) -> Option<Insn> {
             i.reg = sub;
             i.h = match sub { 0 | 1 => H::IncDecRm, 2 => H::CallRm, 4 => H::JmpRm, 6 => H::PushRm, _ => return None };
         }
-        0xD8..=0xDF => { step_modrm!(false); i.h = H::Fpu; i.aux = op; i.reg = seg_end(b, pc); }
+        0xD8..=0xDF => { let mb = *b.get(p)?; step_modrm!(false); i.h = H::Fpu; i.aux = op; i.reg = seg_end(b, pc); i.imm = mb as u32; } // imm: the ModRM byte (the JIT needs its reg/rm fields)
         0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F | 0x60 | 0x61 | 0x9B | 0x9C..=0x9F | 0xA4..=0xA7 | 0xAA..=0xAF | 0xD7 | 0xF5 | 0xF8..=0xFD | 0xCC | 0xCF | 0xF4 => i.h = H::Step,
         0xCD | 0xE0..=0xE3 => { rd8(b, &mut p)?; i.h = H::Step; }
         0xA0..=0xA3 => { // mov al/eax, [moffs] and back: the same as a mov with an absolute address and no base
