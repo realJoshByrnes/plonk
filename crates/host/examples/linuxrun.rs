@@ -44,7 +44,7 @@ fn main() {
     env.extend(extra);
     // the program is a guest path, or failing that a host file
     if p.spawn_path(&argv, &env).is_err() { p.load(&std::fs::read(&a[1]).expect("program not found in the guest tree or on the host"), &argv, &env).unwrap(); }
-    p.wait_all = restored || std::env::var("SAVE").is_ok();
+    p.wait_all = restored || std::env::var("SAVE").is_ok() || std::env::var("WAIT").is_ok();
     p.auto_time = std::env::var("AUTO").is_ok(); // jump the guest clock whenever everything waits on a timeout
     // run; whenever everything blocks, let a second of guest time pass (up to IDLE rounds)
     let idle: u32 = std::env::var("IDLE").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
